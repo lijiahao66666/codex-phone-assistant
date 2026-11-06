@@ -5,8 +5,32 @@
 > 这不是 OpenAI 官方产品。桌面端依赖未公开、可能随 Codex 版本变化的 IPC 协议。
 >
 > 手机端是电脑版 Codex 的伴生界面，不是完整替代。目标模式、插件、应用、模型等电脑端设置不会自动映射到手机。
+>
+> 仓库目前为私有。图片、GIF 和 Release 附件需要登录有访问权限的 GitHub 账号；第三方 Markdown 阅读器可能无法加载私有仓库媒体。
 
 ![电脑与手机同时查看同一 Codex 任务](docs/assets/desktop-phone-view.png)
+
+手机发送消息后，电脑端同步收到并更新任务：
+
+![手机发送消息，电脑收到消息的演示](docs/assets/phone-send-demo.gif)
+
+[查看原始 MP4 演示](docs/assets/phone-send-demo.mp4)
+
+## 下载
+
+从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.0) 下载最新安装包：
+
+| 平台 | 安装包 | 说明 |
+| --- | --- | --- |
+| Windows | [安装器](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-windows-x64-setup.exe) · [便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-windows-x64.zip) | Windows 10/11 x64 |
+| macOS | [Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-macos-arm64.dmg) | macOS 12+，Apple 芯片 |
+
+校验文件：[SHA256SUMS.txt](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/SHA256SUMS.txt)
+
+安装步骤：
+
+- [Windows 安装与使用](windows/README.md)
+- [macOS 安装与使用](macos/README.md)
 
 ## 手机端能力概览
 
@@ -77,7 +101,7 @@ build/windows/
   codex-phone-assistant-windows-x64-setup.exe
 ```
 
-平台细节、安装、首次配对和卸载步骤见 [windows/README.md](windows/README.md)。
+平台细节、安装、首次配对和卸载步骤见 [Windows 安装与使用](windows/README.md)。
 
 ## macOS 构建
 
@@ -88,9 +112,7 @@ npm ci
 npm run build:macos
 ```
 
-默认输出为 `build/codex手机助手.app`。当前仓库提供构建路径，但本次改动只在 Windows 真机完成了完整 H5 联调；macOS 安装、配对和媒体流程仍需单独验收。详见 [macos/README.md](macos/README.md)。
-
-macOS 下载、未公证提示处理、配对和常见问题见 [macOS 安装与首次打开](macos/README.md)。
+默认输出为 `build/codex手机助手.app`。当前仓库提供构建路径，但本次改动只在 Windows 真机完成了完整 H5 联调；macOS 安装、配对和媒体流程仍需单独验收。下载、未公证提示处理、配对和常见问题见 [macOS 安装与使用](macos/README.md)。
 
 ## 配置
 
