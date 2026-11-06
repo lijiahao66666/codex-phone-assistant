@@ -17,6 +17,13 @@ const attachmentControl = document.querySelector('#attachment-control');
 const attachmentToggle = document.querySelector('#attachment-toggle');
 const attachmentMenu = document.querySelector('#attachment-menu');
 const imageFile = document.querySelector('#image-file');
+const cameraChoose = document.createElement('button');
+cameraChoose.type = 'button'; cameraChoose.textContent = '拍照'; cameraChoose.hidden = true; cameraChoose.disabled = true;
+if (attachmentMenu.insertBefore) attachmentMenu.insertBefore(cameraChoose, imageChoose); else attachmentMenu.append(cameraChoose);
+const cameraInput = document.createElement('input');
+cameraInput.type = 'file'; cameraInput.accept = 'image/*'; cameraInput.setAttribute('capture', 'environment'); cameraInput.hidden = true;
+attachmentControl.append(cameraInput);
+imageChoose.textContent = '照片'; imageFile.accept = 'image/*';
 const fileChoose = document.querySelector('#file-choose');
 const modeChoose = document.querySelector('#mode-choose');
 const modeStatus = document.querySelector('#mode-status');
@@ -61,7 +68,7 @@ const deviceMenu = document.querySelector('#devices');
 const deviceScrim = document.querySelector('#device-scrim');
 const deviceCurrent = document.querySelector('#device-current');
 const deviceList = document.querySelector('#device-list');
-let historyScope = null, historyScopeGeneration = 0, deviceLoadGeneration = 0;
+let historyScope = null, historyScopeGeneration = 0, deviceLoadGeneration = 0, homeConnectionConfirmed = false;
 const deviceChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('codex-device-selection-v1') : null;
 async function scopedFetch(url, options = {}) {
   const path = typeof url === 'string' ? url : '';
@@ -75,7 +82,7 @@ async function scopedFetch(url, options = {}) {
   return response;
 }
 function resetHistoryScope(clearStored = false) {
-  historyScope = null; historyScopeGeneration++; deviceLoadGeneration++;
+  historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
 }
 function deviceChanged() {
   resetHistoryScope(); clearTimeout(reconnectTimer); active?.abort(); active = undefined;
@@ -91,9 +98,11 @@ let reconnectTimer;
 let selectedId = null;
 let selectedTitle = '';
 const inputDrafts = new Map();
+const skippedAsyncQuestions = new Set();
 let previewGeneration = 0;
 let imageRenderGeneration = 0;
 const imagePreviews = new Map();
+const videoPreviews = new Map();
 const imageObservers = new Set();
 let inlineImageLoads = 0;
 const inlineImageQueue = [];
@@ -117,12 +126,26 @@ function clearImageObservers() {
   imageObservers.clear();
   inlineImageQueue.length = 0;
   for (const entry of imagePreviews.values()) entry.waiters.clear();
+  for (const entry of videoPreviews.values()) entry.wrappers.clear();
+}
+function pruneVideoPreviews() {
+  for (const [key, entry] of videoPreviews) {
+    for (const position of entry.players.keys()) if (!entry.wrappers.has(position)) entry.players.delete(position);
+    if (!entry.wrappers.size) {
+      entry.controller?.abort(); if (entry.url) URL.revokeObjectURL(entry.url);
+      videoPreviews.delete(key);
+    }
+  }
 }
 function clearImagePreviews() {
   previewGeneration++;
   clearImageObservers();
+  document.querySelectorAll?.('.image-view-overlay').forEach(overlay => overlay.remove());
+  document.querySelectorAll?.('.file-view-overlay').forEach(overlay => overlay.remove());
   for (const entry of imagePreviews.values()) { entry.controller?.abort(); if (entry.url) URL.revokeObjectURL(entry.url); }
   imagePreviews.clear();
+  for (const entry of videoPreviews.values()) { entry.controller?.abort(); if (entry.url) URL.revokeObjectURL(entry.url); }
+  videoPreviews.clear();
 }
 function activityIcon(kind) {
   const paths = {
@@ -144,7 +167,8 @@ function imagePreviewButton(handle, threadId, inline = false, label = '查看图
   if (!inline) button.setAttribute('aria-expanded', 'false');
   const setLabel = text => { button.textContent = text; if (!inline) button.append(activityIcon('image')); };
   if (!inline) button.append(activityIcon('image'));
-  const display = () => {
+  const display = (failed = false) => {
+    if (failed) { button.disabled = false; setLabel('图片加载失败，重试'); return; }
     const entry = imagePreviews.get(handle);
     if (!inline) button.setAttribute('aria-expanded', String(Boolean(entry?.url && entry.expanded)));
     if (inline && entry?.url) {
@@ -166,7 +190,7 @@ function imagePreviewButton(handle, threadId, inline = false, label = '查看图
     }
   };
   const existing = imagePreviews.get(handle);
-  if (existing && !existing.url) existing.waiters.add(display);
+  if (existing && !existing.url) { existing.waiters.add(display); button.disabled = true; setLabel('加载中...'); }
   const load = async () => {
     if (imagePreviews.get(handle)?.url) {
       const entry = imagePreviews.get(handle); entry.expanded = !entry.expanded; return display();
@@ -191,18 +215,20 @@ function imagePreviewButton(handle, threadId, inline = false, label = '查看图
       for (const show of entry.waiters) show();
       entry.waiters.clear();
     } catch {
-      if (generation === previewGeneration && imagePreviews.get(handle) === entry) { imagePreviews.delete(handle); button.disabled = false; setLabel('图片加载失败，重试'); }
+      if (generation === previewGeneration && imagePreviews.get(handle) === entry) {
+        imagePreviews.delete(handle);
+        for (const show of entry.waiters) show(true);
+        entry.waiters.clear();
+      }
     }
   };
   button.addEventListener('click', async () => {
     if (!inline || !imagePreviews.get(handle)?.url) return load();
     const entry = imagePreviews.get(handle);
-    const overlay = element('div', 'image-view-overlay');
+    const panel = createDetailDrawer('图片', '返回', 'image-view-overlay');
+    const content = element('div', 'image-detail-content');
     const img = element('img', 'image-view-full'); img.src = entry.url; img.alt = '聊天图片';
-    const close = element('button', 'image-view-close', '×'); close.type = 'button'; close.setAttribute('aria-label', '关闭图片');
-    close.addEventListener('click', () => overlay.remove());
-    overlay.addEventListener('click', event => { if (event.target === overlay) overlay.remove(); });
-    overlay.append(img, close); document.body.append(overlay);
+    content.append(img); panel.append(content);
   });
   wrapper.append(button); display();
   if (inline && !existing?.url && typeof IntersectionObserver !== 'undefined') {
@@ -218,13 +244,41 @@ function imagePreviewButton(handle, threadId, inline = false, label = '查看图
   }
   return wrapper;
 }
-function videoPreviewButton(media, threadId) {
+function videoPreviewButton(media, threadId, occurrence = Symbol('video')) {
   const wrapper = element('div', 'message-video');
   const button = element('button', 'image-preview-button', '查看视频');
   button.type = 'button';
+  const key = JSON.stringify([threadId, media.id]);
+  function player(entry) {
+    const video = document.createElement('video'); video.className = 'message-video-content';
+    video.controls = true; video.preload = 'metadata'; video.src = entry.url; return video;
+  }
+  const existing = videoPreviews.get(key);
+  if (existing) {
+    existing.wrappers.set(occurrence, wrapper);
+    if (existing.url) {
+      let video = existing.players.get(occurrence);
+      if (!video) { video = player(existing); existing.players.set(occurrence, video); }
+      wrapper.append(video);
+    }
+    else { button.disabled = true; button.textContent = '加载中...'; wrapper.append(button); }
+    return wrapper;
+  }
   button.addEventListener('click', async () => {
     button.disabled = true; button.textContent = '加载中...';
-    const controller = new AbortController();
+    const pending = videoPreviews.get(key);
+    if (pending) {
+      pending.wrappers.set(occurrence, wrapper);
+      if (pending.url) {
+        let video = pending.players.get(occurrence);
+        if (!video) { video = player(pending); pending.players.set(occurrence, video); }
+        wrapper.replaceChildren(video);
+      }
+      return;
+    }
+    const controller = new AbortController(), generation = previewGeneration;
+    const entry = { controller, wrappers: new Map([[occurrence, wrapper]]), players: new Map(), url: null };
+    videoPreviews.set(key, entry);
     try {
       let size, mime = media.mime, offset = 0; const chunks = [];
       do {
@@ -236,8 +290,19 @@ function videoPreviewButton(media, threadId) {
         if (!bytes.length || bytes.length > 131072 || offset + bytes.length > size || (offset + bytes.length < size && bytes.length !== 131072)) throw new Error('invalid');
         chunks.push(bytes); offset += bytes.length;
       } while (offset < size);
-      const video = document.createElement('video'); video.className = 'message-video-content'; video.controls = true; video.preload = 'metadata'; video.src = URL.createObjectURL(new Blob(chunks, { type: mime })); wrapper.replaceChildren(video);
-    } catch { button.disabled = false; button.textContent = '视频加载失败，重试'; }
+      if (controller.signal.aborted || generation !== previewGeneration || selectedId !== threadId || videoPreviews.get(key) !== entry) return;
+      entry.url = URL.createObjectURL(new Blob(chunks, { type: mime })); entry.controller = null;
+      for (const [position, target] of entry.wrappers) { const video = player(entry); entry.players.set(position, video); target.replaceChildren(video); }
+    } catch {
+      if (!controller.signal.aborted && generation === previewGeneration && selectedId === threadId && videoPreviews.get(key) === entry) {
+        videoPreviews.delete(key);
+        for (const [position, target] of entry.wrappers) {
+          const retry = videoPreviewButton(media, threadId, position);
+          retry.querySelector('button').textContent = '视频加载失败，重试';
+          target.replaceWith(retry);
+        }
+      }
+    }
   });
   wrapper.append(button); return wrapper;
 }
@@ -264,19 +329,46 @@ const expandedChanges = new Set();
 const filePreviewCache = new Map();
 const expandedCommands = new Set();
 const expandedWork = new Set();
+let priorWorkGroups = new Map(), nextWorkGroupId = 0;
+const transientWorkKeys = new Set();
+function clearWorkGroupRecords() {
+  for (const groups of priorWorkGroups.values()) for (const group of groups) expandedWork.delete(group.key);
+  for (const key of transientWorkKeys) expandedWork.delete(key);
+  priorWorkGroups.clear(); transientWorkKeys.clear();
+}
+function reconcileWorkGroups(scope, groups, preserved = new Set()) {
+  const previous = priorWorkGroups.get(scope) || [];
+  const overlaps = groups.map(group => previous.map(old => group.ids.some(id => old.ids.includes(id))));
+  const assigned = groups.map((group, index) => {
+    const matches = previous.map((old, i) => overlaps[index][i] ? i : -1).filter(i => i >= 0);
+    if (matches.length === 1 && overlaps.filter(row => row[matches[0]]).length === 1) return previous[matches[0]].key;
+    if (!group.ids.length) { const key = JSON.stringify([scope, 'unstable', ++nextWorkGroupId]); transientWorkKeys.add(key); return key; }
+    if (!priorWorkGroups.has(scope) && group.ids.length) return JSON.stringify([...JSON.parse(scope), 'work', index]);
+    return JSON.stringify([scope, 'work-group', ++nextWorkGroupId]);
+  });
+  for (const old of previous) if (!assigned.includes(old.key) && !preserved.has(old.key)) expandedWork.delete(old.key);
+  priorWorkGroups.set(scope, groups.map((group, index) => ({ ids: group.ids, key: assigned[index] })));
+  return assigned;
+}
 const expandedActivities = new Set();
 const expandedMessages = new Set();
 const conversation = document.querySelector('.conversation');
 const scrollBottomButton = document.querySelector('#scroll-bottom');
 let followLatest = true;
 let renderedThreadId = null;
+let previousHistoryScrollTop = null, historyScrollThread = null, historyAutoBlocked = false, historyCanLoad = false;
 function updateScrollButton() {
   if (scrollBottomButton) scrollBottomButton.hidden = !selectedId || followLatest;
 }
 conversation?.addEventListener('scroll', () => {
   if (!Number.isFinite(conversation.scrollHeight) || !Number.isFinite(conversation.clientHeight)) return;
+  const top = conversation.scrollTop;
+  const upward = historyScrollThread === selectedId && previousHistoryScrollTop !== null && top < previousHistoryScrollTop;
+  historyScrollThread = selectedId;
+  previousHistoryScrollTop = top;
   followLatest = conversation.scrollHeight - conversation.clientHeight - conversation.scrollTop < 80;
   updateScrollButton();
+  if (upward && top < 120 && historyCanLoad && !historyAutoBlocked && !loadedHistory?.stale) void loadEarlierPage();
 });
 scrollBottomButton?.addEventListener('click', () => {
   followLatest = true;
@@ -324,6 +416,7 @@ attachmentToggle.addEventListener('click', () => { if (attachmentToggle.disabled
 document.addEventListener?.('click', event => { if (!attachmentControl.contains(event.target)) closeAttachmentMenu(); });
 document.addEventListener?.('keydown', event => { if (event.key === 'Escape' && !attachmentMenu.hidden) { closeAttachmentMenu(); attachmentToggle.focus(); } });
 imageChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && selectedId && connected) imageFile.click(); });
+cameraChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && selectedId && connected) cameraInput.click(); });
 fileChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && selectedId && connected) fileInput.click(); });
 modeChoose.addEventListener('click', async () => {
   const id = selectedId;
@@ -352,9 +445,10 @@ function addAttachments(input, kind) {
   const files = [...(input.files || [])];
   if (!imageUploadAvailable || !selectedId || !connected || !files.length) return;
   const previous = imageDrafts.get(selectedId) || [];
-  if (previous.length + files.length > 4 || files.some(file => (kind === 'image' && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) || file.size < 1 || file.size > 20 * 1024 * 1024 || !file.name || file.name.length > 255 || /[\x00-\x1f\x7f/\\\u2028\u2029]/.test(file.name))) {
+  const invalidFormat = kind === 'image' && files.some(file => !['image/png', 'image/jpeg', 'image/webp'].includes(file.type));
+  if (previous.length + files.length > 4 || invalidFormat || files.some(file => file.size < 1 || file.size > 20 * 1024 * 1024 || !file.name || file.name.length > 255 || /[\x00-\x1f\x7f/\\\u2028\u2029]/.test(file.name))) {
     input.value = '';
-    sendStatus.textContent = '最多选择 4 个附件，每个不超过 20 MB';
+    sendStatus.textContent = invalidFormat ? '图片仅支持 PNG、JPEG 或 WebP 格式' : '附件无效：最多 4 个，每个不超过 20 MB';
     return;
   }
   imageDrafts.set(selectedId, [...previous, ...files.map(file => ({ file, kind, ...(kind === 'image' ? { url: URL.createObjectURL(file) } : {}) }))]);
@@ -363,6 +457,7 @@ function addAttachments(input, kind) {
   updateComposer();
 }
 imageFile.addEventListener('change', () => addAttachments(imageFile, 'image'));
+cameraInput.addEventListener('change', () => addAttachments(cameraInput, 'image'));
 fileInput.addEventListener('change', () => addAttachments(fileInput, 'file'));
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 function stopVoice() {
@@ -428,6 +523,8 @@ function updateComposer() {
   messageInput.disabled = !selectedId || !connected;
   imageChoose.hidden = !imageUploadAvailable;
   imageChoose.disabled = !imageUploadAvailable || messageInput.disabled || Boolean(state?.pending || state?.uncertain);
+  cameraChoose.hidden = imageChoose.hidden;
+  cameraChoose.disabled = imageChoose.disabled;
   fileChoose.hidden = !imageUploadAvailable;
   fileChoose.disabled = imageChoose.disabled;
   const modeAvailable = ['default', 'plan'].includes(liveMode);
@@ -474,7 +571,7 @@ stopButton.addEventListener('click', async () => {
     if (response.ok) {
       let result; try { result = await response.json(); } catch { /* Older relays may return no body. */ }
       if (stops.get(id)?.turnId !== turnId) return;
-      if (result?.status === 'stopped-goal-pause-failed') stops.set(id, { turnId, error: true, message: '任务已停止，但目标暂停失败，请在电脑上检查目标状态' });
+      if (result?.status === 'stopped-goal-pause-failed') stops.set(id, { turnId, error: true, goalPauseFailed: true, message: '任务已停止，但目标暂停失败，请在电脑上检查目标状态' });
       else if (selectedId === id && activeTurnId !== turnId) stops.delete(id);
       else stops.set(id, { turnId, message: '已发送停止请求，等待任务状态更新' });
     }
@@ -484,6 +581,8 @@ stopButton.addEventListener('click', async () => {
     if (stops.get(id)?.turnId === turnId) stops.set(id, { turnId, error: true, message: '停止结果未知，请查看任务状态' });
   } finally {
     clearTimeout(timer);
+    const latestStop = stops.get(id);
+    if (selectedId === id && activeTurnId && activeTurnId !== turnId && latestStop?.turnId === turnId && !latestStop.goalPauseFailed) stops.delete(id);
     if (selectedId === id) updateComposer();
   }
 });
@@ -581,8 +680,8 @@ async function responseError(response, fallback) {
   } catch { /* Use the generic error if the response has no JSON body. */ }
   return fallback;
 }
-let displayedHistoryId = null;
-function clearConversation() { cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; loadEarlier.hidden = true; displayedHistoryId = null; stopGoalClock(); clearImagePreviews(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); }
+let displayedHistoryId = null, homeErrorSource = null;
+function clearConversation() { cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); }
 function diffStats(changes) {
   let added = 0, removed = 0;
   for (const change of changes || []) {
@@ -595,62 +694,114 @@ function diffStats(changes) {
   }
   return added || removed ? { added, removed } : null;
 }
-function fail(message) { clearConversation(); error.textContent = message; error.hidden = false; status('连接断开', 'error'); }
+function fail(message) { clearConversation(); homeErrorSource = null; error.textContent = message; error.hidden = false; status('连接断开', 'error'); }
+function showHomeError(source, message) {
+  if (selectedId || (homeErrorSource && homeErrorSource !== source && source !== 'host')) return;
+  if (turns.querySelector?.('.conversation-loading, .conversation-empty')) turns.replaceChildren();
+  homeErrorSource = source; error.textContent = message; error.hidden = false;
+}
+function clearHomeError(source) {
+  if (homeErrorSource !== source) return;
+  homeErrorSource = null; error.hidden = true; error.textContent = '';
+  showConversationEmpty();
+}
 function element(tag, className, text) { const node = document.createElement(tag); node.className = className; node.textContent = text ?? ''; return node; }
-function openFilePreview(path, threadId, turnId, itemId, index, linked = false) {
-  const overlay = element('div', 'file-view-overlay');
+function showConversationEmpty() {
+  if (selectedId || !pairingAvailable || !connected || homeErrorSource || !error.hidden) return;
+  turns.replaceChildren(element('div', 'conversation-empty', '打开左上角任务面板，选择一个任务'));
+}
+function showConversationLoading(message = '正在连接') {
+  const loading = element('div', 'conversation-loading', message);
+  loading.setAttribute('role', 'status');
+  turns.replaceChildren(loading);
+}
+function createDetailDrawer(title, backLabel, overlayClass = 'file-view-overlay') {
+  const overlay = element('div', overlayClass);
   const panel = element('section', 'file-view-panel');
   const header = element('header', 'file-view-header');
-  const title = element('strong', 'file-view-title', path.split(/[\\/]/).filter(Boolean).at(-1) || path);
-  const close = element('button', 'file-view-close', '×'); close.type = 'button'; close.setAttribute('aria-label', '关闭文件预览');
-  const content = element('pre', 'file-view-content', '加载中...');
-  const dismiss = () => overlay.remove();
-  close.addEventListener('click', dismiss);
+  const back = element('button', 'file-view-back'); back.type = 'button'; back.setAttribute('aria-label', backLabel); back.title = '返回';
+  back.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>';
+  const sourceThread = selectedId;
+  const summaryWasOpen = !summaryPanel.hidden;
+  const summaryScroll = summaryPanel.scrollTop;
+  const dismiss = () => {
+    overlay.remove();
+    if (summaryWasOpen && selectedId === sourceThread && !summaryPanel.hidden && Number.isFinite(summaryScroll)) summaryPanel.scrollTop = summaryScroll;
+  };
+  back.addEventListener('click', dismiss);
   overlay.addEventListener('click', event => { if (event.target === overlay) dismiss(); });
-  header.append(title, close); panel.append(header, content); overlay.append(panel); document.body.append(overlay);
+  header.append(back, element('strong', 'file-view-title', title));
+  panel.append(header); overlay.append(panel); document.body.append(overlay);
+  return panel;
+}
+function openFilePreview(path, threadId, turnId, itemId, index, linked = false) {
+  const panel = createDetailDrawer(path.split(/[\\/]/).filter(Boolean).at(-1) || path, '返回');
+  const content = element('pre', 'file-view-content', '加载中...');
+  panel.append(content);
   void (async () => {
     try {
       const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/file-preview`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(linked ? { turnId, itemId, path } : { turnId, itemId, index }) });
       if (!response.ok) throw new Error();
       const result = await response.json();
+      if (panel.isConnected === false) return;
       if (typeof result.text !== 'string' || selectedId !== threadId) throw new Error();
       content.textContent = result.text;
-    } catch { content.textContent = '文件不可预览，可能已删除、不是文本或超过 512 KB'; }
+    } catch { if (panel.isConnected !== false) content.textContent = '文件不可预览，可能已删除、不是文本或超过 512 KB'; }
   })();
 }
+function renderAgentHistoryTurn(turn) {
+  const row = element('article', 'turn');
+  if (turn.status === 'interrupted' || turn.status === 'failed') row.append(element('div', 'turn-meta', turn.status === 'interrupted' ? '已中断' : '失败'));
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  const finalIndex = turn.status === 'completed' ? items.findLastIndex(item => item.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim()) : -1;
+  let work = null;
+  for (const [index, item] of items.entries()) {
+    const activity = ['reasoning', 'commandExecution', 'fileChange', 'mcpToolCall'].includes(item.type);
+    if (activity && finalIndex >= 0 && index < finalIndex) {
+      if (!work) { work = element('details', 'work-activity'); work.append(element('summary', 'work-title', '工作过程')); row.append(work); }
+    } else work = null;
+    const destination = work || row;
+    if (item.type === 'agentMessage' && item.text) {
+      const message = element('div', 'item assistant-message'); message.setAttribute('aria-label', 'Codex'); message.append(assistantContent(item.text)); destination.append(message);
+    } else if (item.type === 'userMessage' && item.text) {
+      const message = element('div', 'item user-message'); message.setAttribute('aria-label', '你'); message.append(element('p', 'item-text', item.text)); destination.append(message);
+    } else if (item.type === 'reasoning' && Array.isArray(item.summary)) {
+      const summary = item.summary.filter(text => typeof text === 'string' && text.trim()).join('\n');
+      if (summary) { const details = element('details', 'thinking'); details.append(element('summary', 'thinking-title', '思考'), element('p', 'item-text thinking-content', summary)); destination.append(details); }
+    } else if (item.type === 'commandExecution' && (item.command || item.output)) {
+      const details = element('details', 'command-details');
+      const labels = { inProgress: '正在运行命令', completed: '运行了命令', failed: '命令运行失败', declined: '命令已拒绝', interrupted: '命令已中断' };
+      const heading = element('summary', 'command-title activity-command');
+      heading.append(element('span', 'command-title-text', labels[item.status] || '命令'), activityIcon('command'));
+      details.append(heading);
+      if (item.command) details.append(element('pre', 'item-code', item.command));
+      if (item.output) details.append(element('pre', 'item-code', item.output));
+      destination.append(details);
+    } else if (item.type === 'fileChange' && Array.isArray(item.changes)) {
+      const paths = item.changes.map(change => typeof change?.path === 'string' ? change.path : '').filter(Boolean);
+      if (paths.length) { const details = element('details', 'file-changes'); const heading = element('summary', 'file-changes-title', `已编辑 ${paths.length === 1 ? paths[0].split(/[\\/]/).filter(Boolean).at(-1) : `${paths.length} 个文件`}`); heading.append(activityIcon('edit')); details.append(heading); for (const path of paths) details.append(element('div', 'file-change-path', path)); destination.append(details); }
+    } else if (item.type === 'mcpToolCall') {
+      const name = [item.server, item.tool].filter(value => typeof value === 'string' && value).join(' · ');
+      if (name) { const line = element('div', 'activity-line', `已调用 ${name}`); line.append(activityIcon('tool')); destination.append(line); }
+    }
+  }
+  return row;
+}
 function openAgentHistory(name, threadId, agentId) {
-  const overlay = element('div', 'file-view-overlay');
-  const panel = element('section', 'file-view-panel');
-  const header = element('header', 'file-view-header');
-  const close = element('button', 'file-view-close', '×'); close.type = 'button'; close.setAttribute('aria-label', '关闭子智能体详情');
+  const panel = createDetailDrawer(name, '返回');
   const content = element('div', 'agent-view-content', '加载中...');
-  close.addEventListener('click', () => overlay.remove());
-  overlay.addEventListener('click', event => { if (event.target === overlay) overlay.remove(); });
-  header.append(element('strong', 'file-view-title', name), close); panel.append(header, content); overlay.append(panel); document.body.append(overlay);
+  panel.append(content);
   void (async () => {
     try {
       const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/agents/${encodeURIComponent(agentId)}/history`, { credentials: 'same-origin', cache: 'no-store' });
       if (!response.ok) throw new Error();
       const result = await response.json();
+      if (panel.isConnected === false) return;
       if (result.id !== agentId || !Array.isArray(result.turns) || selectedId !== threadId) throw new Error();
       content.replaceChildren(element('p', 'agent-history-note', '已记录的内容，非实时'));
-      for (const turn of result.turns) for (const item of turn.items || []) {
-        if (item.type === 'agentMessage' && item.text) content.append(assistantContent(item.text));
-        else if (item.type === 'userMessage' && item.text) content.append(element('p', 'agent-history-user', item.text));
-        else if (item.type === 'commandExecution' && item.command) content.append(element('p', 'agent-history-activity', `运行命令 ${item.command}`));
-        else if (item.type === 'reasoning' && Array.isArray(item.summary)) {
-          const summary = item.summary.filter(text => typeof text === 'string' && text.trim()).join('\n');
-          if (summary) { const details = element('details', 'thinking agent-history-thinking'); details.append(element('summary', 'thinking-title', '思考'), element('p', 'item-text thinking-content', summary)); content.append(details); }
-        } else if (item.type === 'fileChange' && Array.isArray(item.changes)) {
-          const paths = item.changes.map(change => typeof change?.path === 'string' ? change.path : '').filter(Boolean);
-          if (paths.length) content.append(element('p', 'agent-history-activity', `变更文件 ${paths.join('、')}`));
-        } else if (item.type === 'mcpToolCall') {
-          const name = [item.server, item.tool].filter(value => typeof value === 'string' && value).join(' / ');
-          if (name) content.append(element('p', 'agent-history-activity', `调用工具 ${name}`));
-        }
-      }
+      for (const turn of result.turns) { const row = renderAgentHistoryTurn(turn); if (row.childNodes.length) content.append(row); }
       if (content.childNodes.length === 1) content.append(element('p', 'agent-history-note', '暂无可显示的记录'));
-    } catch { content.textContent = '子智能体记录暂不可用'; }
+    } catch { if (panel.isConnected !== false) content.textContent = '子智能体记录暂不可用'; }
   })();
 }
 function assistantContent(text, fileContext) {
@@ -676,6 +827,23 @@ function assistantContent(text, fileContext) {
     }
   } catch { node.textContent = text; }
   return node;
+}
+function questionReplyParts(turns, turnIndex, itemIndex, text) {
+  if (typeof text !== 'string') return null;
+  for (let t = turnIndex; t >= 0; t--) {
+    const items = turns[t]?.items || [];
+    for (let i = t === turnIndex ? itemIndex - 1 : items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item?.type === 'userMessage') return null;
+      if (item?.type !== 'agentMessage' || !item.questions?.length) continue;
+      if (item.questions.length !== 1) return null;
+      const question = item.questions[0]?.question;
+      if (typeof question !== 'string' || !question || !text.startsWith(`${question}\n`)) return null;
+      const answer = text.slice(question.length + 1);
+      return answer.trim() ? { question, answer } : null;
+    }
+  }
+  return null;
 }
 async function loadDevices() {
   const generation = ++deviceLoadGeneration;
@@ -747,6 +915,8 @@ let sidebarEvents, sidebarWatchdog, sidebarEventGeneration = 0, sidebarStatusSna
 function setTaskIndicator(marker, state) {
   if (!marker) return;
   marker.hidden = state !== 'active';
+  const unread = marker.nextElementSibling;
+  if (unread?.classList.contains('task-unread')) unread.hidden = !marker.hidden;
   marker.className = 'task-active';
   marker.title = '进行中';
   marker.setAttribute('aria-label', marker.title);
@@ -819,9 +989,10 @@ function renderTask(task) {
   button.append(element('span', 'task-title', task.title || '未命名任务'));
   const indicator = element('span', 'task-active', ''); indicator.title = '进行中'; indicator.setAttribute('aria-label', '进行中');
   const observedStatus = sidebarStatusSnapshot ? sidebarStatusSnapshot.get(task.id) : (task.status?.type || task.status);
-  setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : observedStatus); button.append(indicator);
+  button.append(indicator);
   if (task.unread === true && task.id !== selectedId) { const dot = element('span', 'task-unread', ''); dot.title = '未读'; dot.setAttribute('aria-label', '未读'); button.append(dot); }
-  button.addEventListener('click', () => { if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) beginStatusHandover(previous); } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); for (const item of projectList.querySelectorAll('.task')) item.setAttribute('aria-current', String(item.dataset.id === selectedId)); showSidebar(false); void connect(task.id); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : observedStatus);
+  button.addEventListener('click', () => { if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) beginStatusHandover(previous); } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); void connect(task.id); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
@@ -902,10 +1073,19 @@ async function refreshHostStatus() {
     const result = await response.json();
     if (typeof result.online !== 'boolean') return;
     if (generation !== hostStatusGeneration) return;
-    if (!selectedId) status(result.online === true ? '已连接' : '电脑未连接', result.online === true ? 'ready' : 'error');
+    if (result.online === true) homeConnectionConfirmed = true;
+    if (!selectedId) {
+      if (turns.querySelector?.('.conversation-loading')) turns.replaceChildren();
+      if (result.online) clearHomeError('host'); else showHomeError('host', '电脑未连接');
+      status(result.online === true ? '已连接' : '电脑未连接', result.online === true ? 'ready' : 'error');
+      if (result.online) showConversationEmpty();
+    }
   } catch {
     if (generation !== hostStatusGeneration) return;
-    if (!selectedId) status('连接中断', 'error');
+    if (!selectedId) {
+      if (homeConnectionConfirmed) { if (turns.querySelector?.('.conversation-empty')) turns.replaceChildren(); status('连接中断', 'error'); }
+      else { status('连接中', 'connecting'); if (!homeErrorSource) showConversationLoading(); }
+    }
   }
   if (generation === hostStatusGeneration) { hostStatusTimer = setTimeout(refreshHostStatus, 20000); hostStatusTimer?.unref?.(); }
 }
@@ -939,6 +1119,7 @@ async function loadThreads() {
     const data = await response.json();
     if (generation !== listRequestGeneration) return;
     if (!Array.isArray(data.projects) || !Array.isArray(data.recent)) throw new Error('任务列表数据不可用');
+    clearHomeError('list');
     const fragment = document.createDocumentFragment();
     if (statusUnavailable) fragment.append(element('p', 'list-status', '任务状态暂不可用'));
     for (const project of data.projects) {
@@ -962,7 +1143,9 @@ async function loadThreads() {
     listRetryTimer?.unref?.();
   } catch (e) {
     if (generation !== listRequestGeneration) return;
-    projectList.replaceChildren(element('p', 'list-status list-error', e.message || '任务列表加载失败'));
+    const message = e instanceof TypeError ? '连接中断，正在重试' : (e.message || '任务列表加载失败');
+    projectList.replaceChildren(element('p', 'list-status list-error', message));
+    if (!(e instanceof TypeError)) showHomeError('list', message);
     if (retry) {
       listRetryTimer = setTimeout(() => { listRetryTimer = undefined; void loadThreads(); }, 5000);
       listRetryTimer?.unref?.();
@@ -970,13 +1153,19 @@ async function loadThreads() {
   }
 }
 let loadedHistory = null, historyRequest = null;
+function updateHistoryControl() {
+  const shortContent = !conversation || !Number.isFinite(conversation.scrollHeight) || !Number.isFinite(conversation.clientHeight) || conversation.scrollHeight <= conversation.clientHeight + 1;
+  loadEarlier.hidden = !historyCanLoad || (!historyRequest && !historyAutoBlocked && !loadedHistory?.stale && !shortContent);
+  loadEarlier.disabled = Boolean(historyRequest);
+  loadEarlier.textContent = historyRequest ? '加载中...' : loadedHistory?.stale ? '历史已变化，刷新' : historyAutoBlocked ? '重新加载更早消息' : '加载更早消息';
+}
 async function readHistoryPage(response, signal) {
   if (!response.ok) throw new Error('history unavailable');
   if (!response.headers?.get?.('content-type')?.includes('application/x-ndjson')) return response.json();
   if (!response.body) throw new Error('history unavailable');
   const { StateChunkAssembler } = await import('/state-chunks.mjs');
   const assembler = new StateChunkAssembler(), reader = response.body.getReader(), decoder = new TextDecoder();
-  let pending = '', result = null;
+  let pending = '', result = null, complete = false;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -993,10 +1182,11 @@ async function readHistoryPage(response, signal) {
       if (pending.length > 131072) throw new Error('invalid history frame');
     }
     if (pending || !result || result.seq !== 1) throw new Error('incomplete history');
+    complete = true;
     return result.value;
-  } finally { assembler.cancel(); reader.releaseLock(); }
+  } finally { assembler.cancel(); if (!complete) void reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
-loadEarlier.addEventListener('click', async () => {
+async function loadEarlierPage() {
   const source = streamView, id = selectedId, metadata = source?.history;
   if (!connected || !id || !metadata?.historicalHash || loadEarlier.disabled) return;
   if (loadedHistory?.stale) { loadedHistory = null; showState(streamView); }
@@ -1004,24 +1194,30 @@ loadEarlier.addEventListener('click', async () => {
   const before = previous?.nextBefore ?? (previous ? null : metadata.cursor);
   if (!before) return;
   const controller = new AbortController(), scopeGeneration = historyScopeGeneration; historyRequest = controller;
-  loadEarlier.disabled = true;
+  updateHistoryControl();
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/history-page?${new URLSearchParams({ before, hash: metadata.historicalHash })}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'x-codex-history-chunks': '1' } });
     const page = await readHistoryPage(response, controller.signal);
     const current = streamView?.history;
-    if (historyRequest !== controller || scopeGeneration !== historyScopeGeneration || selectedId !== id || !connected || current?.historicalHash !== metadata.historicalHash || current?.mediaRevision !== metadata.mediaRevision || page.threadId !== id || page.historicalHash !== metadata.historicalHash || page.before !== before || page.keyField !== metadata.keyField || !Array.isArray(page.turns) || !page.turns.length || page.turns.length > 1000 || (page.nextBefore !== null && page.nextBefore !== page.turns[0]?.[page.keyField])) return;
+    if (historyRequest !== controller || scopeGeneration !== historyScopeGeneration || selectedId !== id || !connected || current?.historicalHash !== metadata.historicalHash || current?.mediaRevision !== metadata.mediaRevision) return;
+    if (page.threadId !== id || page.historicalHash !== metadata.historicalHash || page.before !== before || page.keyField !== metadata.keyField || !Array.isArray(page.turns) || !page.turns.length || page.turns.length > 1000 || (page.nextBefore !== null && page.nextBefore !== page.turns[0]?.[page.keyField])) throw new Error('invalid page');
     const keys = new Set([...(previous?.turns || []), ...streamView.turns].map(turn => turn[page.keyField]));
     if (page.turns.some(turn => !turn || typeof turn[page.keyField] !== 'string' || keys.has(turn[page.keyField]) || !keys.add(turn[page.keyField]))) throw new Error('invalid page');
     loadedHistory = { hash: metadata.historicalHash, mediaRevision: metadata.mediaRevision, turns: [...page.turns, ...(previous?.turns || [])], nextBefore: page.nextBefore, complete: page.complete };
+    historyAutoBlocked = false;
+    history.textContent = '';
     const height = conversation?.scrollHeight || 0, top = conversation?.scrollTop || 0;
     followLatest = false; showState(streamView);
     if (conversation) conversation.scrollTop = top + Math.max(0, conversation.scrollHeight - height);
-  } catch { if (!controller.signal.aborted && selectedId === id) history.textContent = '历史加载失败，请重试'; }
-  finally { if (historyRequest === controller) { historyRequest = null; loadEarlier.disabled = false; } }
-});
-function showState(view, live = true, loadingPreview = false) {
+  } catch { if (!controller.signal.aborted && selectedId === id) { historyAutoBlocked = true; history.textContent = '历史加载失败，请重试'; } }
+  finally { if (historyRequest === controller) { historyRequest = null; updateHistoryControl(); } }
+}
+loadEarlier.addEventListener('click', () => loadEarlierPage());
+function showState(view, live = true, loadingPreview = false, immediateWork = null) {
   const viewThread = selectedId;
   const sourceView = view;
+  const playingVideos = new Set();
+  for (const entry of videoPreviews.values()) for (const video of entry.players.values()) if (!video.paused && !video.ended) playingVideos.add(video);
   const focusedWork = document.activeElement?.closest?.('details.work-activity[data-work-key]');
   let workFocus = null;
   if (focusedWork && turns.contains?.(focusedWork)) {
@@ -1029,22 +1225,25 @@ function showState(view, live = true, loadingPreview = false) {
     for (let node = target; node && node !== focusedWork; node = node.parentElement) path.unshift([...node.parentElement.children].indexOf(node));
     workFocus = { key: focusedWork.dataset.workKey, path, tag: target.tagName, className: target.className, text: target.textContent };
   }
+  const immediateKeys = new Map();
   for (const group of turns.querySelectorAll('details.work-activity[data-work-key]')) {
     if (group.open) expandedWork.add(group.dataset.workKey);
     else expandedWork.delete(group.dataset.workKey);
+    if (immediateWork && transientWorkKeys.has(group.dataset.workKey)) immediateKeys.set(`${group.dataset.turnIndex}:${group.dataset.groupIndex}`, group.dataset.workKey);
   }
+  for (const key of transientWorkKeys) if (key !== immediateWork?.key && (!immediateWork || ![...immediateKeys.values()].includes(key))) expandedWork.delete(key);
+  transientWorkKeys.clear();
   const controlTurns = view.turns || [];
   if (live && view.history?.historicalHash) {
     if (loadedHistory && (loadedHistory.hash !== view.history.historicalHash || loadedHistory.mediaRevision !== view.history.mediaRevision)) loadedHistory.stale = true;
     const previous = loadedHistory, field = view.history.keyField;
-    loadEarlier.textContent = previous?.stale ? '历史已变化，刷新' : '加载更早消息';
-    loadEarlier.hidden = previous?.stale ? false : !(previous ? previous.nextBefore : view.history.cursor);
+    historyCanLoad = previous?.stale ? true : Boolean(previous ? previous.nextBefore : view.history.cursor);
     if (previous && !previous.stale) {
       const liveKeys = new Set(view.turns.map(turn => turn[field]));
       const old = previous.turns.filter(turn => !liveKeys.has(turn[field]));
       view = { ...view, turns: [...old, ...view.turns], history: { ...view.history, complete: previous.complete } };
     }
-  } else { loadedHistory = null; loadEarlier.hidden = true; }
+  } else { loadedHistory = null; historyCanLoad = false; }
   displayedHistoryId = !live && view.id === selectedId ? selectedId : null;
   clearImageObservers();
   liveMode = live && ['default', 'plan'].includes(view.collaborationMode) ? view.collaborationMode : null;
@@ -1065,7 +1264,7 @@ function showState(view, live = true, loadingPreview = false) {
   const running = controlTurns.filter(turn => turn.status === 'inProgress' && uuid.test(turn.id || ''));
   activeTurnId = live && running.length === 1 ? running[0].id : null;
   updateLiveTaskStatus(selectedId, live && (view.runtimeStatus === 'active' || (view.runtimeStatus == null && running.length > 0)) ? 'active' : 'unknown');
-  if (selectedId && stops.has(selectedId) && stops.get(selectedId).turnId !== activeTurnId && !stops.get(selectedId).pending && !stops.get(selectedId).error) stops.delete(selectedId);
+  if (selectedId && stops.has(selectedId) && stops.get(selectedId).turnId !== activeTurnId && !stops.get(selectedId).pending && !stops.get(selectedId).goalPauseFailed && (activeTurnId || !stops.get(selectedId).error)) stops.delete(selectedId);
   selectedTitle = view.title || selectedTitle || '未命名任务';
   title.textContent = selectedTitle;
   history.textContent = live ? (loadedHistory?.gap ? '历史可能存在缺口，请刷新' : view.history?.complete ? '' : '部分历史未加载') : '已保存的历史，非实时内容';
@@ -1094,7 +1293,11 @@ function showState(view, live = true, loadingPreview = false) {
               const label = element('label', 'user-input-option');
               const radio = element('input'); radio.type = 'radio'; radio.name = question.id; radio.value = option.label;
               radio.checked = draft.answers[question.id] === option.label;
-              radio.addEventListener('change', () => { draft.answers[question.id] = option.label; });
+              radio.addEventListener('change', () => {
+                draft.answers[question.id] = option.label;
+                const other = group.querySelectorAll('.user-input-text')[0];
+                if (other) other.value = '';
+              });
               const text = element('span', '', option.label);
               if (option.description) text.append(element('small', '', option.description));
               label.append(radio, text); group.append(label);
@@ -1149,7 +1352,10 @@ function showState(view, live = true, loadingPreview = false) {
     }
   }
   let hasLiveActivityHeading = false;
-  for (const turn of (view.turns || [])) {
+  const renderedWorkScopes = new Set();
+  const turnKeyCounts = new Map();
+  for (const turn of view.turns || []) { const key = turn.viewKey || turn.id; turnKeyCounts.set(key, (turnKeyCounts.get(key) || 0) + 1); }
+  for (const [turnIndex, turn] of (view.turns || []).entries()) {
     const turnDisplayKey = turn.viewKey || turn.id;
     const row = element('article', 'turn');
     if (turn.status === 'interrupted' || turn.status === 'failed') row.append(element('div', 'turn-meta', turn.status === 'interrupted' ? '已中断' : '失败'));
@@ -1158,15 +1364,44 @@ function showState(view, live = true, loadingPreview = false) {
     const lastMessageIndex = liveTurn ? turnItems.findLastIndex(item => item?.type === 'agentMessage' || item?.type === 'userMessage') : -1;
     const liveReasoningIndex = liveTurn ? turnItems.findLastIndex((item, index) => index > lastMessageIndex && item?.type === 'reasoning' && Array.isArray(item.summary) && item.summary.some(text => typeof text === 'string' && text.trim())) : -1;
     const finalIndex = turn.status === 'completed' ? turnItems.findLastIndex(item => item?.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim() && (item.phase === 'final_answer' || !item.phase)) : -1;
-    let workGroup = null, workKey = null, activityGroup = null;
+    let workGroup = null, workKey = null, activityGroup = null, workGroupIndex = 0;
+    const itemIdCounts = new Map();
+    for (const item of turnItems) itemIdCounts.set(item?.id, (itemIdCounts.get(item?.id) || 0) + 1);
+    const isWorkActivity = (item, index) => item && item.status !== 'inProgress' && !item.questions?.length && finalIndex >= 0 && index < finalIndex && (['reasoning', 'subAgentActivity', 'collabAgentToolCall', 'mcpToolCall', 'commandExecution', 'fileChange', 'imageView', 'imageGeneration'].includes(item.type) || (item.type === 'agentMessage' && item.phase === 'commentary'));
+    const groups = [];
+    let currentGroup = null;
+    for (const [index, item] of turnItems.entries()) {
+      if (!['userMessage', 'agentMessage', 'reasoning', 'subAgentActivity', 'collabAgentToolCall', 'mcpToolCall', 'commandExecution', 'fileChange', 'imageView', 'imageGeneration', 'error'].includes(item?.type)) continue;
+      if (!isWorkActivity(item, index)) { currentGroup = null; continue; }
+      if (!currentGroup) groups.push(currentGroup = { ids: [], stable: true, items: [] });
+      currentGroup.items.push(item);
+      if (typeof item.id === 'string' && item.id && itemIdCounts.get(item.id) === 1) currentGroup.ids.push(item.id);
+      else currentGroup.stable = false;
+    }
+    for (const group of groups) if (!group.stable) group.ids = [];
+    const stableTurn = typeof turnDisplayKey === 'string' && turnDisplayKey && turnKeyCounts.get(turnDisplayKey) === 1;
+    const scope = stableTurn ? JSON.stringify([selectedId, turnDisplayKey]) : JSON.stringify([selectedId, 'unstable-turn', turnIndex]);
+    if (stableTurn) renderedWorkScopes.add(scope);
+    const groupKeys = stableTurn ? reconcileWorkGroups(scope, groups, new Set([...immediateKeys.values(), ...(immediateWork ? [immediateWork.key] : [])])) : groups.map(() => { const key = JSON.stringify([scope, 'unstable', ++nextWorkGroupId]); transientWorkKeys.add(key); return key; });
+    if (immediateWork?.threadId === selectedId) for (let index = 0; index < groupKeys.length; index++) {
+      if (stableTurn && groups[index].stable) continue;
+      const previousKey = immediateKeys.get(`${turnIndex}:${index}`);
+      if (previousKey) { transientWorkKeys.delete(groupKeys[index]); groupKeys[index] = previousKey; transientWorkKeys.add(previousKey); }
+    }
+    if (immediateWork?.threadId === selectedId && immediateWork.turnIndex === turnIndex && groupKeys[immediateWork.groupIndex] && (!stableTurn || !groups[immediateWork.groupIndex].stable)) {
+      const generated = groupKeys[immediateWork.groupIndex]; transientWorkKeys.delete(generated); groupKeys[immediateWork.groupIndex] = immediateWork.key; transientWorkKeys.add(immediateWork.key);
+    }
+    if (stableTurn) priorWorkGroups.set(scope, groups.map((group, index) => ({ ids: group.ids, key: groupKeys[index] })));
     for (const [itemIndex, item] of turnItems.entries()) {
+      const stableVideoItem = typeof turnDisplayKey === 'string' && turnDisplayKey && turnKeyCounts.get(turnDisplayKey) === 1 && typeof item.id === 'string' && item.id && itemIdCounts.get(item.id) === 1;
+      const videoOccurrence = index => stableVideoItem ? JSON.stringify([turnDisplayKey, item.id, index]) : Symbol('video');
       const types = { userMessage: '你', agentMessage: 'Codex', reasoning: '思考', subAgentActivity: '子智能体', collabAgentToolCall: '子智能体', mcpToolCall: '工具', commandExecution: '命令', fileChange: '文件变更', imageView: '图片', imageGeneration: '图片', error: '错误' };
       if (!types[item.type]) continue;
-      const exceptional = item.status === 'inProgress';
-      const activity = !exceptional && !item.questions?.length && finalIndex >= 0 && itemIndex < finalIndex && (['reasoning', 'subAgentActivity', 'collabAgentToolCall', 'mcpToolCall', 'commandExecution', 'fileChange', 'imageView', 'imageGeneration'].includes(item.type) || (item.type === 'agentMessage' && item.phase === 'commentary'));
+      const activity = isWorkActivity(item, itemIndex);
       if (!activity) { workGroup = null; workKey = null; }
       else if (!workGroup) {
-        workKey = JSON.stringify([selectedId, turnDisplayKey, item.id || itemIndex]);
+        const groupIndex = workGroupIndex++;
+        workKey = groupKeys[groupIndex];
         workGroup = element('details', 'work-activity'); workGroup.open = expandedWork.has(workKey);
         const key = workKey;
         workGroup.addEventListener('toggle', () => {
@@ -1175,9 +1410,12 @@ function showState(view, live = true, loadingPreview = false) {
             expandedWork.add(key);
             if (workGroupForToggle.dataset.lazy === 'true' && selectedId === viewThread) {
               const previousStatus = connection.textContent, previousState = connection.dataset.state, previousHistory = history.textContent;
-              showState(live && streamView?.id === viewThread ? streamView : sourceView, live, loadingPreview);
-              history.textContent = previousHistory;
-              status(previousStatus, previousState);
+              const immediate = transientWorkKeys.has(key) ? { threadId: viewThread, turnIndex, groupIndex, key } : null;
+              const latest = live && streamView?.id === viewThread ? streamView : sourceView;
+              const advanced = latest !== sourceView;
+              if (advanced) cancelPendingRender();
+              showState(latest, live, loadingPreview, advanced ? null : immediate);
+              if (!advanced) { history.textContent = previousHistory; status(previousStatus, previousState); }
               const expanded = [...turns.querySelectorAll('details.work-activity')].find(node => node.dataset.workKey === key);
               expanded?.querySelector('summary')?.focus({ preventScroll: true });
             }
@@ -1185,6 +1423,7 @@ function showState(view, live = true, loadingPreview = false) {
         });
         const workGroupForToggle = workGroup;
         workGroup.dataset.workKey = key;
+        workGroup.dataset.turnIndex = String(turnIndex); workGroup.dataset.groupIndex = String(groupIndex);
         workGroup.append(element('summary', 'work-title', '工作过程'));
         row.append(workGroup);
       }
@@ -1283,11 +1522,12 @@ function showState(view, live = true, loadingPreview = false) {
         const labels = { inProgress: '正在运行', completed: '已完成', failed: '失败', declined: '已拒绝', interrupted: '已中断' };
         const actionLabels = { read: '读取', search: '搜索', listFiles: '列出文件' };
         const actions = (Array.isArray(item.actions) ? item.actions : []).map(action => [actionLabels[action.type], action.name].filter(Boolean).join(' ')).filter(Boolean);
-        let status = labels[item.status] || '命令';
-        if (item.status === 'completed' && Number.isFinite(item.durationMs)) status = item.durationMs < 1000 ? '已在 1 秒内运行' : `已在 ${Math.ceil(item.durationMs / 1000)} 秒内运行`;
+        const status = labels[item.status] || '命令';
         const heading = element('summary', `command-title ${item.actions?.length === 1 && item.actions[0]?.type === 'read' ? 'activity-read' : 'activity-command'}`);
         const runningRead = item.status === 'inProgress' && item.actions?.length === 1 && item.actions[0]?.type === 'read';
-        const title = runningRead ? `正在读取${item.actions[0].name ? ` ${item.actions[0].name}` : '文件'}` : `${status} ${actions.join('、') || item.command || '命令'}`;
+        const completedRead = item.status === 'completed' && item.actions?.length === 1 && item.actions[0]?.type === 'read';
+        const commandLabels = { inProgress: '正在运行命令', completed: '运行了命令', failed: '命令运行失败', declined: '命令已拒绝', interrupted: '命令已中断' };
+        const title = runningRead || completedRead ? `${runningRead ? '正在读取' : '已读取'}${item.actions[0].name ? ` ${item.actions[0].name}` : '文件'}` : actions.length ? `${status} ${actions.join('、')}` : (commandLabels[item.status] || '命令');
         heading.append(element('span', 'command-title-text', title));
         heading.append(activityIcon(item.actions?.length === 1 && item.actions[0]?.type === 'read' ? 'read' : 'command'));
         details.append(heading);
@@ -1337,6 +1577,8 @@ function showState(view, live = true, loadingPreview = false) {
       else if (item.type === 'error') content = item.message || '';
       const asyncQuestions = item.type === 'agentMessage' && Array.isArray(item.questions) ? item.questions : [];
       const pendingAsync = asyncQuestions.length && live && turn === (view.turns || []).at(-1) && !turnItems.slice(itemIndex + 1).some(entry => entry.type === 'userMessage' || entry.questions?.length);
+      const skipKey = asyncQuestions.length === 1 && item.id ? JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id]) : null;
+      if (skipKey && !pendingAsync) skippedAsyncQuestions.delete(skipKey);
       const duplicateQuestion = pendingAsync && asyncQuestions.length === 1 && content?.trim() === asyncQuestions[0].question.trim();
       if (!content && !images.length && !videos.length && !asyncQuestions.length) continue;
       if (item.type === 'reasoning') {
@@ -1355,7 +1597,13 @@ function showState(view, live = true, loadingPreview = false) {
       const section = element('div', item.type === 'userMessage' ? 'item user-message' : item.type === 'agentMessage' ? 'item assistant-message' : 'item');
       if (item.type !== 'userMessage' && item.type !== 'agentMessage' && !(['imageView', 'imageGeneration'].includes(item.type) && (images.length || videos.length))) section.append(element('div', 'item-label', types[item.type]));
       else section.setAttribute('aria-label', item.type === 'userMessage' ? '你' : 'Codex');
-      if (content && item.type === 'userMessage' && (content.length > 600 || content.split('\n').length > 10)) {
+      const questionReply = item.type === 'userMessage' && !images.length ? questionReplyParts(view.turns || [], turnIndex, itemIndex, content) : null;
+      if (questionReply) {
+        const question = element('button', 'question-reply-question', questionReply.question); question.type = 'button';
+        question.setAttribute('aria-expanded', 'false'); question.title = questionReply.question;
+        question.addEventListener('click', () => { const expanded = question.getAttribute('aria-expanded') === 'true'; question.setAttribute('aria-expanded', String(!expanded)); });
+        section.append(question, element('p', 'item-text question-reply-answer', questionReply.answer));
+      } else if (content && item.type === 'userMessage' && (content.length > 600 || content.split('\n').length > 10)) {
         const key = JSON.stringify([selectedId, turnDisplayKey, item.id || itemIndex]);
         const text = element('p', 'item-text', content);
         const toggle = element('button', 'message-expand', expandedMessages.has(key) ? '收起' : '查看更多');
@@ -1368,8 +1616,8 @@ function showState(view, live = true, loadingPreview = false) {
         });
         section.append(text, toggle);
       } else if (content && !duplicateQuestion) section.append(item.type === 'agentMessage' ? assistantContent(content, live && turn.id && item.id ? { threadId: selectedId, turnId: turn.id, itemId: item.id } : null) : element('p', item.type === 'commandExecution' ? 'item-code' : 'item-text', content));
-      if (pendingAsync) {
-        const threadId = selectedId, key = JSON.stringify([threadId, 'async', item.id]);
+      if (pendingAsync && !(skipKey && skippedAsyncQuestions.has(skipKey))) {
+        const threadId = selectedId, key = JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId, 'async', item.id]);
         let draft = inputDrafts.get(key);
         if (!draft) { draft = { answers: Object.create(null), pending: false }; inputDrafts.set(key, draft); }
         const card = element('div', 'question-card');
@@ -1380,7 +1628,11 @@ function showState(view, live = true, loadingPreview = false) {
           for (const option of question.options) {
             const label = element('label', 'user-input-option'); const radio = element('input'); radio.type = 'radio'; radio.name = question.id; radio.value = option;
             radio.checked = draft.answers[question.id] === option;
-            radio.addEventListener('change', () => { draft.answers[question.id] = option; });
+            radio.addEventListener('change', () => {
+              draft.answers[question.id] = option;
+              const other = group.querySelectorAll('.user-input-text')[0];
+              if (other) other.value = '';
+            });
             label.append(radio, element('span', '', option)); group.append(label);
           }
           const input = element('input', 'user-input-text'); input.type = 'text'; input.placeholder = question.options.length ? '其他回答' : '输入回答';
@@ -1390,7 +1642,19 @@ function showState(view, live = true, loadingPreview = false) {
           group.append(input); form.append(group);
         }
         const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : '提交'); submit.type = 'submit'; submit.disabled = draft.pending;
-        const feedback = element('p', 'list-error', draft.feedback || ''); form.append(submit, feedback);
+        const feedback = element('p', 'list-error', draft.feedback || '');
+        const actions = element('div', 'question-actions');
+        if (skipKey) {
+          const skip = element('button', 'question-skip', '跳过'); skip.type = 'button'; skip.disabled = draft.pending;
+          skip.addEventListener('click', () => {
+            if (draft.pending || selectedId !== threadId || skipKey !== JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id])) return;
+            if (skippedAsyncQuestions.size >= 1024) skippedAsyncQuestions.delete(skippedAsyncQuestions.values().next().value);
+            skippedAsyncQuestions.add(skipKey); delete draft.answers[asyncQuestions[0].id]; card.remove();
+            if (!questionPanel.querySelector('.question-card, .pending-request')) questionPanel.hidden = true;
+          });
+          actions.append(skip);
+        }
+        actions.append(submit); form.append(actions, feedback);
         draft.controls = { submit, status: feedback };
         form.addEventListener('submit', async event => {
           event.preventDefault();
@@ -1414,12 +1678,12 @@ function showState(view, live = true, loadingPreview = false) {
         for (const handle of images) imageRow.append(imagePreviewButton(handle, selectedId, true));
         group.append(imageRow);
         if (content || asyncQuestions.length || videos.length) group.append(section);
-        for (const media of videos) section.append(videoPreviewButton(media, selectedId));
+        for (const [index, media] of videos.entries()) section.append(videoPreviewButton(media, selectedId, videoOccurrence(index)));
         destination.append(group);
         continue;
       }
       for (const handle of images) section.append(imagePreviewButton(handle, selectedId, false, item.type === 'imageView' ? '已查看 1 张图像' : '查看图片'));
-      for (const media of videos) section.append(videoPreviewButton(media, selectedId));
+      for (const [index, media] of videos.entries()) section.append(videoPreviewButton(media, selectedId, videoOccurrence(index)));
       destination.append(section);
     }
     if (liveReasoningIndex >= 0) {
@@ -1437,13 +1701,21 @@ function showState(view, live = true, loadingPreview = false) {
       }
       hasLiveActivityHeading = true;
     }
+    if (liveTurn && running.some(candidate => candidate.id === turn.id) && !hasLiveActivityHeading) {
+      row.append(element('div', 'thinking-title live-activity-title live-thinking', '正在思考'));
+    }
     fragment.append(row);
   }
-  if (live && running.length && !hasLiveActivityHeading) fragment.append(element('div', 'live-thinking', '正在思考'));
+  for (const [scope, groups] of priorWorkGroups) if (!renderedWorkScopes.has(scope)) {
+    for (const group of groups) expandedWork.delete(group.key);
+    priorWorkGroups.delete(scope);
+  }
   const focusedInput = document.activeElement;
   const inputFocus = focusedInput?.dataset?.inputDraftKey ? { key: focusedInput.dataset.inputDraftKey, question: focusedInput.dataset.inputQuestionId, start: focusedInput.selectionStart, end: focusedInput.selectionEnd } : null;
   const oldQuestionScroll = questionPanel.scrollTop;
   turns.replaceChildren(fragment);
+  pruneVideoPreviews();
+  for (const video of playingVideos) if (video.isConnected && video.paused) void video.play().catch(() => {});
   if (workFocus) {
     let target = [...turns.querySelectorAll('details.work-activity')].find(node => node.dataset.workKey === workFocus.key);
     for (const index of workFocus.path) target = target?.children[index];
@@ -1459,7 +1731,9 @@ function showState(view, live = true, loadingPreview = false) {
   if (conversation) {
     if (followLatest) conversation.scrollTop = conversation.scrollHeight;
     else if (Number.isFinite(oldScrollTop)) conversation.scrollTop = oldScrollTop;
+    if (historyScrollThread !== selectedId) { historyScrollThread = selectedId; previousHistoryScrollTop = conversation.scrollTop; }
   }
+  updateHistoryControl();
   updateScrollButton();
   renderSummary(view, fileTargets);
   status(live ? '已连接' : '仅查看历史', live ? 'ready' : 'error');
@@ -1476,16 +1750,25 @@ function renderSummary(view, fileTargets = new Map()) {
   function section(name, values, empty, collapsible = false, agentSection = false) {
     const group = element(collapsible ? 'details' : 'section', 'summary-section');
     if (collapsible) { group.open = agentSection ? summaryAgentsExpanded : summaryFilesExpanded; group.addEventListener('toggle', () => { if (agentSection) summaryAgentsExpanded = group.open; else summaryFilesExpanded = group.open; }); }
-    group.append(element(collapsible ? 'summary' : 'h2', 'summary-heading', collapsible ? `${name} · ${values.length}` : name));
+    const heading = element(collapsible ? 'summary' : 'h2', 'summary-heading');
+    heading.append(element('span', 'summary-heading-label', collapsible ? `${name} · ${values.length}` : name));
+    if (collapsible) heading.append(chevronIcon());
+    group.append(heading);
     if (!values.length) group.append(element('p', 'summary-empty', empty));
     for (const [name, detail] of values) {
       const row = element('div', 'summary-row');
       const target = !agentSection ? fileTargets.get(name) : (uuid.test(detail?.id || '') && selectedId ? { open: () => openAgentHistory(displayName, selectedId, detail.id) } : null);
-      const displayName = agentSection ? name.split('/').filter(Boolean).at(-1) || name : name;
+      const parts = name.split('/').filter(Boolean);
+      const displayName = parts.at(-1) || name;
       const label = element(target?.open ? 'button' : 'span', target?.open ? 'summary-name summary-file-link' : 'summary-name', displayName);
-      if (target?.open) { label.type = 'button'; label.addEventListener('click', () => { showSummary(false); target.open(); }); }
+      label.title = name;
+      if (target?.open) { label.type = 'button'; label.addEventListener('click', () => target.open()); }
       const statusLabels = { started: '进行中', interacted: '进行中', completed: '已完成', interrupted: '已中断', inProgress: '进行中', failed: '失败' };
-      row.append(label, element('span', 'summary-detail', agentSection ? (statusLabels[detail.status] || detail.status) : detail));
+      const description = agentSection ? (statusLabels[detail.status] || '') : (parts.length > 1 ? name.slice(0, name.lastIndexOf('/')) : '');
+      const info = element('div', 'summary-row-content');
+      info.append(label);
+      if (description) info.append(element('span', 'summary-detail', description));
+      row.append(info);
       group.append(row);
     }
     fragment.append(group);
@@ -1609,7 +1892,7 @@ function handleEvent(block) {
   else if (type === 'status' && payload.status === 'unavailable') { cancelPendingRender(); streamView = null; streamSeq = null; updateLiveTaskStatus(selectedId, 'unknown'); if (displayedHistoryId === selectedId && selectedId) status('仅查看历史', 'error'); else fail('任务状态暂不可用'); }
   return false;
 }
-async function connect(id, attempt = 0) {
+async function connect(id, attempt = 0, preserveView = false) {
   cancelPendingRender();
   stopSidebarStatuses();
   streamView = null; streamSeq = null;
@@ -1621,23 +1904,30 @@ async function connect(id, attempt = 0) {
   let watchdog, receivedView = false;
   const clearWatchdog = () => { clearTimeout(watchdog); watchdog = undefined; };
   current.signal.addEventListener('abort', () => { clearWatchdog(); assembler?.cancel(); if (active === current) { sidebarStatusSnapshot = new Map(); applySidebarStatuses(); } }, { once: true });
-  function disconnected(message) {
+  function disconnected() {
     if (current.signal.aborted || active !== current) return;
     current.abort();
     updateLiveTaskStatus(id, 'unknown');
-    fail(message);
+    error.hidden = true;
+    if (!receivedView && !preserveView) showConversationLoading('连接中断，正在重试');
     status('重新连接中', 'connecting');
     const delay = Math.min(10000, 500 * (2 ** Math.min(attempt, 5)));
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined;
-      if (active === current) void connect(id, attempt + 1);
+      if (active === current) void connect(id, attempt + 1, preserveView || receivedView);
     }, delay);
   }
   function resetWatchdog() {
     clearWatchdog();
-    watchdog = setTimeout(() => disconnected('连接超时'), 45000);
+    watchdog = setTimeout(disconnected, 45000);
   }
-  clearConversation(); error.hidden = true; status('连接中', 'connecting');
+  if (preserveView) {
+    historyRequest?.abort(); historyRequest = null; stopGoalClock();
+    activeTurnId = null; liveMode = null; liveRuntimeStatus = null;
+    goalPanel.hidden = true; questionPanel.hidden = true;
+  } else clearConversation();
+  homeErrorSource = null; error.hidden = true; status(preserveView ? '重新连接中' : '连接中', 'connecting');
+  if (!preserveView) showConversationLoading();
   if (!uuid.test(id)) { current.abort(); fail('任务 ID 格式不正确'); return; }
   const cached = recentView(id);
   if (cached) void scopedFetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store', signal: current.signal }).then(response => {
@@ -1672,8 +1962,8 @@ async function connect(id, attempt = 0) {
           if (current.signal.aborted || active !== current) return;
           if (assembled) {
             if (assembled.value?.event !== 'state' || assembled.value?.data?.seq !== assembled.seq) throw new Error('状态分片无效');
-            receivedView = true;
             if (handleEvent(`event: state\ndata: ${JSON.stringify(assembled.value.data)}`)) attempt = 0;
+            receivedView = true;
           }
           continue;
         }
@@ -1683,14 +1973,15 @@ async function connect(id, attempt = 0) {
           if (!['state-too-large', 'state-invalid'].includes(detail?.code)) throw new Error('连接失败');
           current.abort(); updateLiveTaskStatus(id, 'unknown'); fail(detail.code === 'state-too-large' ? '聊天内容过大，暂无法加载' : '聊天暂时无法加载，请在电脑上查看'); connectSidebarStatuses({ allowSelected: true }); return;
         }
-        if (/^event:\s*(?:state|history)\s*$/m.test(block)) receivedView = true;
+        const isView = /^event:\s*(?:state|history)\s*$/m.test(block);
         if (handleEvent(block)) attempt = 0;
+        if (isView) receivedView = true;
       }
     }
     if (!current.signal.aborted && active === current) throw new Error('连接已断开');
   } catch (e) {
     if (current.signal.aborted || active !== current) return;
-    disconnected(e.message || '连接失败');
+    disconnected();
   }
 }
 function showUnpaired() {
@@ -1698,7 +1989,7 @@ function showUnpaired() {
   resetHistoryScope(true);
   stopSidebarStatuses(); clearTimeout(listRetryTimer); clearTimeout(visibleStatusTimer); clearTimeout(hostStatusTimer); ++listRequestGeneration; ++hostStatusGeneration;
   clearTimeout(reconnectTimer); active?.abort(); active = undefined; selectedId = null;
-  clearRecentViews(); clearConversation();
+  clearRecentViews(); clearConversation(); homeErrorSource = null; error.hidden = true; error.textContent = '';
   deviceMenu.hidden = true;
   connection.hidden = true;
   const control = document.querySelector('#unpaired-control'); if (control) { control.hidden = false; control.textContent = '未配对 · 去配对'; }
@@ -1730,12 +2021,14 @@ async function checkPairingStatus(pending) {
   else if (result === 'unpaired') showUnpaired();
   else {
     connection.hidden = false;
-    const control = document.querySelector('#unpaired-control'); if (control) { control.hidden = false; control.textContent = '去配对'; }
-    projectList.replaceChildren(element('p', 'list-status', '暂时无法连接')); status('连接中断', 'error');
+    const control = document.querySelector('#unpaired-control'); if (control) control.hidden = true;
+    projectList.replaceChildren(element('p', 'list-status', '正在连接'));
+    if (homeConnectionConfirmed) status('连接中断', 'error');
+    else { status('连接中', 'connecting'); showConversationLoading(); }
     hostStatusTimer = setTimeout(() => { void checkPairingStatus(); }, 5000); hostStatusTimer?.unref?.();
   }
 }
-if (window.pairingReady) void checkPairingStatus(window.pairingReady);
+if (window.pairingReady) { status('连接中', 'connecting'); showConversationLoading(); void checkPairingStatus(window.pairingReady); }
 else startPairedHome();
 window.addEventListener('pagehide', () => { homeSuspended = true; cancelPendingRender(); stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; clearTimeout(listRetryTimer); listRetryTimer = undefined; clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; for (const id of statusHandovers.keys()) clearStatusHandover(id); clearTimeout(hostStatusTimer); ++hostStatusGeneration; ++listRequestGeneration; active?.abort(); });
 window.addEventListener('pageshow', event => {
