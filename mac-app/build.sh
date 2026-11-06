@@ -17,7 +17,7 @@ actual=$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')
 tar -xzf "$tmp/$archive" -C "$tmp"
 mkdir -p "$output/Contents/MacOS" "$output/Contents/Resources/runtime"
 cp "$tmp/node-v${version}-darwin-${arch}/bin/node" "$output/Contents/Resources/node"
-for file in mac-app-runtime.mjs file-preview.mjs approval-guard.mjs user-input-guard.mjs async-question-guard.mjs pairing-panel.mjs pairing-connector.mjs pairing-registry.mjs paired-desktop-connector.mjs preview-connector.mjs ws-send-scheduler.mjs sidebar-status.mjs sidebar-projection.mjs status-priorities.mjs desktop-ipc.mjs desktop-session.mjs conversation-state.mjs desktop-view.mjs thread-list.mjs rollout-history.mjs upload-store.mjs chunk-upload.mjs image-validator.mjs image-preview.mjs media-resolver.mjs bounded-snapshot-stream.mjs history-window-prototype.mjs package.json; do
+for file in mac-app-runtime.mjs file-preview.mjs approval-guard.mjs user-input-guard.mjs async-question-guard.mjs pairing-panel.mjs pairing-connector.mjs pairing-registry.mjs paired-desktop-connector.mjs preview-connector.mjs ws-send-scheduler.mjs sidebar-status.mjs sidebar-projection.mjs status-priorities.mjs desktop-ipc.mjs desktop-session.mjs conversation-state.mjs desktop-view.mjs thread-list.mjs rollout-history.mjs path-utils.mjs credential-security.mjs upload-store.mjs chunk-upload.mjs image-validator.mjs image-preview.mjs media-resolver.mjs bounded-snapshot-stream.mjs history-window-prototype.mjs package.json; do
   cp "$root/$file" "$output/Contents/Resources/runtime/"
 done
 ditto "$root/public" "$output/Contents/Resources/runtime/public"

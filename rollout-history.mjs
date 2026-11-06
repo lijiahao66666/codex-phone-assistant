@@ -2,8 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, relative, isAbsolute } from 'node:path';
+import { join } from 'node:path';
 import { desktopView } from './desktop-view.mjs';
+import { insidePath } from './path-utils.mjs';
 
 // Rollout data is historical and must never authorize live control operations.
 export async function readRolloutHistory(threadId, { codexHome = join(homedir(), '.codex'), maxBytes = 16 * 1024 * 1024, parentThreadId = null } = {}) {
@@ -35,8 +36,7 @@ async function readRolloutFile(threadId, codexHome, maxBytes, parentThreadId) {
   if (!row || typeof row.rollout_path !== 'string') return null;
   const root = await realpath(join(codexHome, 'sessions'));
   const path = await realpath(row.rollout_path);
-  const rel = relative(root, path);
-  if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel) || !path.endsWith('.jsonl')) return null;
+  if (!insidePath(root, path) || !path.toLowerCase().endsWith('.jsonl')) return null;
   const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
   try {
     const info = await file.stat();

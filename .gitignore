@@ -1,7 +1,10 @@
 node_modules/
 node_modules
+.tools/
 build/
 dist/
+windows-candidate/Shell/bin/
+windows-candidate/Shell/obj/
 *.app/
 *.dmg
 *.exe

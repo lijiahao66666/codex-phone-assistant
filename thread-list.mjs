@@ -1,8 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, normalize } from 'node:path';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { pathKey, sameOrInside } from './path-utils.mjs';
 
 function unreadLocalThreads(state) {
   const identity = state['electron-persisted-atom-state']?.['local-document-identity'];
@@ -46,8 +47,8 @@ export async function listDesktopThreads({ codexHome = join(homedir(), '.codex')
     const expanded = desktopUi[`sidebar-project-expanded-v1-codex:${project.id}`];
     grouped.set(project.id, { id: project.id, name: project.name, expanded: typeof expanded === 'boolean' ? expanded : false, threads: [] });
     for (const root of Array.isArray(project.rootPaths) ? project.rootPaths : []) {
-      if (typeof root !== 'string' || !root.startsWith('/')) continue;
-      const key = normalize(root).replace(/\/$/, '') || '/';
+      const key = pathKey(root);
+      if (key === null) continue;
       roots.set(key, roots.has(key) ? null : project.id);
     }
   }
@@ -55,13 +56,13 @@ export async function listDesktopThreads({ codexHome = join(homedir(), '.codex')
     const thread = { id: row.id, title: row.name || row.title, status: 'unknown', ...(unread?.has(row.id) ? { unread: true } : {}), ...(includeRecency && Number.isSafeInteger(row.recency) ? { recency: row.recency } : {}) };
     const assignment = assignments[row.id];
     let project = assignment?.projectKind === 'local' && projects[assignment.projectId];
-    if (!assignment && !projectless.has(row.id) && typeof row.cwd === 'string' && row.cwd.startsWith('/')) {
-      const root = normalize(row.cwd).replace(/\/$/, '') || '/';
+    const root = pathKey(row.cwd);
+    if (!assignment && !projectless.has(row.id) && root !== null) {
       if (roots.has(root)) project = projects[roots.get(root)];
       else {
         const matches = new Set();
         for (const [candidate, projectId] of roots) {
-          if (root.startsWith(candidate === '/' ? '/' : `${candidate}/`)) matches.add(projectId);
+          if (sameOrInside(candidate, root)) matches.add(projectId);
         }
         if (matches.size === 1 && !matches.has(null)) project = projects[[...matches][0]];
       }

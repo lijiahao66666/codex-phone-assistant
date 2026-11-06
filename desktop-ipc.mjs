@@ -3,11 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { absolutePath } from './path-utils.mjs';
+
+const defaultSocketPath = process.platform === 'win32'
+  ? '\\\\.\\pipe\\codex-ipc'
+  : join(homedir(), '.codex', 'ipc', 'ipc.sock');
 
 // This private desktop protocol is version-specific; writes require explicit methods.
 export class DesktopIpc extends EventEmitter {
   #socket;
-  constructor({ socketPath = join(homedir(), '.codex/ipc/ipc.sock'), timeout = 5000, maxFrame = 64 * 1024 * 1024 } = {}) {
+  constructor({ socketPath = defaultSocketPath, timeout = 5000, maxFrame = 64 * 1024 * 1024 } = {}) {
     super();
     this.socketPath = socketPath;
     this.timeout = timeout;
@@ -75,11 +80,13 @@ export class DesktopIpc extends EventEmitter {
     return { ownerId: response.handledByClientId, result: response.result };
   }
 
-  async #control(method, conversationId, params, version = 1, expectedOwnerId) {
+  async #control(method, conversationId, params, version = 1, expectedOwnerId, beforeWrite) {
     if (typeof conversationId !== 'string' || !conversationId.trim()) throw new TypeError('conversationId required');
     if (typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw new TypeError('expectedOwnerId required');
     const { ownerId } = await this.discover(conversationId, 'local');
     if (ownerId !== expectedOwnerId) throw Object.assign(new Error('Thread owner changed'), { code: 'unavailable' });
+    if (this.state !== 'ready') throw new Error('IPC not ready');
+    if (beforeWrite && !(await beforeWrite())) throw Object.assign(new Error('Thread state changed'), { code: 'unavailable' });
     if (this.state !== 'ready') throw new Error('IPC not ready');
     const response = await this.#request(method, { conversationId, ...params }, { version, targetClientId: ownerId });
     if (response.handledByClientId && response.handledByClientId !== ownerId) throw new Error('Unexpected thread owner');
@@ -94,8 +101,8 @@ export class DesktopIpc extends EventEmitter {
   }
 
   async steerTurn(conversationId, input, { cwd, clientUserMessageId = randomUUID(), expectedOwnerId } = {}) {
-    if (!Array.isArray(input) || input.length === 0 || input.some(item => item?.type === 'text' ? typeof item.text !== 'string' : item?.type !== 'localImage' || typeof item.path !== 'string' || !item.path.startsWith('/'))) throw new TypeError('input must contain text or local images');
-    if (typeof cwd !== 'string' || !cwd.startsWith('/')) throw new TypeError('absolute cwd required');
+    if (!Array.isArray(input) || input.length === 0 || input.some(item => item?.type === 'text' ? typeof item.text !== 'string' : item?.type !== 'localImage' || !absolutePath(item.path))) throw new TypeError('input must contain text or local images');
+    if (!absolutePath(cwd)) throw new TypeError('absolute cwd required');
     if (typeof clientUserMessageId !== 'string' || !clientUserMessageId) throw new TypeError('invalid clientUserMessageId');
     const text = input.filter(item => item.type === 'text').map(item => item.text).join('\n');
     const imageAttachments = input.flatMap((item, index) => item.type === 'localImage' ? [{ id: `${clientUserMessageId}:${index}`, src: item.path, localPath: item.path }] : []);
@@ -109,9 +116,9 @@ export class DesktopIpc extends EventEmitter {
     return this.#control('thread-follower-interrupt-turn', conversationId, { mode: 'user-stop', expectedTurnId }, 4, expectedOwnerId);
   }
 
-  async setCollaborationMode(conversationId, mode, settings, { expectedOwnerId } = {}) {
+  async setCollaborationMode(conversationId, mode, settings, { expectedOwnerId, beforeWrite } = {}) {
     if (!['plan', 'default'].includes(mode) || typeof settings?.model !== 'string' || !settings.model || (settings.reasoning_effort !== null && typeof settings.reasoning_effort !== 'string') || (settings.developer_instructions !== null && typeof settings.developer_instructions !== 'string')) throw new TypeError('Invalid collaboration mode settings');
-    return this.#control('thread-follower-update-thread-settings', conversationId, { threadSettings: { collaborationMode: { mode, settings: { model: settings.model, reasoning_effort: settings.reasoning_effort, developer_instructions: settings.developer_instructions } } } }, 2, expectedOwnerId);
+    return this.#control('thread-follower-update-thread-settings', conversationId, { threadSettings: { collaborationMode: { mode, settings: { model: settings.model, reasoning_effort: settings.reasoning_effort, developer_instructions: settings.developer_instructions } } } }, 2, expectedOwnerId, beforeWrite);
   }
 
   async replyCommandApproval(conversationId, requestId, decision, { expectedOwnerId } = {}) {
@@ -192,6 +199,11 @@ export class DesktopIpc extends EventEmitter {
       let message;
       try { message = JSON.parse(body.toString('utf8')); }
       catch { this.failure = new Error('Invalid IPC JSON'); this.#socket.destroy(); return; }
+      if (!message || typeof message !== 'object' || Array.isArray(message)) {
+        this.failure = new Error('Invalid IPC message');
+        this.#socket.destroy();
+        return;
+      }
       const pending = message.type === 'response' && this.pending.get(message.requestId);
       if (pending) {
         this.pending.delete(message.requestId); clearTimeout(pending.timer);

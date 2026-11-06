@@ -1,6 +1,7 @@
 import { open, mkdir, lstat, unlink } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { pairingLink } from './pairing-registry.mjs';
+import { hardenPrivatePath, isCredentialStatSecure, isPrivateDirectoryStat } from './credential-security.mjs';
 import QRCode from 'qrcode';
 
 const secretPattern = /^[A-Za-z0-9_-]{43}$/;
@@ -15,8 +16,9 @@ function originUrl(origin, allowInsecureForTests = false) {
 
 async function privateDirectory(path) {
   await mkdir(path, { recursive: true, mode: 0o700 });
+  hardenPrivatePath(path);
   const info = await lstat(path);
-  if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) {
+  if (!isPrivateDirectoryStat(info)) {
     throw new Error('Credential directory must be private and owned by the current user');
   }
 }
@@ -26,7 +28,7 @@ async function readConfig(path) {
   const file = await open(path, flags);
   try {
     const info = await file.stat();
-    if (!info.isFile() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077) || info.size > 4096) throw new Error('Invalid credential file permissions');
+    if (!isCredentialStatSecure(info) || info.size > 4096) throw new Error('Invalid credential file permissions');
     const config = JSON.parse(await file.readFile('utf8'));
     if (!uuidPattern.test(config.hostId) || !secretPattern.test(config.secret)) throw new Error('Invalid credential file');
     originUrl(config.origin);
@@ -37,7 +39,7 @@ async function readConfig(path) {
 export class PairingConnector {
   constructor({ origin, configPath, fetchImpl = fetch, allowInsecureForTests = false, writeConfig = async (file, value) => { await file.writeFile(value); await file.sync(); } }) {
     this.url = originUrl(origin, allowInsecureForTests);
-    if (typeof configPath !== 'string' || !configPath.startsWith('/')) throw new TypeError('Absolute credential path required');
+    if (typeof configPath !== 'string' || !isAbsolute(configPath)) throw new TypeError('Absolute credential path required');
     this.configPath = configPath;
     this.fetch = fetchImpl;
     this.writeConfig = writeConfig;
@@ -67,6 +69,7 @@ export class PairingConnector {
     let complete = false;
     let enrolledSecret;
     try {
+      hardenPrivatePath(this.configPath);
       const result = await this.#call('/api/enroll', { body: { name: name.trim() } });
       if (!uuidPattern.test(result.hostId) || !secretPattern.test(result.secret)) throw new Error('Invalid enrollment response');
       enrolledSecret = result.secret;

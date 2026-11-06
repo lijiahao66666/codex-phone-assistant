@@ -35,9 +35,14 @@ export class DesktopSession extends EventEmitter {
   async setCollaborationMode(mode) {
     const current = this.value?.latestCollaborationMode;
     const owner = this.conversation.ownerId;
+    const revision = this.revision;
     if (!['plan', 'default'].includes(mode) || this.status !== 'ready' || !this.client || this.value?.id !== this.conversationId || this.value.threadRuntimeStatus?.type !== 'idle' || !['plan', 'default'].includes(current?.mode) || typeof current?.settings?.model !== 'string' || !current.settings.model || (current.settings.reasoning_effort !== null && typeof current.settings.reasoning_effort !== 'string') || (current.settings.developer_instructions !== null && typeof current.settings.developer_instructions !== 'string') || typeof owner !== 'string' || !owner) throw Object.assign(new Error('Session unavailable'), { code: 'unavailable' });
     if (mode === current.mode) return { applied: true };
-    return this.client.setCollaborationMode(this.conversationId, mode, current.settings, { expectedOwnerId: owner });
+    return this.client.setCollaborationMode(this.conversationId, mode, current.settings, {
+      expectedOwnerId: owner,
+      beforeWrite: () => this.status === 'ready' && this.revision === revision &&
+        this.value?.id === this.conversationId && this.conversation.ownerId === owner,
+    });
   }
 
   async sendText(text) {

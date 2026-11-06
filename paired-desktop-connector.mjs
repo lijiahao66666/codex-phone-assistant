@@ -3,6 +3,7 @@ import { open } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createPreviewConnector } from './preview-connector.mjs';
+import { isCredentialStatSecure } from './credential-security.mjs';
 
 // Read the credential produced by pairing-cli without exposing it to logs.
 export async function createPairedDesktopConnector({ credentialPath, allowInsecureForTests = false, ...options }) {
@@ -11,7 +12,7 @@ export async function createPairedDesktopConnector({ credentialPath, allowInsecu
   let config;
   try {
     const info = await file.stat();
-    if (!info.isFile() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077) || info.size > 4096) {
+    if (!isCredentialStatSecure(info) || info.size > 4096) {
       throw new Error('Invalid credential file permissions');
     }
     config = JSON.parse(await file.readFile('utf8'));

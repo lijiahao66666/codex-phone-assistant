@@ -27,11 +27,17 @@ node --test approval-guard.test.mjs async-question-guard.test.mjs conversation-s
 - `mac-app/chatgpt-icon.png` 和生成图标包含 OpenAI 图形标志；确认使用及再分发权限，或替换为自有图标。
 - 整理并验证中转服务与线上 H5 的准确版本，形成可复现部署文档；梳理身份认证、数据访问、传输及安全边界。
 - 清点默认域名、应用名称、构建标识和示例中涉及的个人或服务信息，确认是否保留。
-- 补齐 Mac 安装、配对、消息和停止的真实端到端验证；Windows 适配与测试尚未合入本快照。
+- 补齐 Mac 安装、配对、消息和停止的真实端到端验证。
 - 开源前再次执行秘密扫描、个人信息检查和人工代码审查，确认历史记录及所有资源适合公开。
 
 本目录不含许可证文件，并不授予第三方使用或再分发许可。
 
 ## Windows 开发候选
 
-`windows-candidate/` 是原生窗口和安装器的独立实验，`windows-compat/` 是路径兼容补丁候选。两者尚未合入产品运行时，不能直接作为可用安装包。请先阅读各目录 README；Windows 端仍需实现和验证 IPC、凭据 ACL、配对、媒体处理和安装卸载。不要用真实任务验证写操作，优先使用专用测试聊天。
+Windows 主运行时现在支持 `\\.\pipe\codex-ipc`、Windows 项目路径归组和历史目录边界，并为配对凭据应用当前用户 ACL。构建便携版、ZIP 和安装器：
+
+```powershell
+.\windows-candidate\build-windows.ps1 -Force
+```
+
+当前已验证 Windows 命名管道、项目与任务列表、H5 配对、任务历史读取、H5 发送与停止、关闭到托盘及再次启动唤回，以及安装、卸载和重新安装。图片上传与预览在 Windows 包中默认关闭。不要把真实任务用于破坏性写操作测试。

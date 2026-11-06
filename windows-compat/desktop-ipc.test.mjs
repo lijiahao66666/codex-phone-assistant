@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,9 +14,15 @@ function frame(message) {
   return Buffer.concat([header, body]);
 }
 
+function socketPathFor(directory, name = 'socket') {
+  return process.platform === 'win32'
+    ? `\\\\.\\pipe\\codex-phone-test-${name}-${randomUUID()}`
+    : join(directory, name);
+}
+
 async function fixture(handler) {
   const dir = await mkdtemp(join(tmpdir(), 'hub-ipc-'));
-  const socketPath = join(dir, 'socket');
+  const socketPath = socketPathFor(dir);
   const server = net.createServer(socket => {
     let buffer = Buffer.alloc(0);
     socket.on('data', chunk => {
@@ -49,7 +56,7 @@ test('non-object IPC frames disconnect and reject pending discovery', async () =
 
 test('closing a half-open peer cannot block session recovery indefinitely', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'hub-ipc-half-open-'));
-  const socketPath = join(dir, 'socket');
+  const socketPath = socketPathFor(dir);
   let peer;
   const server = net.createServer({ allowHalfOpen: true }, socket => {
     peer = socket;
@@ -280,8 +287,10 @@ test('routes explicit control operations to discovered owner with correct versio
   try {
     await client.connect();
     const options = { expectedOwnerId: 'owner' };
+    const imagePath = join(tmpdir(), 'photo.png');
+    const cwd = tmpdir();
     assert.deepEqual(await client.startTurn('thread', { request: { input: [] }, context: {} }, options), { ok: true });
-    await client.steerTurn('thread', [{ type: 'text', text: 'hello' }, { type: 'localImage', path: '/tmp/photo.png' }], { ...options, cwd: '/tmp', clientUserMessageId: 'message' });
+    await client.steerTurn('thread', [{ type: 'text', text: 'hello' }, { type: 'localImage', path: imagePath }], { ...options, cwd, clientUserMessageId: 'message' });
     await client.interruptTurn('thread', 'turn', options);
     await client.replyCommandApproval('thread', 42, 'decline', options);
     await client.replyFileApproval('thread', 'req', 'accept', options);
@@ -295,12 +304,12 @@ test('routes explicit control operations to discovered owner with correct versio
       ['thread-follower-update-thread-settings', 2, 'owner'],
     ]);
     assert.deepEqual(writes[0].params, { conversationId: 'thread', turnStart: { request: { input: [] }, context: {} } });
-    assert.deepEqual(writes[1].params.input, [{ type: 'text', text: 'hello' }, { type: 'localImage', path: '/tmp/photo.png' }]);
+    assert.deepEqual(writes[1].params.input, [{ type: 'text', text: 'hello' }, { type: 'localImage', path: imagePath }]);
     assert.equal(writes[1].params.clientUserMessageId, 'message');
     assert.equal(writes[1].params.restoreMessage.id, 'message');
     assert.equal(writes[1].params.restoreMessage.text, 'hello');
-    assert.deepEqual(writes[1].params.restoreMessage.context.imageAttachments, [{ id: 'message:1', src: '/tmp/photo.png', localPath: '/tmp/photo.png' }]);
-    assert.deepEqual(writes[1].params.restoreMessage.context.workspaceRoots, ['/tmp']);
+    assert.deepEqual(writes[1].params.restoreMessage.context.imageAttachments, [{ id: 'message:1', src: imagePath, localPath: imagePath }]);
+    assert.deepEqual(writes[1].params.restoreMessage.context.workspaceRoots, [cwd]);
     await assert.rejects(client.steerTurn('thread', [{ type: 'text', text: 'hello' }]), /absolute cwd required/);
     assert.deepEqual(writes[2].params, { conversationId: 'thread', mode: 'user-stop', expectedTurnId: 'turn' });
     assert.deepEqual(writes[3].params, { conversationId: 'thread', requestId: 42, decision: 'decline' });
@@ -365,7 +374,7 @@ test('rejects changed or missing owner before sending a write frame', async () =
   const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
   try {
     await client.connect();
-    await assert.rejects(client.steerTurn('thread', [{ type: 'text', text: 'hello' }], { cwd: '/tmp', expectedOwnerId: 'owner-old' }), { code: 'unavailable' });
+    await assert.rejects(client.steerTurn('thread', [{ type: 'text', text: 'hello' }], { cwd: tmpdir(), expectedOwnerId: 'owner-old' }), { code: 'unavailable' });
     await assert.rejects(client.interruptTurn('thread', 'turn'), /expectedOwnerId required/);
     assert.equal(calls.filter(msg => msg.method.startsWith('thread-follower-')).length, 0);
   } finally { await client.close(); await f.close(); }

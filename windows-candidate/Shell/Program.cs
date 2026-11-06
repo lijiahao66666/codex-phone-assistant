@@ -12,12 +12,13 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
         using var guard = new Mutex(true, @"Local\codex-phone-assistant", out var created);
+        using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\codex-phone-assistant-show");
         if (!created)
         {
-            MessageBox.Show("codex手机助手已在运行，请从系统托盘打开。", "codex手机助手");
+            showEvent.Set();
             return;
         }
-        Application.Run(new PhoneForm());
+        Application.Run(new PhoneForm(showEvent));
     }
 }
 
@@ -29,7 +30,7 @@ internal sealed class PhoneForm : Form
     private Uri? panelUri;
     private bool quitting;
 
-    public PhoneForm()
+    public PhoneForm(EventWaitHandle showEvent)
     {
         Text = "codex手机助手";
         Width = 500;
@@ -49,6 +50,15 @@ internal sealed class PhoneForm : Form
         tray.DoubleClick += (_, _) => ShowPanel();
         Shown += async (_, _) => await StartAsync();
         FormClosing += OnClosing;
+        var activation = new Thread(() =>
+        {
+            while (!quitting)
+            {
+                showEvent.WaitOne();
+                if (!quitting && IsHandleCreated) BeginInvoke(ShowPanel);
+            }
+        }) { IsBackground = true };
+        activation.Start();
     }
 
     private void ShowPanel()
@@ -62,7 +72,15 @@ internal sealed class PhoneForm : Form
     {
         try
         {
-            await web.EnsureCoreWebView2Async();
+            var webViewData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "codex-phone-assistant",
+                "WebView2");
+            Directory.CreateDirectory(webViewData);
+            var webViewEnvironment = await CoreWebView2Environment.CreateAsync(
+                browserExecutableFolder: null,
+                userDataFolder: webViewData);
+            await web.EnsureCoreWebView2Async(webViewEnvironment);
             web.CoreWebView2.Settings.AreDevToolsEnabled = false;
             web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             await web.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(

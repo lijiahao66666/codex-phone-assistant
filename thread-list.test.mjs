@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { listDesktopThreads } from './thread-list.mjs';
 import { createHash } from 'node:crypto';
@@ -59,9 +59,25 @@ test('unassigned threads use an unambiguous project directory and respect exclus
   const dir = await mkdtemp(join(tmpdir(), 'codex-hub-roots-'));
   try {
     const db = new DatabaseSync(join(dir, 'state_5.sqlite'));
-    db.exec("CREATE TABLE threads (id TEXT, title TEXT, name TEXT, recency_at_ms INTEGER, archived INTEGER, source TEXT, thread_source TEXT, preview TEXT, cwd TEXT); INSERT INTO threads VALUES ('a','A',NULL,9,0,'vscode','user','shown','/work/one/'),('b','B',NULL,8,0,'vscode','user','shown','/work/one'),('c','C',NULL,7,0,'vscode','user','shown','/work/one/nested'),('d','D',NULL,6,0,'vscode','user','shown','/work/one-other'),('e','E',NULL,5,0,'vscode','user','shown','/work/one/nested/child'),('f','F',NULL,4,0,'vscode','user','shown','/work/one/nested/child'),('g','G',NULL,3,0,'vscode','user','shown','/work/one/nested/child'),('h','H',NULL,2,0,'vscode','user','shown','/work/one/nested/child/deeper')");
+    db.exec('CREATE TABLE threads (id TEXT, title TEXT, name TEXT, recency_at_ms INTEGER, archived INTEGER, source TEXT, thread_source TEXT, preview TEXT, cwd TEXT)');
+    const insert = db.prepare('INSERT INTO threads VALUES (?, ?, NULL, ?, 0, ?, ?, ?, ?)');
+    const base = join(dirname(dir), 'codex-hub-roots-fixture');
+    const one = join(base, 'one');
+    const nested = join(one, 'nested');
+    const child = join(nested, 'child');
+    const rows = [
+      ['a', 'A', 9, one],
+      ['b', 'B', 8, one],
+      ['c', 'C', 7, nested],
+      ['d', 'D', 6, `${one}-other`],
+      ['e', 'E', 5, child],
+      ['f', 'F', 4, child],
+      ['g', 'G', 3, child],
+      ['h', 'H', 2, join(child, 'deeper')],
+    ];
+    for (const [id, title, recency, cwd] of rows) insert.run(id, title, recency, 'vscode', 'user', 'shown', cwd);
     db.close();
-    await writeFile(join(dir, '.codex-global-state.json'), JSON.stringify({ 'local-projects': { p: { id: 'p', name: 'One', rootPaths: ['/work/one'] }, q: { id: 'q', name: 'Nested', rootPaths: ['/work/one/nested/child'] } }, 'projectless-thread-ids': ['b', 'g'], 'thread-project-assignments': { f: { projectKind: 'local', projectId: 'p' } } }));
+    await writeFile(join(dir, '.codex-global-state.json'), JSON.stringify({ 'local-projects': { p: { id: 'p', name: 'One', rootPaths: [one] }, q: { id: 'q', name: 'Nested', rootPaths: [child] } }, 'projectless-thread-ids': ['b', 'g'], 'thread-project-assignments': { f: { projectKind: 'local', projectId: 'p' } } }));
     const result = await listDesktopThreads({ codexHome: dir });
     assert.deepEqual(result.projects[0].threads.map(thread => thread.id), ['a', 'c', 'f']);
     assert.deepEqual(result.projects[1].threads.map(thread => thread.id), ['e']);
