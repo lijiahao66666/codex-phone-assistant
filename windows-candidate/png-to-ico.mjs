@@ -1,0 +1,11 @@
+import { readFile, writeFile } from 'node:fs/promises';
+const png = await readFile(process.argv[2]);
+if (png.readUInt32BE(16) !== 256 || png.readUInt32BE(20) !== 256) throw new Error('Expected a 256 x 256 PNG');
+const header = Buffer.alloc(22);
+header.writeUInt16LE(1, 2);
+header.writeUInt16LE(1, 4);
+header.writeUInt16LE(1, 10);
+header.writeUInt16LE(32, 12);
+header.writeUInt32LE(png.length, 14);
+header.writeUInt32LE(22, 18);
+await writeFile(process.argv[3], Buffer.concat([header, png]));

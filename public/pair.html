@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Codex 手机助手">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" href="/app-icon-20261104.png">
+  <link rel="apple-touch-icon" href="/app-icon-20261104.png">
+  <meta name="referrer" content="no-referrer">
+  <title>配对设备 - Codex 手机助手</title>
+  <link rel="stylesheet" href="/pair.css">
+  <script defer src="/install-prompt.js"></script>
+  <script defer src="/jsQR.js"></script>
+  <script defer src="/pair.js"></script>
+</head>
+<body>
+  <section id="install-prompt" class="install-prompt" aria-label="添加到主屏幕" hidden>
+    <button id="install-dismiss" class="install-dismiss" type="button" aria-label="关闭">×</button>
+    <strong>添加到主屏幕</strong>
+    <p id="install-message"></p>
+    <button id="install-action" class="install-action" type="button" hidden>添加</button>
+  </section>
+  <main class="pair">
+    <header><strong>Codex 手机助手</strong></header>
+    <h1>配对电脑</h1>
+    <form id="pair-form">
+      <label for="code">配对码</label>
+      <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+      <button id="scan" class="secondary" type="button">扫描电脑二维码</button>
+      <section id="scanner" hidden aria-label="扫描二维码">
+        <video id="camera" autoplay muted playsinline></video>
+        <canvas id="scan-canvas" hidden></canvas>
+        <button id="stop-scan" class="secondary" type="button">关闭相机</button>
+      </section>
+      <p id="error" class="error" role="alert" hidden></p>
+      <button id="submit" type="submit">配对</button>
+      <button id="cancel-pair" class="secondary" type="button" hidden>取消等待</button>
+    </form>
+  </main>
+</body>
+</html>

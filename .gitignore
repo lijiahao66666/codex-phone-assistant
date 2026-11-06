@@ -1,0 +1,12 @@
+node_modules/
+node_modules
+build/
+dist/
+*.app/
+*.dmg
+*.exe
+*.sqlite*
+.env
+.env.*
+*.log
+.DS_Store

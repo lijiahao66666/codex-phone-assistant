@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#0d1117" />
+<title>Codex Hub</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2128; --line:#30363d;
+    --fg:#e6edf3; --dim:#8b949e; --dim2:#6e7681;
+    --blue:#58a6ff; --green:#3fb950; --red:#f85149; --amber:#d29922; --purple:#bc8cff;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--fg);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro SC","PingFang SC",system-ui,sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  code,pre,.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace}
+
+  header{
+    flex:0 0 auto; display:flex; align-items:center; gap:10px;
+    padding:calc(10px + env(safe-area-inset-top)) 14px 10px;
+    background:var(--panel); border-bottom:1px solid var(--line);
+  }
+  header .back{
+    display:none; border:0; background:none; color:var(--blue);
+    font:inherit; font-size:15px; padding:4px 6px 4px 0; cursor:pointer;
+  }
+  body.detail header .back{display:block}
+  header h1{font-size:15px;font-weight:600;margin:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim2);flex:0 0 auto;transition:background .2s}
+  .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .dot.err{background:var(--red)}
+  .dot.sync{background:var(--amber);box-shadow:0 0 8px var(--amber);animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .tg{display:none;border:1px solid var(--line);background:var(--panel2);color:var(--dim);
+      font:inherit;font-size:12px;padding:4px 9px;border-radius:8px;cursor:pointer}
+  body.detail .tg{display:block}
+  .tg.on{color:#56d4dd;border-color:#2c4f52;background:#102a2c}
+
+  main{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
+  .wrap{padding:12px 14px 20px;max-width:860px;margin:0 auto}
+
+  /* 线程列表 */
+  .thread{
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:12px 14px; margin-bottom:10px; cursor:pointer;
+  }
+  .thread:active{background:var(--panel2)}
+  .thread .top{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
+  .thread .time{font-size:12px;color:var(--dim2);flex:0 0 auto}
+  .thread .st{font-size:11px;padding:1px 7px;border-radius:99px;background:var(--panel2);color:var(--dim);margin-left:auto;flex:0 0 auto}
+  .thread .st.running{background:#1f3a2b;color:var(--green)}
+  .thread .st.waiting{background:#3a2f14;color:var(--amber)}
+  .thread .preview{color:var(--fg);font-size:14px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .empty{color:var(--dim2);text-align:center;padding:60px 20px;font-size:14px}
+  .empty .retry{
+    display:inline-block;margin-top:14px;padding:8px 18px;border-radius:9px;
+    border:1px solid var(--line);background:var(--panel);color:var(--fg);font:inherit;font-size:14px;cursor:pointer;
+  }
+
+  /* 时间线 */
+  .item{margin-bottom:14px}
+  .role{font-size:12px;color:var(--dim2);margin-bottom:4px;letter-spacing:.3px}
+  .bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 14px;white-space:pre-wrap;word-break:break-word}
+  .me .bubble{background:#12283f;border-color:#1f4467}
+  .bubble.plain{background:none;border:0;padding:0 2px}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .card>.hd{display:flex;align-items:center;gap:8px;padding:9px 13px;background:var(--panel2);font-size:13px;color:var(--dim)}
+  .card>.hd b{color:var(--fg);font-weight:600}
+  .card>.bd{padding:11px 13px}
+  pre.snip{margin:0;padding:11px 13px;background:#0b0f14;font-size:12.5px;line-height:1.5;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:#c9d1d9;max-height:340px;overflow-y:auto}
+  details summary{cursor:pointer;color:var(--dim);font-size:12.5px;padding:8px 13px;user-select:none}
+  details[open] summary{border-bottom:1px solid var(--line)}
+  .tag{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--panel2);color:var(--dim2)}
+  .tag.ok{color:var(--green)} .tag.fail{color:var(--red)}
+  .jump{
+    position:fixed;left:50%;transform:translateX(-50%);bottom:78px;z-index:9;
+    background:var(--blue);color:#04121f;border:0;border-radius:99px;padding:8px 16px;
+    font:inherit;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 16px #0008;display:none;
+  }
+  .jump.show{display:block}
+
+  /* 审批卡 */
+  .approval{
+    position:sticky;bottom:0;margin:0 0 12px;background:#2d1f05;border:1px solid var(--amber);
+    border-radius:12px;padding:12px 14px;
+  }
+  .approval h3{margin:0 0 6px;font-size:14px;color:var(--amber);display:flex;gap:8px;align-items:center}
+  .approval .code{background:#0b0f14;border-radius:8px;padding:9px 11px;font-size:12.5px;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;color:#e3b341;margin-bottom:10px}
+  .approval .row{display:flex;gap:8px}
+  .approval button{flex:1;padding:10px;border-radius:9px;border:1px solid var(--line);background:var(--panel);color:var(--fg);font:inherit;font-size:14px;cursor:pointer}
+  .approval button.ok{background:var(--green);border-color:var(--green);color:#04260f;font-weight:600}
+  .approval button.no{background:transparent;border-color:var(--red);color:var(--red)}
+
+  /* 输入区 */
+  footer{
+    flex:0 0 auto; display:flex; gap:8px; align-items:flex-end;
+    padding:9px 12px calc(9px + env(safe-area-inset-bottom));
+    background:var(--panel); border-top:1px solid var(--line);
+  }
+  footer textarea{
+    flex:1; resize:none; border:1px solid var(--line); background:var(--bg); color:var(--fg);
+    border-radius:11px; padding:10px 12px; font:inherit; font-size:15px; max-height:130px; min-height:42px;
+    outline:none;
+  }
+  footer textarea:focus{border-color:var(--blue)}
+  footer button{
+    flex:0 0 auto; height:42px; padding:0 16px; border-radius:11px; border:0;
+    background:var(--blue); color:#04121f; font:inherit; font-weight:600; cursor:pointer;
+  }
+  footer button:disabled{opacity:.4}
+  footer button.stop{background:var(--red);color:#fff}
+</style>
+</head>
+<body>
+<header>
+  <button class="back" id="back">‹ 返回</button>
+  <h1 id="title">Codex Hub</h1>
+  <button class="tg" id="tg" title="显示/隐藏思考过程">思考</button>
+  <span class="dot" id="dot" title="连接状态"></span>
+</header>
+
+<main id="main"><div class="wrap" id="view"><div class="empty">加载中…</div></div></main>
+<button class="jump" id="jump">有新内容 ↓</button>
+
+<footer id="composer" style="display:none">
+  <textarea id="input" rows="1" placeholder="给 Codex 发指令…"></textarea>
+  <button id="send">发送</button>
+</footer>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const view = $('#view'), main = $('#main'), titleEl = $('#title'), dot = $('#dot');
+const composer = $('#composer'), inputEl = $('#input'), sendBtn = $('#send');
+const jumpBtn = $('#jump');
+
+let currentThread = null;   // {id, preview}
+let items = [];             // 当前线程的时间线
+let pending = new Map();    // 审批 id -> params
+let activeTurnId = null;
+let running = false;
+let showReasoning = false;
+let lastVer = '';           // 当前线程的文件版本
+let echo = [];              // 已发但还没落盘的消息
+let renderQueued = 0;
+let refreshing = false;
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---------------- 工具 ---------------- */
+
+function statusOf(t){
+  const s = t?.status;
+  if (!s) return {cls:'', text:'空闲'};
+  const type = typeof s === 'string' ? s : s.type;
+  if (type === 'notLoaded') return {cls:'', text:'未加载'};
+  if (type === 'idle') return {cls:'', text:'空闲'};
+  if (type === 'active' || type === 'running') return {cls:'running', text:'运行中'};
+  if (/approval|waiting|input/i.test(type || '')) return {cls:'waiting', text:'等你'};
+  return {cls:'', text:type || '空闲'};
+}
+
+function timeAgo(sec){
+  if (!sec) return '';
+  const d = Math.floor(Date.now()/1000 - sec);
+  if (d < 60) return '刚刚';
+  if (d < 3600) return Math.floor(d/60) + ' 分钟前';
+  if (d < 86400) return Math.floor(d/3600) + ' 小时前';
+  return Math.floor(d/86400) + ' 天前';
+}
+
+function setDot(cls, tip){
+  dot.className = 'dot' + (cls ? ' ' + cls : '');
+  if (tip) dot.title = tip;
+}
+
+/* ---------------- 线程列表 ---------------- */
+
+let listRaw = '';
+
+async function loadThreads(){
+  currentThread = null; activeTurnId = null; running = false; items = []; lastVer = '';
+  bodyDetail(false);
+  titleEl.textContent = 'Codex Hub';
+  if (!view.querySelector('.thread')) view.innerHTML = '<div class="empty">加载中…</div>';
+  setDot('sync', '读取线程列表');
+  try{
+    const r = await fetch('/api/threads?limit=40');
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    const list = d.data || d.threads || [];
+    if (d._warming){                      // 冷启动还在扫盘，别让首屏空等
+      view.innerHTML = '<div class="empty">正在扫描会话…</div>';
+      setTimeout(() => { if (!currentThread) loadThreads(); }, 1300);
+      return;
+    }
+    if (!list.length){ view.innerHTML = '<div class="empty">还没有会话</div>'; setDot('on'); return; }
+    const html = list.map(t => {
+      const st = statusOf(t);
+      const prev = (t.preview || t.name || '(无预览)').replace(/\*\*/g,'');
+      return `<div class="thread" data-id="${esc(t.id)}" data-p="${esc(prev)}">
+        <div class="top"><span class="time">${timeAgo(t.updatedAt || t.recencyAt)}</span>
+          <span class="st ${st.cls}">${esc(st.text)}</span></div>
+        <div class="preview">${esc(prev)}</div>
+      </div>`;
+    }).join('');
+    if (html !== listRaw){
+      listRaw = html;
+      view.innerHTML = html;
+      view.querySelectorAll('.thread').forEach(el =>
+        el.onclick = () => openThread(el.dataset.id, el.dataset.p));
+    }
+    setDot('on', '已连接');
+  }catch(e){
+    setDot('err', e.message);
+    view.innerHTML = `<div class="empty">读不到线程列表：${esc(e.message)}
+      <div><button class="retry" id="retry">重试</button></div></div>`;
+    const b = $('#retry');
+    if (b) b.onclick = loadThreads;
+  }
+}
+
+/* ---------------- 打开线程 ---------------- */
+
+async function openThread(id, preview){
+  bodyDetail(true);
+  currentThread = {id, preview};
+  titleEl.textContent = preview ? preview.slice(0, 28) : id.slice(0, 12);
+  items = []; activeTurnId = null; running = false; lastVer = ''; echo = [];
+  pending.clear();
+  view.innerHTML = '<div class="empty">读取中…</div>';
+
+  // resume 只是为了让 app-server 开始推这个线程，不阻塞
+  fetch('/api/resume', {method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({threadId: id})}).catch(()=>{});
+
+  await refreshThread(true);
+  startPolling();
+}
+
+async function refreshThread(initial = false){
+  if (!currentThread || refreshing) return;
+  refreshing = true;
+  setDot('sync', '同步中');
+  try{
+    const r = await fetch('/api/thread/' + encodeURIComponent(currentThread.id));
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    const th = d.thread || d;
+    lastVer = d.v || '';
+    const next = flatten(d);
+    if (th._trimmed) next.unshift({type:'_notice', text:`只显示最近 ${th.turns.length} 轮（共 ${th._totalTurns} 轮）`});
+    mergeEcho(next);
+    items = next;
+    scheduleRender();
+    setDot('on', '已连接');
+  }catch(e){
+    setDot('err', e.message);
+    if (initial) view.innerHTML = `<div class="empty">读不到这个会话：${esc(e.message)}
+      <div><button class="retry" id="retry">重试</button></div></div>`;
+    const b = $('#retry');
+    if (b) b.onclick = () => refreshThread(true);
+  }finally{
+    refreshing = false;
+  }
+}
+
+/** 已发出但服务端还没写盘的消息，别因为重拉而消失 */
+function mergeEcho(list){
+  const mine = list.filter(x => /userMessage/i.test(x.type || '')).map(x => (x.text || '').trim());
+  echo = echo.filter(t => !mine.includes(t.trim()));
+  for (const t of echo) list.push({type:'userMessage', text:t});
+}
+
+// 从各种可能的结构里把 items 抽出来
+function flatten(d){
+  const out = [];
+  const walk = (node, depth) => {
+    if (!node || depth > 6) return;
+    if (Array.isArray(node)){
+      for (const n of node) walk(n, depth + 1);
+      return;
+    }
+    if (typeof node !== 'object') return;
+    if (typeof node.type === 'string' && (node.type.length < 40) && !node.items && !node.turns){
+      out.push(node);
+      return;
+    }
+    if (node.turns) return walk(node.turns, depth + 1);
+    if (node.items) return walk(node.items, depth + 1);
+    if (node.thread) return walk(node.thread, depth + 1);
+    if (node.data) return walk(node.data, depth + 1);
+  };
+  walk(d, 0);
+  return out;
+}
+
+/* ---------------- 渲染 ---------------- */
+
+function roleOf(it){
+  const t = it.type || '';
+  if (/userMessage/i.test(t)) return '你';
+  if (/agentMessage/i.test(t)) return 'Codex';
+  return null;
+}
+
+function textOf(it){
+  const c = it.content;
+  if (Array.isArray(c)) return c.map(p => typeof p === 'string' ? p : (p?.text ?? '')).join('');
+  if (Array.isArray(it.summary)) return it.summary.join('\n');
+  if (typeof it.text === 'string') return it.text;
+  if (typeof it.message === 'string') return it.message;
+  return typeof c === 'string' ? c : '';
+}
+
+function itemHtml(it){
+  const t = it.type || 'unknown';
+  if (t === '_notice') return `<div class="item" style="text-align:center;color:var(--dim2);font-size:12px;padding:4px 0">${esc(it.text)}</div>`;
+  const role = roleOf(it);
+
+  // 用户 / 助手消息
+  if (role){
+    return `<div class="item ${role === '你' ? 'me' : ''}">
+      <div class="role">${role}</div>
+      <div class="bubble">${esc(textOf(it))}</div>
+    </div>`;
+  }
+
+  // 推理摘要
+  if (/reasoning/i.test(t)){
+    if (!showReasoning) return '';
+    const txt = textOf(it);
+    if (!txt) return '';
+    return `<div class="item"><div class="role">思考</div>
+      <div class="bubble plain" style="color:var(--dim);font-size:13.5px">${esc(txt)}</div></div>`;
+  }
+
+  // 命令执行
+  if (/commandExecution|execCommand/i.test(t)){
+    const cmd = it.command ?? it.cmd ?? (Array.isArray(it.command) ? it.command.join(' ') : '');
+    const out = it.output ?? it.aggregatedOutput ?? it.stdout ?? '';
+    const code = it.exitCode ?? it.exit_code;
+    const tag = code === undefined || code === null ? '' :
+      `<span class="tag ${code === 0 ? 'ok' : 'fail'}">exit ${code}</span>`;
+    return `<div class="item"><div class="card">
+      <div class="hd">$ <b class="mono" style="font-weight:500">${esc(String(cmd).slice(0,160))}</b> ${tag}</div>
+      ${out ? `<pre class="snip">${esc(String(out).slice(0,4000))}</pre>` : ''}
+    </div></div>`;
+  }
+
+  // 文件改动
+  if (/fileChange|patch|applyPatch/i.test(t)){
+    const changes = it.files || it.changes || [];
+    const list = Array.isArray(changes)
+      ? changes.map(c => `<div class="mono" style="font-size:12.5px;padding:2px 0">${esc(c.path || c.file || String(c))}</div>`).join('')
+      : '';
+    const patch = it.patch || it.diff || '';
+    return `<div class="item"><div class="card">
+      <div class="hd">改文件 ${list ? '· ' + changes.length + ' 个' : ''}</div>
+      ${list ? `<div class="bd">${list}</div>` : ''}
+      ${patch ? `<details><summary>查看 diff</summary><pre class="snip">${esc(String(patch).slice(0,6000))}</pre></details>` : ''}
+    </div></div>`;
+  }
+
+  // MCP 工具调用
+  if (/mcpToolCall/i.test(t)){
+    return `<div class="item"><div class="card">
+      <div class="hd">MCP · <b>${esc(it.tool || it.name || '')}</b></div>
+      <div class="bd mono" style="font-size:12.5px;color:var(--dim)">${esc(typeof it.args === 'string' ? it.args : JSON.stringify(it.arguments ?? it.args ?? {}).slice(0,600))}</div>
+    </div></div>`;
+  }
+
+  // 计划
+  if (/plan/i.test(t)){
+    const steps = it.steps || it.items || [];
+    const lis = Array.isArray(steps) ? steps.map(s =>
+      `<div style="padding:3px 0;font-size:13.5px">${s.status === 'completed' ? '✓' : '○'} ${esc(s.text || s.step || '')}</div>`).join('') : '';
+    return `<div class="item"><div class="card"><div class="hd">计划</div>${lis ? `<div class="bd">${lis}</div>` : ''}</div></div>`;
+  }
+
+  // 子 agent
+  if (/subAgent/i.test(t)){
+    const label = it.kind === 'started' ? '启动子 agent' : it.kind === 'completed' ? '子 agent 完成' : '子 agent';
+    return `<div class="item"><div class="card">
+      <div class="hd">${esc(label)} · <b class="mono">${esc(it.agentPath || '')}</b>
+        <span class="tag">${esc(it.model || '')}</span></div>
+    </div></div>`;
+  }
+
+  // 兜底：折叠原始数据
+  return `<div class="item"><div class="card">
+    <details><summary>${esc(t)}</summary><pre class="snip">${esc(JSON.stringify(it, null, 2).slice(0,3000))}</pre></details>
+  </div></div>`;
+}
+
+function scheduleRender(){
+  if (renderQueued) return;
+  renderQueued = requestAnimationFrame(() => { renderQueued = 0; render(); });
+}
+
+function render(){
+  if (!items.length){
+    view.innerHTML = '<div class="empty">这个会话还没有内容</div>';
+    return;
+  }
+  const top = main.scrollTop;
+  const approvalHtml = [...pending.values()].map(a => approvalCard(a)).join('');
+  view.innerHTML = items.map(itemHtml).join('') + approvalHtml;
+  bindApprovals();
+  if (stickBottom) scrollBottom(); else main.scrollTop = top;
+}
+
+function approvalCard(a){
+  const p = a.params || {};
+  const isCmd = /commandExecution/i.test(a.method);
+  const body = isCmd
+    ? (p.command?.join?.(' ') || p.command || '')
+    : (p.reason || p.path || p.summary || JSON.stringify(p).slice(0,300));
+  return `<div class="approval" data-rid="${esc(String(a.id))}">
+    <h3>⚠︎ 需要你确认 · ${isCmd ? '执行命令' : '修改文件'}</h3>
+    <div class="code mono">${esc(String(body).slice(0,900))}</div>
+    <div class="row">
+      <button class="ok" data-d="accept">允许</button>
+      <button class="no" data-d="decline">拒绝</button>
+    </div>
+  </div>`;
+}
+
+function bindApprovals(){
+  view.querySelectorAll('.approval button').forEach(b => {
+    b.onclick = async () => {
+      const rid = b.closest('.approval').dataset.rid;
+      await fetch('/api/approve', {method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify({id: rid, decision: b.dataset.d})});
+      pending.delete(rid);
+      render();
+    };
+  });
+}
+
+let stickBottom = true;
+main.addEventListener('scroll', () => {
+  stickBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
+  jumpBtn.classList.toggle('show', !stickBottom && !!currentThread);
+});
+jumpBtn.onclick = () => { stickBottom = true; jumpBtn.classList.remove('show'); scrollBottom(true); };
+function scrollBottom(force){
+  if (!force && !stickBottom) return;
+  requestAnimationFrame(() => { main.scrollTop = main.scrollHeight; jumpBtn.classList.remove('show'); });
+}
+
+/* ---------------- SSE：全站一条连接 ---------------- */
+
+function openStream(){
+  const es = new EventSource('/api/stream');
+  es.onopen = () => setDot('on', '已连接');
+  es.onerror = () => setDot('err', '连接断开，正在重连');
+  es.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.kind === 'request') return onServerRequest(ev);
+    if (ev.kind === 'update') return onFileUpdate(ev.threadId);
+    onNotification(ev);
+  };
+}
+
+let updateTimer = 0;
+function onFileUpdate(threadId){
+  if (!currentThread){
+    // 列表页：轻微延迟后刷新，别把返回值当命中缓存
+    clearTimeout(updateTimer);
+    updateTimer = setTimeout(() => { if (!currentThread) loadThreads(); }, 700);
+    return;
+  }
+  if (threadId && threadId !== currentThread.id) return;
+  clearTimeout(updateTimer);
+  updateTimer = setTimeout(() => { if (currentThread) refreshThread(); }, 250);
+}
+
+function onServerRequest(ev){
+  const tid = ev.params?.threadId;
+  if (currentThread && tid && tid !== currentThread.id) return;
+  pending.set(ev.id, ev);
+  if (currentThread){
+    view.insertAdjacentHTML('beforeend', approvalCard(ev));
+    bindApprovals();
+    scrollBottom();
+  }
+  if (navigator.vibrate) navigator.vibrate(30);
+}
+
+function onNotification(ev){
+  const p = ev.params || {};
+  const m = ev.method || '';
+  const tid = p.threadId || p.thread?.id;
+  if (currentThread && tid && tid !== currentThread.id) return;
+
+  if (m === 'turn/started'){ running = true; activeTurnId = p.turn?.id || p.turnId || null; updateSendBtn(); }
+  if (m === 'turn/completed'){ running = false; activeTurnId = null; updateSendBtn(); }
+
+  if (m === 'item/started' && p.item){
+    items.push(p.item); scheduleRender(); return;
+  }
+  if (m === 'item/completed' && p.item){
+    const i = items.findIndex(x => x.id && x.id === p.item.id);
+    if (i >= 0) items[i] = p.item; else items.push(p.item);
+    scheduleRender(); return;
+  }
+  // 流式增量：拼到最后一条对应 item 上
+  if (/\/delta$/.test(m) && p.delta){
+    const kind = /agentMessage/i.test(m) ? 'agentMessage' : /reasoning/i.test(m) ? 'reasoning' : null;
+    if (kind){
+      for (let i = items.length - 1; i >= 0; i--){
+        if (new RegExp(kind, 'i').test(items[i].type || '')){
+          items[i] = {...items[i], text: (items[i].text || '') + p.delta};
+          scheduleRender(); return;
+        }
+      }
+    }
+    return;
+  }
+  if (m === 'item/commandExecution/outputDelta' && p.delta){
+    for (let i = items.length - 1; i >= 0; i--){
+      if (/commandExecution/i.test(items[i].type || '')){
+        items[i] = {...items[i], output: (items[i].output || '') + p.delta};
+        scheduleRender(); return;
+      }
+    }
+  }
+}
+
+/* ---------------- 轮询兜底 ---------------- */
+
+let pollTimer = 0;
+function startPolling(){
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    if (!currentThread) return;
+    try{
+      const r = await fetch('/api/ver/' + encodeURIComponent(currentThread.id));
+      const d = await r.json();
+      // 文件版本变了才重拉（v 里带 size，任何追加都会变）
+      if (d.v && d.v !== lastVer) refreshThread();
+    }catch{}
+  }, 2000);
+}
+
+let listTimer = 0;
+function startListPolling(){
+  clearInterval(listTimer);
+  listTimer = setInterval(() => {
+    if (!currentThread) loadThreads();
+  }, 6000);
+}
+
+/* ---------------- 交互 ---------------- */
+
+function bodyDetail(on){ document.body.classList.toggle('detail', on); composer.style.display = on ? 'flex' : 'none'; }
+function updateSendBtn(){
+  sendBtn.textContent = running ? '停止' : '发送';
+  sendBtn.classList.toggle('stop', running);
+}
+
+$('#tg').onclick = () => {
+  showReasoning = !showReasoning;
+  $('#tg').classList.toggle('on', showReasoning);
+  render();
+};
+$('#back').onclick = () => {
+  clearInterval(pollTimer);
+  loadThreads();
+};
+
+sendBtn.onclick = async () => {
+  if (running && activeTurnId && currentThread){
+    await fetch('/api/interrupt', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({threadId: currentThread.id, turnId: activeTurnId})});
+    return;
+  }
+  const text = inputEl.value.trim();
+  if (!text || !currentThread) return;
+  inputEl.value = ''; inputEl.style.height = 'auto';
+  echo.push(text);
+  items.push({type:'userMessage', text});
+  render();
+  sendBtn.disabled = true;
+  try{
+    await fetch('/api/turn', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({threadId: currentThread.id, text})});
+  }catch(e){
+    items.push({type:'agentMessage', text:'发送失败：' + e.message});
+    render();
+  }finally{
+    sendBtn.disabled = false;
+  }
+};
+
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(130, inputEl.scrollHeight) + 'px';
+});
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendBtn.click(); }
+});
+
+openStream();
+loadThreads();
+startListPolling();
+</script>
+</body>
+</html>
