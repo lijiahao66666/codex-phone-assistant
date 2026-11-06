@@ -3,16 +3,30 @@
 在手机上通过 H5 查看和控制本机 Codex 任务的桌面助手。项目由本机桌面端、本机配对面板和远程 H5 组成，使用 Codex Desktop 的本地 IPC 读取任务状态，并沿用桌面端的安全决策。
 
 > 这不是 OpenAI 官方产品。桌面端依赖未公开、可能随 Codex 版本变化的 IPC 协议。
+>
+> 手机端是电脑版 Codex 的伴生界面，不是完整替代。目标模式、插件、应用、模型等电脑端设置不会自动映射到手机。
 
 ![电脑与手机同时查看同一 Codex 任务](docs/assets/desktop-phone-view.png)
 
-## 已实现
+## 手机端能力概览
 
-- Windows 10/11 桌面端、便携包、ZIP 和 NSIS 安装器
+| 已支持 | 未支持 |
+| --- | --- |
+| 配对和切换已配对的电脑 | 新建 Codex 任务 |
+| 查看项目和任务的已有列表 | 新建、重命名、移动、归档或删除项目/任务 |
+| 查看历史、工具活动、文件变更和子智能体摘要 | 在手机上选择目标模式 |
+| 发送消息、补充输入和停止任务 | 选择插件、Apps、MCP 或连接器 |
+| 切换 `Plan`/`Default` 协作模式 | 选择模型、推理强度、cwd、分支、worktree 或执行环境 |
+| 回复问题和处理已支持的命令/文件审批 | Windows 默认启用图片/文件上传 |
+
+目标是**只读展示**：手机端可以看到已有目标的状态、内容和计时，但不能创建、修改、暂停、恢复或清除目标。
+
+完整能力矩阵和实现边界见 [手机端与 Codex 能力对照](docs/CODEX-CAPABILITIES.md)。
+
+## 桌面端功能
+
+- Windows 10/11 宿主、便携包、ZIP 和 NSIS 安装器
 - macOS 原生窗口和 `.app` 构建脚本
-- 本机配对面板、二维码和临时配对码
-- 项目与任务列表、历史读取、实时消息和停止任务
-- Windows 命名管道与路径兼容
 - WebView2 与 WKWebView 本地面板
 - 关闭到托盘、单实例运行和再次启动唤回窗口
 - 配对凭据私有目录、POSIX 权限或 Windows 用户 ACL
@@ -96,7 +110,7 @@ Windows 图片能力默认关闭；文字配对、历史、发送和停止不依
 - 配对凭据保存在当前用户目录；Windows 使用独立 ACL。
 - 不提交 `.codex` 会话、配对凭据、日志、构建产物或安装目录。
 
-详见 [docs/SECURITY.md](docs/SECURITY.md) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+详见 [能力对照](docs/CODEX-CAPABILITIES.md)、[docs/SECURITY.md](docs/SECURITY.md) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 发布状态
 
