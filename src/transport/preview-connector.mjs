@@ -10,7 +10,7 @@ import { mkdir, lstat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readChangedFile, readLinkedFile, changedFileReference, linkedFileReference, verifyPreviewIdentity } from '../media/file-preview.mjs';
+import { readChangedFile, readLinkedFile, changedFileReference, linkedFileReference, linkedPreviewMatches, verifyPreviewIdentity } from '../media/file-preview.mjs';
 import { SidebarStatus } from '../desktop/sidebar-status.mjs';
 import { StatusPriorities } from '../desktop/status-priorities.mjs';
 import { createWebSocketSendScheduler } from './ws-send-scheduler.mjs';
@@ -307,7 +307,8 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
             roots: [homedir(), tmpdir(), '/private/tmp'], helperPath: filePreviewHelper || fileURLToPath(new URL('../../safe-media-open', import.meta.url)) });
           if (!result || !await verifyPreviewIdentity(result)) return answer(false);
           const reference = (typeof msg.path === 'string' ? linkedFileReference : changedFileReference)({ state: session.value, threadId: msg.conversationId, turnId: msg.turnId, itemId: msg.itemId, index: msg.index, path: msg.path });
-          if (reference !== result.previewIdentity.path || session.status !== 'ready' || session.conversation?.ownerId !== owner || revoked.has(msg.deviceId) || answer.cancelled() || ![...streams.values()].includes(session)) return answer(false);
+          const matches = typeof msg.path === 'string' ? linkedPreviewMatches(reference, result.previewIdentity.path) : reference === result.previewIdentity.path;
+          if (!matches || session.status !== 'ready' || session.conversation?.ownerId !== owner || revoked.has(msg.deviceId) || answer.cancelled() || ![...streams.values()].includes(session)) return answer(false);
           return answer(true, result);
         } catch { return answer(false); }
       }
