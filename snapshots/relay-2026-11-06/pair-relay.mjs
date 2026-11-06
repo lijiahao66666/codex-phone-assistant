@@ -3,10 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { isIP } from 'node:net';
 import { readFile } from 'node:fs/promises';
-import { createGzip, constants as zlibConstants } from 'node:zlib';
-import { PairingRegistry } from './pairing-registry.mjs';
+import { createGzip, gunzip, constants as zlibConstants } from 'node:zlib';
+import { promisify } from 'node:util';
+import { PairingRegistry } from '../../src/pairing/registry.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const decompressUploadChunk = promisify(gunzip);
 
 // Experimental relay. TLS must terminate at a trusted loopback-only proxy.
 export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
@@ -55,8 +57,9 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   const sameOriginRead = req => (!req.headers.origin || req.headers.origin === base.origin) && req.headers['sec-fetch-site'] === 'same-origin';
   const assets = {
     '/pair': ['desktop.html', 'text/html; charset=utf-8'],
-    '/app-icon.png': ['app-icon.png', 'image/png'],
-    '/app-icon-20261104.png': ['app-icon.png', 'image/png'],
+    '/app-icon.png': ['app-icon-chatgpt.png', 'image/png'],
+    '/app-icon-20261104.png': ['app-icon-chatgpt.png', 'image/png'],
+    '/app-icon-chatgpt.png': ['app-icon-chatgpt.png', 'image/png'],
     '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json; charset=utf-8'],
     '/install-prompt.js': ['install-prompt.js', 'text/javascript; charset=utf-8'],
     '/pair.js': ['pair.js', 'text/javascript; charset=utf-8'],
@@ -287,7 +290,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         phonePresence.set(phone.deviceId, now());
         return send(res, 200, { online: Boolean(peer && peer.readyState === WebSocket.OPEN) });
       }
-      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: 131072 });
+      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: 131072, uploadCompression: 'gzip' });
       const agentHistory = /^\/api\/threads\/([0-9a-f-]{36})\/agents\/([0-9a-f-]{36})\/history$/i.exec(requested);
       if (agentHistory) {
         if (req.method !== 'GET' || !uuid.test(agentHistory[1]) || !uuid.test(agentHistory[2])) return send(res, 404, { error: 'not-found' });
@@ -350,7 +353,16 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
           data = await body(req); action = 'start';
           if (!data || Object.keys(data).some(key => !['name','size','kind'].includes(key)) || typeof data.name !== 'string' || !data.name || data.name.length > 255 || /[\x00-\x1f\x7f/\\\u2028\u2029]/.test(data.name) || (data.kind !== undefined && !['image','file'].includes(data.kind)) || !Number.isSafeInteger(data.size) || data.size < 1 || data.size > 20971520) return send(res, 400, { error: 'invalid' });
         } else if (upload[2] && upload[3]?.startsWith('chunks/') && req.method === 'PUT' && req.headers['content-type'] === 'application/octet-stream') {
-          const chunk = await bytesBody(req, 131072); if (!chunk?.length) return send(res, 400, { error: 'invalid' }); action = 'chunk'; data = { seq: Number(upload[4]), data: chunk.toString('base64') };
+          const encoding = req.headers['content-encoding'];
+          if (encoding !== undefined && encoding !== 'identity' && encoding !== 'gzip') return send(res, 415, { error: 'unsupported-encoding' });
+          let chunk = await bytesBody(req, 131072);
+          if (!chunk?.length) return send(res, 400, { error: 'invalid' });
+          if (encoding === 'gzip') {
+            try { chunk = await decompressUploadChunk(chunk, { maxOutputLength: 131072 }); }
+            catch (error) { return send(res, error.code === 'ERR_BUFFER_TOO_LARGE' ? 413 : 400, { error: 'invalid-compressed-chunk' }); }
+            if (!chunk.length) return send(res, 400, { error: 'invalid' });
+          }
+          action = 'chunk'; data = { seq: Number(upload[4]), data: chunk.toString('base64') };
           if (!Number.isSafeInteger(data.seq)) return send(res, 400, { error: 'invalid' });
         } else if (upload[2] && upload[3] === 'finish' && req.method === 'POST') { action = 'finish'; data = {}; }
         else if (upload[2] && !upload[3] && req.method === 'DELETE') { action = 'delete'; data = {}; }

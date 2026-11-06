@@ -144,11 +144,33 @@ export function projectRolloutHistory(records, threadId, title = '') {
 
 function projectItem(item) {
   if (!item || typeof item.id !== 'string' || !item.id) return null;
+  const base = { id: item.id };
+  const status = ['inProgress', 'completed', 'failed', 'declined', 'interrupted'].includes(item.status) ? item.status : '';
   const textParts = value => Array.isArray(value) ? value.filter(part => (part?.type === 'text' || part?.type === 'Text') && typeof part.text === 'string').map(part => part.text).join('\n') : '';
   if (item.type === 'UserMessage' || item.type === 'AgentMessage') {
-    return { id: item.id, type: item.type === 'UserMessage' ? 'userMessage' : 'agentMessage', text: textParts(item.content) };
+    const phase = item.type === 'AgentMessage' && ['commentary', 'final_answer'].includes(item.phase) ? item.phase : null;
+    return { ...base, type: item.type === 'UserMessage' ? 'userMessage' : 'agentMessage', text: textParts(item.content), ...(phase ? { phase } : {}) };
   }
   if (item.type === 'Reasoning') return { id: item.id, type: 'reasoning', summary: Array.isArray(item.summary_text) ? item.summary_text.filter(text => typeof text === 'string') : [] };
   if (item.type === 'CommandExecution') return { id: item.id, type: 'commandExecution', command: typeof item.command === 'string' ? item.command : '', output: typeof item.aggregated_output === 'string' ? item.aggregated_output : '', status: typeof item.status === 'string' ? item.status : '' };
+  if (item.type === 'FileChange') {
+    const changes = item.changes && typeof item.changes === 'object' && !Array.isArray(item.changes)
+      ? Object.entries(item.changes).filter(([path, change]) => path && change && typeof change === 'object' && !Array.isArray(change))
+        .map(([path, change]) => ({ path, ...(typeof change.unified_diff === 'string' ? { diff: change.unified_diff } : {}) })) : [];
+    return { ...base, type: 'fileChange', status, changes };
+  }
+  if (item.type === 'McpToolCall') return { ...base, type: 'mcpToolCall', status, server: typeof item.server === 'string' ? item.server : '', tool: typeof item.tool === 'string' ? item.tool : '' };
+  if (item.type === 'SubAgentActivity') {
+    if (!['started', 'interacted', 'interrupted', 'completed'].includes(item.kind)) return null;
+    const agentThreadId = typeof item.agent_thread_id === 'string' && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(item.agent_thread_id) ? item.agent_thread_id : null;
+    return { ...base, type: 'subAgentActivity', kind: item.kind, agentPath: typeof item.agent_path === 'string' ? item.agent_path : '', ...(agentThreadId ? { agentThreadId } : {}) };
+  }
+  if (item.type === 'CollabAgentToolCall') {
+    const states = item.agents_states;
+    const agents = states && typeof states === 'object' && !Array.isArray(states)
+      ? Object.entries(states).filter(([id, state]) => id && state && typeof state === 'object' && !Array.isArray(state))
+        .map(([id, state]) => ({ id, status: ['inProgress', 'completed', 'failed', 'interrupted'].includes(state.status) ? state.status : '' })) : [];
+    return { ...base, type: 'collabAgentToolCall', tool: typeof item.tool === 'string' ? item.tool : '', status, agents };
+  }
   return null;
 }

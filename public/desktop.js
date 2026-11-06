@@ -309,13 +309,26 @@ function videoPreviewButton(media, threadId, occurrence = Symbol('video')) {
 const drafts = new Map();
 const imageDrafts = new Map();
 let imageUploadAvailable = false;
+let uploadCompression = null;
 const imageChunkBytes = 128 * 1024;
+async function encodeUploadChunk(chunk, signal) {
+  if (signal?.aborted) throw new Error('cancelled');
+  if (uploadCompression === 'gzip' && typeof CompressionStream === 'function') {
+    try {
+      const compressed = await new Response(chunk.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+      if (signal?.aborted) throw new Error('cancelled');
+      if (compressed.size < chunk.size) return { body: compressed, headers: { 'content-type': 'application/octet-stream', 'content-encoding': 'gzip' } };
+    } catch (error) { if (signal?.aborted) throw error; }
+  }
+  return { body: chunk, headers: { 'content-type': 'application/octet-stream' } };
+}
 async function loadCapabilities() {
   try {
     const response = await scopedFetch('/api/capabilities', { credentials: 'same-origin', cache: 'no-store' });
     const data = response.ok ? await response.json() : null;
     imageUploadAvailable = data?.imageUpload === true && data?.imageChunkBytes === imageChunkBytes && data?.maxImageBytes === 20 * 1024 * 1024;
-  } catch { imageUploadAvailable = false; }
+    uploadCompression = data?.uploadCompression === 'gzip' ? 'gzip' : null;
+  } catch { imageUploadAvailable = false; uploadCompression = null; }
   updateComposer();
 }
 const submissions = new Map();
@@ -611,24 +624,40 @@ composerForm.addEventListener('submit', async event => {
   let uploadId;
   const attachmentIds = [];
   let messageDispatched = false;
+  let uploadStage = '初始化', uploadStatus = '', uploadReason = '';
+  const uploadBegan = Date.now();
+  const checkUpload = async response => {
+    uploadStatus = String(response.status);
+    if (!response.ok) {
+      const result = await response.json().catch(() => null);
+      if (['busy', 'host-offline', 'unavailable', 'invalid', 'device-replaced', 'unsupported-encoding', 'invalid-compressed-chunk'].includes(result?.error)) uploadReason = result.error;
+      throw new Error('upload');
+    }
+  };
   try {
-    for (const image of images) {
+    for (const [fileIndex, image] of images.entries()) {
+      uploadStage = '初始化'; uploadStatus = ''; uploadReason = '';
       const base = `/api/threads/${encodeURIComponent(id)}/uploads`;
       const start = await scopedFetch(base, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
         headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: image.file.name, size: image.file.size, kind: image.kind || 'image' }) });
-      if (!start.ok) throw new Error('upload');
+      await checkUpload(start);
       const created = await start.json();
       if (!uuid.test(created?.uploadId)) throw new Error('upload');
       uploadId = created.uploadId;
       for (let offset = 0, seq = 0; offset < image.file.size; offset += imageChunkBytes, seq++) {
+        uploadStage = `传输 ${seq + 1}/${Math.ceil(image.file.size / imageChunkBytes)}`; uploadStatus = ''; uploadReason = '';
+        const chunk = await encodeUploadChunk(image.file.slice(offset, offset + imageChunkBytes), controller.signal);
         const response = await scopedFetch(`${base}/${encodeURIComponent(uploadId)}/chunks/${seq}`, {
           method: 'PUT', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-          headers: { 'content-type': 'application/octet-stream' }, body: image.file.slice(offset, offset + imageChunkBytes),
+          headers: chunk.headers, body: chunk.body,
         });
-        if (!response.ok) throw new Error('upload');
+        await checkUpload(response);
+        submissions.set(id, { pending: true, message: `上传附件 ${fileIndex + 1}/${images.length} · ${Math.round(Math.min(image.file.size, offset + imageChunkBytes) / image.file.size * 100)}%` });
+        if (selectedId === id) updateComposer();
       }
+      uploadStage = '完成'; uploadStatus = ''; uploadReason = '';
       const finish = await scopedFetch(`${base}/${encodeURIComponent(uploadId)}/finish`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
-      if (!finish.ok) throw new Error('upload');
+      await checkUpload(finish);
       const staged = await finish.json();
       if (!uuid.test(staged?.attachmentId)) throw new Error('upload');
       attachmentIds.push(staged.attachmentId); uploadId = undefined;
@@ -650,7 +679,7 @@ composerForm.addEventListener('submit', async event => {
     }
   } catch {
     if (!messageDispatched) for (const attachmentId of [...attachmentIds, ...(uploadId ? [uploadId] : [])]) void scopedFetch(`/api/threads/${encodeURIComponent(id)}/uploads/${encodeURIComponent(attachmentId)}`, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store' }).catch(() => {});
-    submissions.set(id, { pending: false, uncertain: messageDispatched, message: messageDispatched ? '发送结果未知，请先检查聊天记录' : '附件上传失败，请重试' });
+    submissions.set(id, { pending: false, uncertain: messageDispatched, message: messageDispatched ? '发送结果未知，请先检查聊天记录' : `附件上传失败（${uploadStage} · ${uploadStatus || '网络异常'}${uploadReason ? ` · ${uploadReason}` : ''} · ${Math.round((Date.now() - uploadBegan) / 1000)}秒）` });
   } finally {
     clearTimeout(timer);
     if (selectedId === id) updateComposer();
@@ -756,7 +785,7 @@ function renderAgentHistoryTurn(turn) {
   const finalIndex = turn.status === 'completed' ? items.findLastIndex(item => item.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim()) : -1;
   let work = null;
   for (const [index, item] of items.entries()) {
-    const activity = ['reasoning', 'commandExecution', 'fileChange', 'mcpToolCall'].includes(item.type);
+    const activity = ['reasoning', 'commandExecution', 'fileChange', 'mcpToolCall', 'subAgentActivity', 'collabAgentToolCall'].includes(item.type);
     if (activity && finalIndex >= 0 && index < finalIndex) {
       if (!work) { work = element('details', 'work-activity'); work.append(element('summary', 'work-title', '工作过程')); row.append(work); }
     } else work = null;
@@ -779,10 +808,32 @@ function renderAgentHistoryTurn(turn) {
       destination.append(details);
     } else if (item.type === 'fileChange' && Array.isArray(item.changes)) {
       const paths = item.changes.map(change => typeof change?.path === 'string' ? change.path : '').filter(Boolean);
-      if (paths.length) { const details = element('details', 'file-changes'); const heading = element('summary', 'file-changes-title', `已编辑 ${paths.length === 1 ? paths[0].split(/[\\/]/).filter(Boolean).at(-1) : `${paths.length} 个文件`}`); heading.append(activityIcon('edit')); details.append(heading); for (const path of paths) details.append(element('div', 'file-change-path', path)); destination.append(details); }
+      if (paths.length) {
+        const details = element('details', 'file-changes');
+        const labels = { inProgress: '正在编辑', completed: '已编辑', failed: '编辑失败', declined: '编辑已拒绝', interrupted: '编辑已中断' };
+        const heading = element('summary', 'file-changes-title', `${labels[item.status] || '文件变更'} ${paths.length === 1 ? paths[0].split(/[\\/]/).filter(Boolean).at(-1) : `${paths.length} 个文件`}`);
+        heading.append(activityIcon('edit')); details.append(heading);
+        for (const change of item.changes) {
+          if (typeof change?.path !== 'string' || !change.path) continue;
+          details.append(element('div', 'file-change-path', change.path));
+          if (typeof change.diff === 'string' && change.diff) {
+            const diff = element('details', 'file-diff-details');
+            diff.append(element('summary', 'file-diff-title', '查看差异'), element('pre', 'file-change-diff', change.diff.slice(0, 200000)));
+            details.append(diff);
+          }
+        }
+        destination.append(details);
+      }
     } else if (item.type === 'mcpToolCall') {
       const name = [item.server, item.tool].filter(value => typeof value === 'string' && value).join(' · ');
-      if (name) { const line = element('div', 'activity-line', `已调用 ${name}`); line.append(activityIcon('tool')); destination.append(line); }
+      const labels = { inProgress: '正在调用', completed: '已调用', failed: '调用失败', declined: '调用已拒绝', interrupted: '调用已中断' };
+      if (name) { const line = element('div', 'activity-line', `${labels[item.status] || '工具'} ${name}`); line.append(activityIcon('tool')); destination.append(line); }
+    } else if (item.type === 'subAgentActivity' || item.type === 'collabAgentToolCall') {
+      const labels = { started: '开始工作', interacted: '已更新', completed: '已完成', inProgress: '进行中', interrupted: '已中断', failed: '失败', declined: '已拒绝' };
+      const names = item.type === 'subAgentActivity' ? [item.agentPath] : (item.agents || []).map(agent => agent.id);
+      const name = names.filter(value => typeof value === 'string' && value).map(value => value.split('/').filter(Boolean).at(-1)).join('、') || '子智能体';
+      const line = element('div', 'activity-line', `${name} · ${labels[item.kind || item.status] || '活动'}`);
+      line.append(activityIcon('agent')); destination.append(line);
     }
   }
   return row;

@@ -19,11 +19,12 @@ async function digestFile(file) {
 export class ChunkUploads {
   #entries = new Map();
   #pending = new Set();
-  constructor(store, { maxBytes = 20 * 1024 * 1024, maxChunk = 256 * 1024, maxUploads = 8, timeoutMs = 30000, helperPath, validator = file => validateImageFile(file, { helperPath }) } = {}) {
+  constructor(store, { maxBytes = 20 * 1024 * 1024, maxChunk = 256 * 1024, maxUploads = 8, timeoutMs = 30000, maxDurationMs = 120000, helperPath, validator = file => validateImageFile(file, { helperPath }) } = {}) {
     if (!store || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || !Number.isSafeInteger(maxChunk) || maxChunk < 1 ||
-        !Number.isSafeInteger(maxUploads) || maxUploads < 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError('Invalid upload limits');
+        !Number.isSafeInteger(maxUploads) || maxUploads < 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
+        !Number.isSafeInteger(maxDurationMs) || maxDurationMs < 1) throw new TypeError('Invalid upload limits');
     if (typeof validator !== 'function') throw new TypeError('Invalid image validator');
-    Object.assign(this, { store, maxBytes, maxChunk, maxUploads, timeoutMs, validator });
+    Object.assign(this, { store, maxBytes, maxChunk, maxUploads, timeoutMs, maxDurationMs, validator });
   }
   start({ hostId, deviceId, threadId, name, size, kind = 'image' }) {
     if (![hostId, deviceId, threadId, name].every(v => typeof v === 'string' && v.length > 0) ||
@@ -35,10 +36,18 @@ export class ChunkUploads {
     this.#pending.add(entry.done);
     void entry.done.finally(() => this.#pending.delete(entry.done)).catch(() => {});
     entry.done.catch(() => {});
-    entry.timer = setTimeout(() => this.#cancel(entry), this.timeoutMs);
     this.#entries.set(id, entry);
+    this.#progress(entry);
+    // Progress renews the idle timer, but cannot keep a transfer alive indefinitely.
+    entry.deadline = setTimeout(() => this.#cancel(entry), this.maxDurationMs);
     return id;
   }
+  #progress(e) {
+    if (e.cancelled || this.#entries.get(e.id) !== e) return;
+    clearTimeout(e.timer);
+    e.timer = setTimeout(() => this.#cancel(e), this.timeoutMs);
+  }
+  #clearTimers(e) { clearTimeout(e.timer); clearTimeout(e.deadline); }
   #get(id, scope) {
     const e = this.#entries.get(id);
     if (!e || e.hostId !== scope.hostId || e.deviceId !== scope.deviceId || e.threadId !== scope.threadId) throw new Error('Upload unavailable');
@@ -47,7 +56,7 @@ export class ChunkUploads {
   #cancel(e) {
     if (!this.#entries.delete(e.id)) return;
     e.cancelled = true;
-    clearTimeout(e.timer);
+    this.#clearTimers(e);
     e.stream.destroy(new Error('Upload cancelled'));
   }
   async chunk(id, scope, seq, bytes) {
@@ -59,6 +68,8 @@ export class ChunkUploads {
     try {
       e.seq++; e.bytes += bytes.length;
       if (!e.stream.write(bytes)) await once(e.stream, 'drain');
+      if (e.cancelled || this.#entries.get(id) !== e) throw new Error('Upload cancelled');
+      this.#progress(e);
     } catch (error) { this.#cancel(e); throw error; }
     finally { e.busy = false; }
   }
@@ -87,10 +98,10 @@ export class ChunkUploads {
         if (!this.store.seal({ id: saved.id, ...scope }, { dev: after.dev, ino: after.ino, size: after.size, mtimeMs: after.mtimeMs, ctimeMs: after.ctimeMs, digest })) throw new Error('Upload unavailable');
       } finally { await file.close(); }
       if (e.cancelled) throw new Error('Upload cancelled');
-      this.#entries.delete(id); clearTimeout(e.timer);
+      this.#entries.delete(id); this.#clearTimers(e);
       return saved;
     } catch (error) {
-      this.#entries.delete(id); clearTimeout(e.timer);
+      this.#entries.delete(id); this.#clearTimers(e);
       if (saved) await this.store.remove({ id: saved.id, ...scope });
       throw error;
     }

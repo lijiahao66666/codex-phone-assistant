@@ -139,4 +139,5 @@ button.file-change-path::after,.file-change-path:not(button)::after,.summary-fil
 .question-card{border:1px solid #dedede;border-radius:8px;background:#fff;padding:14px 16px}.question-card-title{color:#767c79;font-size:13px;margin-bottom:12px}.question-card .user-input-question legend{color:#202320;font-weight:600}.question-card .user-input-option{color:#252826}.question-card .user-input-text{background:#fff}
 .question-card .question-skip{justify-self:start;border:0;background:transparent;color:#68716c;font:inherit;padding:7px 0;cursor:pointer}.question-card .question-skip:disabled{opacity:.5}
 .question-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px}.question-card .question-skip{border:1px solid #dedede;border-radius:18px;color:#252826;padding:7px 15px}
-@media (display-mode: standalone){.app{position:relative;padding-top:max(env(safe-area-inset-top),24px);background:#f1f2f1}.main{background:#fff}}
+@media (display-mode: standalone){.app{position:relative;padding-top:max(8px,calc(env(safe-area-inset-top) - 16px));background:#fff}}
+@media(max-width:700px){.sidebar:not(.open){visibility:hidden}.sidebar.open{visibility:visible}.topbar{height:66px}.topbar h1{line-height:20px}.topbar .icon-button{display:grid;place-items:center;flex:none}}
