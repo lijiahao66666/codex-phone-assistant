@@ -974,7 +974,7 @@ async function readHistoryPage(response, signal) {
   if (!response.ok) throw new Error('history unavailable');
   if (!response.headers?.get?.('content-type')?.includes('application/x-ndjson')) return response.json();
   if (!response.body) throw new Error('history unavailable');
-  const { StateChunkAssembler } = await import('/state-chunks-prototype.mjs');
+  const { StateChunkAssembler } = await import('/state-chunks.mjs');
   const assembler = new StateChunkAssembler(), reader = response.body.getReader(), decoder = new TextDecoder();
   let pending = '', result = null;
   try {
@@ -1666,7 +1666,7 @@ async function connect(id, attempt = 0) {
         const block = pending.slice(0, end); pending = pending.slice(end + 2);
         if (/^event:\s*state-chunk\s*$/m.test(block)) {
           const line = /^data:\s*(.+)$/m.exec(block); if (!line) throw new Error('状态分片无效');
-          if (!assembler) { const { StateChunkAssembler } = await import('/state-chunks-prototype.mjs'); assembler = new StateChunkAssembler(); }
+          if (!assembler) { const { StateChunkAssembler } = await import('/state-chunks.mjs'); assembler = new StateChunkAssembler(); }
           if (current.signal.aborted || active !== current) return;
           const assembled = await assembler.accept(JSON.parse(line[1]));
           if (current.signal.aborted || active !== current) return;

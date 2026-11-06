@@ -1,43 +1,111 @@
-# codex手机助手：源码草稿
+# Codex 手机助手
 
-本目录是待审查的源码快照，尚未公开发布，也尚未选定开源许可证。它包含 Mac 助手连接器和本机配对界面，运行时以 2026-11-06 的 Mac 测试包为基线。它不是 OpenAI 官方产品；桌面通信依赖未公开、可能随版本变化的 IPC 协议。
+在手机上通过 H5 查看和控制本机 Codex 任务的桌面助手。项目由本机桌面端、本机配对面板和远程 H5 组成，使用 Codex Desktop 的本地 IPC 读取任务状态，并沿用桌面端的安全决策。
 
-当前快照不包含已部署的中转服务或与其配套的线上 H5 版本，因此不能独立部署出完整服务。默认中转地址指向现有服务，`HUB_ORIGIN` 可在启动时覆盖；公开发布前需要明确服务地址及运行方式。连接器会使用当前用户的 Codex 数据和配对凭据，请勿把真实配对文件、会话和日志提交到仓库。
+> 这不是 OpenAI 官方产品。桌面端依赖未公开、可能随 Codex 版本变化的 IPC 协议。
 
-## Mac 构建
+![电脑与手机同时查看同一 Codex 任务](docs/assets/desktop-phone-view.png)
 
-需要 macOS、Xcode 命令行工具、Node.js 22（`node:sqlite`）和 npm。安装依赖后运行：
+## 已实现
+
+- Windows 10/11 桌面端、便携包、ZIP 和 NSIS 安装器
+- macOS 原生窗口和 `.app` 构建脚本
+- 本机配对面板、二维码和临时配对码
+- 项目与任务列表、历史读取、实时消息和停止任务
+- Windows 命名管道与路径兼容
+- WebView2 与 WKWebView 本地面板
+- 关闭到托盘、单实例运行和再次启动唤回窗口
+- 配对凭据私有目录、POSIX 权限或 Windows 用户 ACL
+
+## 项目结构
+
+```text
+src/
+  common/       跨平台路径与文件边界工具
+  desktop/      Codex IPC、会话、任务列表、历史与视图投影
+  media/        图片、文件、上传和内容校验
+  pairing/      配对协议、凭据和本地面板
+  transport/    WebSocket 传输、流控和快照分块
+  runtime.mjs   桌面端后台入口
+public/         本机配对面板和 H5 前端资源
+test/           Node.js 单元与协议测试
+macos/          Swift 宿主、原生辅助程序和 macOS 构建脚本
+windows/        WinForms/WebView2 宿主、图标工具和 Windows 构建脚本
+docs/           架构、安全说明与安装示意图
+```
+
+## 开始开发
+
+要求 Node.js 22.17 或更高版本。
+
+```powershell
+npm ci
+npm test
+```
+
+运行测试会启动命名管道或本地 socket 测试；不会写入真实 Codex 任务。
+
+## Windows 构建
+
+Windows 构建需要 `.NET 8 SDK`。安装器打包还需要 NSIS；构建脚本会优先使用项目内 `.tools/dotnet` 和 `.tools/nsis`，也可使用系统安装版本。
+
+```powershell
+npm run build:windows
+```
+
+输出目录：
+
+```text
+build/windows/
+  dist/
+    codex-phone-assistant.exe
+  codex-phone-assistant-windows-x64.zip
+  codex-phone-assistant-windows-x64-setup.exe
+```
+
+平台细节、安装、首次配对和卸载步骤见 [windows/README.md](windows/README.md)。
+
+## macOS 构建
+
+需要 macOS、Xcode 命令行工具和 Node.js 22：
 
 ```sh
 npm ci
-MACOSX_DEPLOYMENT_TARGET=12.0 ./mac-app/build.sh
+npm run build:macos
 ```
 
-构建脚本从 Node.js 官方站点下载运行时并校验 SHA-256；输出路径默认是 `build/codex手机助手.app`。需要可联网下载。脚本不会为应用进行 Apple Developer ID 签名或公证。安装包、真实配对、旧版 macOS 和 Intel Mac 尚未在此快照中完整验证。
+默认输出为 `build/codex手机助手.app`。当前仓库提供构建路径，但本次改动只在 Windows 真机完成了完整 H5 联调；macOS 安装、配对和媒体流程仍需单独验收。详见 [macos/README.md](macos/README.md)。
 
-执行随附的定向单元测试：
+macOS 下载、未公证提示处理、配对和常见问题见 [macOS 安装与首次打开](macos/README.md)。
 
-```sh
-node --test approval-guard.test.mjs async-question-guard.test.mjs conversation-state.test.mjs desktop-view.test.mjs thread-list.test.mjs
-```
+## 配置
 
-## 公开前待处理
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `HUB_ORIGIN` | `https://codex.air-inc.top` | 远程中转和 H5 服务地址 |
+| `HUB_IMAGE_PREVIEW` | macOS 为 `1`，Windows 为 `0` | 是否启用本机图片/媒体预览 |
+| `HUB_IMAGE_UPLOAD` | macOS 为 `1`，Windows 为 `0` | 是否启用手机图片上传 |
+| `NODE_ARCHIVE_URL` | 官方 Node 22.17.1 地址 | 构建时使用固定版本的镜像 |
 
-- 用户确定项目许可证；检查所有第三方依赖的许可证、版权声明以及分发义务。
-- `mac-app/chatgpt-icon.png` 和生成图标包含 OpenAI 图形标志；确认使用及再分发权限，或替换为自有图标。
-- 整理并验证中转服务与线上 H5 的准确版本，形成可复现部署文档；梳理身份认证、数据访问、传输及安全边界。
-- 清点默认域名、应用名称、构建标识和示例中涉及的个人或服务信息，确认是否保留。
-- 补齐 Mac 安装、配对、消息和停止的真实端到端验证。
-- 开源前再次执行秘密扫描、个人信息检查和人工代码审查，确认历史记录及所有资源适合公开。
+Windows 图片能力默认关闭；文字配对、历史、发送和停止不依赖这些媒体功能。
 
-本目录不含许可证文件，并不授予第三方使用或再分发许可。
+## 安全边界
 
-## Windows 开发候选
+- 本机管理面板只监听 `127.0.0.1`，并校验 Host、Origin、Cookie 和请求体。
+- 桌面端只连接配置的 HTTPS/WSS 中转，不提供任意代理。
+- 配对凭据保存在当前用户目录；Windows 使用独立 ACL。
+- 不提交 `.codex` 会话、配对凭据、日志、构建产物或安装目录。
 
-Windows 主运行时现在支持 `\\.\pipe\codex-ipc`、Windows 项目路径归组和历史目录边界，并为配对凭据应用当前用户 ACL。构建便携版、ZIP 和安装器：
+详见 [docs/SECURITY.md](docs/SECURITY.md) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-```powershell
-.\windows-candidate\build-windows.ps1 -Force
-```
+## 发布状态
 
-当前已验证 Windows 命名管道、项目与任务列表、H5 配对、任务历史读取、H5 发送与停止、关闭到托盘及再次启动唤回，以及安装、卸载和重新安装。图片上传与预览在 Windows 包中默认关闭。不要把真实任务用于破坏性写操作测试。
+Windows 版已完成以下真实验证：
+
+- 52 项自动化测试全部通过
+- Windows 命名管道握手、项目与任务读取
+- H5 配对、历史、发送与停止
+- 关闭到托盘、再次启动唤回
+- 安装、卸载和重新安装
+
+仓库不包含线上中转服务和 H5 的部署源码，也不授予再分发许可。公开或商业发布前仍需确定许可证、检查图标与第三方依赖授权，并补充对应服务端版本说明。
