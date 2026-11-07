@@ -719,6 +719,25 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         try { return makeWindow(view); }
         catch (error) { if (error.message !== 'unstable turn keys') throw error; return view; }
       };
+      // Any oversized state must go through the chunked transfer, not the 8 MiB
+      // single-frame cap. The relay and the phone H5 already understand state-chunk.
+      const sendChunkedState = (seq, conversation) => {
+        const epoch = ++chunkEpoch; sendingChunks = true;
+        void chunker.send({ event: 'state', data: { seq, revision: latest.revision, conversation } }, seq).then(() => {
+          if (epoch !== chunkEpoch || streams.get(msg.id) !== session || connection !== ws) return;
+          previousView = msg.viewDelta ? { seq, conversation } : null; sendingChunks = false;
+          if (chunkDirty) { chunkDirty = false; schedule(); }
+        }).catch(error => {
+          if (epoch !== chunkEpoch) return; sendingChunks = false;
+          if (streams.get(msg.id) === session) {
+            const code = error instanceof RangeError && error.message === 'state too large' ? 'state-too-large' : 'state-invalid';
+            console.warn('stream-observation', JSON.stringify({ stage: 'chunk-transfer', code, cause: error?.name || null }));
+            streams.delete(msg.id); void session.close();
+            send({ type: 'stream-error', id: msg.id, code }, connection, { deviceId: msg.deviceId, cancellable: true });
+          }
+        });
+        return null;
+      };
       const schedule = () => {
         if (connection !== ws || streams.get(msg.id) !== session || (flowPaused && pendingReset === null)) return;
         if (awaitingReset !== null) return;
@@ -759,18 +778,14 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             const result = JSON.stringify({ type: 'event', id: msg.id, event: 'preview', data: { conversation: preview } });
             if (Buffer.byteLength(result) <= 512 * 1024) { schedule(); return result; }
           }
-          if (!msg.viewDelta) return JSON.stringify({ type: 'event', id: msg.id, event: 'state', data: { revision: latest.revision, conversation } });
+          if (!msg.viewDelta) {
+            const full = JSON.stringify({ type: 'event', id: msg.id, event: 'state', data: { revision: latest.revision, conversation } });
+            if (Buffer.byteLength(full) > 8 * 1024 * 1024) return sendChunkedState(++viewSeq, conversation);
+            return full;
+          }
           const update = viewUpdate(previousView, conversation, ++viewSeq, msg.viewDelta === 3 ? 3 : msg.viewDelta === 2 ? 2 : 1);
           const encoded = JSON.stringify({ type: 'event', id: msg.id, event: update.event, data: { ...update.data, revision: latest.revision } });
-          if (historyWindow && Buffer.byteLength(encoded) > 8 * 1024 * 1024) {
-            const seq = viewSeq, epoch = ++chunkEpoch; sendingChunks = true;
-            void chunker.send({ event: 'state', data: { seq, revision: latest.revision, conversation } }, seq).then(() => {
-              if (epoch !== chunkEpoch || streams.get(msg.id) !== session || connection !== ws) return;
-              previousView = { seq, conversation }; sendingChunks = false;
-              if (chunkDirty) { chunkDirty = false; schedule(); }
-            }).catch(error => { if (epoch !== chunkEpoch) return; sendingChunks = false; if (streams.get(msg.id) === session) { const code = error instanceof RangeError && error.message === 'state too large' ? 'state-too-large' : 'state-invalid'; console.warn('stream-observation', JSON.stringify({ stage: 'chunk-transfer', code, cause: error?.name || null })); streams.delete(msg.id); void session.close(); send({ type: 'stream-error', id: msg.id, code }, connection, { deviceId: msg.deviceId, cancellable: true }); } });
-            return null;
-          }
+          if (Buffer.byteLength(encoded) > 8 * 1024 * 1024) return sendChunkedState(viewSeq, conversation);
           previousView = { seq: viewSeq, conversation };
           return encoded;
         })) connection.terminate();
