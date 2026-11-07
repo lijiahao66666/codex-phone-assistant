@@ -35,6 +35,8 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     }
     for (const [id, entry] of pending) if (entry.hostId === paired.hostId && entry.deviceId !== paired.deviceId) cancel(id, { unknown: entry.writing });
     for (const entry of bodyReads) if (entry.hostId === paired.hostId && entry.deviceId !== paired.deviceId) rejectBodyRead(entry, 'device-replaced');
+    const peer = peers.get(paired.hostId);
+    if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify({ type: 'device-restored', deviceId: paired.deviceId }));
   }
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024, perMessageDeflate: { threshold: 1024 } });
   let closed = false, pairRequests = 0, enrollmentRequests = 0;
@@ -266,7 +268,26 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       }
       const phone = device(req);
       if (!phone) return send(res, 401, { error: 'unauthorized' });
-      if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+      if (req.url === '/api/pairing/status' && req.method === 'GET') {
+        if (!sameOriginRead(req)) return send(res, 403, { error: 'forbidden' });
+        const state = registry.devicePairingState(phone.hostId, phone.deviceId);
+        if (!state) return send(res, 401, { error: 'unauthorized' });
+        return send(res, 200, { state: state.activeDeviceId === phone.deviceId ? 'active' : 'replaced', activeDeviceId: state.activeDeviceId });
+      }
+      if (req.url === '/api/pairing/restore' && req.method === 'POST') {
+        if (!sameOrigin(req) || req.headers['content-type'] !== 'application/json') return send(res, 403, { error: 'forbidden' });
+        const data = await body(req);
+        if (!data || Object.keys(data).join(',') !== 'expectedActiveDeviceId' || (data.expectedActiveDeviceId !== null && (typeof data.expectedActiveDeviceId !== 'string' || !uuid.test(data.expectedActiveDeviceId)))) return send(res, 400, { error: 'invalid' });
+        const restored = registry.restoreDevice(phone.hostId, phone.deviceId, data.expectedActiveDeviceId);
+        if (!restored) return send(res, 401, { error: 'unauthorized' });
+        if (restored.conflict) return send(res, 409, { error: 'pairing-changed' });
+        if (!restored.alreadyActive) activatePair(restored);
+        return send(res, 200, { ok: true });
+      }
+      if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) {
+        const state = registry.devicePairingState(phone.hostId, phone.deviceId);
+        return send(res, 401, { error: 'device-replaced', activeDeviceId: state?.activeDeviceId ?? null });
+      }
       if (req.headers['x-codex-expected-device'] && req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
       if (!(req.method === 'GET' ? sameOriginRead(req) : sameOrigin(req))) return send(res, 403, { error: 'forbidden' });
       const requested = req.url || '';

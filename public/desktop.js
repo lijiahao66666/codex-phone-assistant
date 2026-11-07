@@ -8,6 +8,10 @@ loadEarlier.type = 'button'; loadEarlier.className = 'load-earlier'; loadEarlier
 history.after?.(loadEarlier);
 const turns = document.querySelector('#turns');
 const error = document.querySelector('#error');
+const pairingConflict = document.querySelector('#pairing-conflict');
+const pairingConflictDismiss = document.querySelector('#pairing-conflict-dismiss');
+const pairingConflictRestore = document.querySelector('#pairing-conflict-restore');
+const pairingConflictError = document.querySelector('#pairing-conflict-error');
 const sidebar = document.querySelector('#sidebar');
 const scrim = document.querySelector('#scrim');
 const composerForm = document.querySelector('#composer-form');
@@ -74,7 +78,12 @@ async function scopedFetch(url, options = {}) {
   const path = typeof url === 'string' ? url : '';
   if (!path.startsWith('/api/') || path.startsWith('/api/devices')) return fetch(url, options);
   if (!historyScope && window.pairingReady && path !== '/api/host-status') throw new Error('Device identity unavailable');
+  const scopeGeneration = historyScopeGeneration;
   const response = await fetch(url, { ...options, headers: { ...options.headers, ...(historyScope ? { 'x-codex-expected-device': historyScope.deviceId } : {}) } });
+  if (response.status === 401) {
+    const body = await response.clone().json().catch(() => null);
+    if (scopeGeneration === historyScopeGeneration && body?.error === 'device-replaced') showPairingConflict(body.activeDeviceId);
+  }
   if (response.status === 409 && historyScope) {
     const body = await response.clone().json().catch(() => null);
     if (body?.error === 'device-changed') deviceChanged();
@@ -1114,12 +1123,71 @@ let listRequestGeneration = 0;
 let hostStatusTimer;
 let pairingAvailable = !window.pairingReady;
 let hostStatusGeneration = 0;
+let pairingStatusTimer;
+let pairingStatusGeneration = 0;
+let replacedActiveDeviceId = null;
+let pairingWasReplaced = false, pairingRestorePending = false, notifiedActiveDeviceId;
+function closePairingConflict() { pairingConflict.hidden = true; pairingConflictError.hidden = true; pairingConflictError.textContent = ''; }
+function showPairingConflict(activeDeviceId) {
+  if (!pairingConflict) return;
+  if (!pairingWasReplaced) { showUnpaired(); pairingWasReplaced = true; }
+  replacedActiveDeviceId = typeof activeDeviceId === 'string' ? activeDeviceId : null;
+  if (notifiedActiveDeviceId !== replacedActiveDeviceId) {
+    notifiedActiveDeviceId = replacedActiveDeviceId;
+    pairingConflict.hidden = false; pairingConflictError.hidden = true;
+    pairingConflictRestore.disabled = pairingRestorePending;
+    pairingConflictRestore.focus?.();
+  }
+  const control = document.querySelector('#unpaired-control');
+  if (control) control.textContent = '配对已切换 · 恢复本机';
+  status('配对已切换', 'error');
+}
+window.showPairingRecovery = () => { if (!pairingWasReplaced) return false; pairingConflict.hidden = false; pairingConflictRestore.focus?.(); return true; };
+pairingConflictDismiss?.addEventListener('click', closePairingConflict);
+document.querySelector('#pairing-conflict-scrim')?.addEventListener('click', closePairingConflict);
+pairingConflictRestore?.addEventListener('click', async () => {
+  if (!pairingWasReplaced || pairingRestorePending) return;
+  pairingRestorePending = true; clearTimeout(pairingStatusTimer); ++pairingStatusGeneration;
+  pairingConflictRestore.disabled = true; pairingConflictError.hidden = true;
+  try {
+    const response = await fetch('/api/pairing/restore', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedActiveDeviceId: replacedActiveDeviceId }) });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      if (body?.error === 'pairing-changed') { throw new Error('配对状态刚刚有变化，请再点一次恢复本机。'); }
+      if (response.status === 401) { pairingWasReplaced = false; closePairingConflict(); showUnpaired(); return; }
+      throw new Error('恢复失败，请稍后再试。');
+    }
+    pairingConflictRestore.disabled = false; closePairingConflict(); replacedActiveDeviceId = null; pairingWasReplaced = false; notifiedActiveDeviceId = undefined; await checkPairingStatus();
+  } catch (error) { pairingConflictError.textContent = error.message || '恢复失败，请稍后再试。'; pairingConflictError.hidden = false; }
+  finally { pairingRestorePending = false; pairingConflictRestore.disabled = false; if (pairingWasReplaced || pairingAvailable) void refreshPairingStatus(); }
+});
+async function refreshPairingStatus() {
+  clearTimeout(pairingStatusTimer); pairingStatusTimer = undefined;
+  if (homeSuspended || pairingRestorePending) return;
+  const generation = ++pairingStatusGeneration;
+  try {
+    const response = await fetch('/api/pairing/status', { credentials: 'same-origin', cache: 'no-store' });
+    if (generation !== pairingStatusGeneration || homeSuspended || response.status === 404) return;
+    if (response.status === 401 || response.status === 403) { closePairingConflict(); pairingWasReplaced = false; notifiedActiveDeviceId = undefined; showUnpaired(); return; }
+    if (!response.ok) throw new Error('pairing status unavailable');
+    const result = await response.json();
+    if (generation !== pairingStatusGeneration || homeSuspended) return;
+    if (result.state === 'replaced') showPairingConflict(result.activeDeviceId);
+    else if (result.state === 'active' && pairingWasReplaced) { closePairingConflict(); pairingWasReplaced = false; notifiedActiveDeviceId = undefined; await checkPairingStatus(); return; }
+  } catch { /* Host status polling remains the source of connection errors. */ }
+  if (!homeSuspended && generation === pairingStatusGeneration) { clearTimeout(pairingStatusTimer); pairingStatusTimer = setTimeout(refreshPairingStatus, 4000); pairingStatusTimer?.unref?.(); }
+}
 async function refreshHostStatus() {
   const generation = ++hostStatusGeneration;
   clearTimeout(hostStatusTimer);
   try {
     const response = await scopedFetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store' });
-    if (response.status === 401 || response.status === 403) { if (generation === hostStatusGeneration) showUnpaired(); return; }
+    if (generation !== hostStatusGeneration) return;
+    if (response.status === 401 || response.status === 403) {
+      const body = await response.clone().json().catch(() => null);
+      if (body?.error === 'device-replaced') { showPairingConflict(body.activeDeviceId); return; }
+      if (generation === hostStatusGeneration) showUnpaired(); return;
+    }
     if (!response.ok) throw new Error('offline');
     const result = await response.json();
     if (typeof result.online !== 'boolean') return;
@@ -2055,6 +2123,7 @@ async function startPairedHome() {
   else void loadDevices();
   if (window.pairingReady && !historyScope) { status('电脑信息不可用', 'error'); return; }
   connectSidebarStatuses(); void loadThreads(); void loadCapabilities(); void refreshHostStatus();
+  if (pairingConflict) void refreshPairingStatus();
 }
 async function checkPairingStatus(pending) {
   if (homeSuspended) return;
@@ -2063,12 +2132,15 @@ async function checkPairingStatus(pending) {
   try {
     if (pending) result = await pending;
     else {
-      const response = await scopedFetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store' });
-      result = response.ok ? 'paired' : response.status === 401 || response.status === 403 ? 'unpaired' : 'unavailable';
+      const response = await fetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store' });
+      const detail = response.status === 401 ? await response.json().catch(() => null) : null;
+      if (detail?.error === 'device-replaced') window.pairingConflictState = detail;
+      result = response.ok ? 'paired' : detail?.error === 'device-replaced' ? 'replaced' : response.status === 401 || response.status === 403 ? 'unpaired' : 'unavailable';
     }
   } catch { result = 'unavailable'; }
   if (homeSuspended || generation !== hostStatusGeneration) return;
   if (result === 'paired') startPairedHome();
+  else if (result === 'replaced') { showPairingConflict(window.pairingConflictState?.activeDeviceId); void refreshPairingStatus(); }
   else if (result === 'unpaired') showUnpaired();
   else {
     connection.hidden = false;
@@ -2081,10 +2153,11 @@ async function checkPairingStatus(pending) {
 }
 if (window.pairingReady) { status('连接中', 'connecting'); showConversationLoading(); void checkPairingStatus(window.pairingReady); }
 else startPairedHome();
-window.addEventListener('pagehide', () => { homeSuspended = true; cancelPendingRender(); stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; clearTimeout(listRetryTimer); listRetryTimer = undefined; clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; for (const id of statusHandovers.keys()) clearStatusHandover(id); clearTimeout(hostStatusTimer); ++hostStatusGeneration; ++listRequestGeneration; active?.abort(); });
+window.addEventListener('pagehide', () => { homeSuspended = true; cancelPendingRender(); stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; clearTimeout(listRetryTimer); listRetryTimer = undefined; clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; for (const id of statusHandovers.keys()) clearStatusHandover(id); clearTimeout(hostStatusTimer); clearTimeout(pairingStatusTimer); pairingStatusTimer = undefined; ++pairingStatusGeneration; ++hostStatusGeneration; ++listRequestGeneration; active?.abort(); });
 window.addEventListener('pageshow', event => {
   if (!event.persisted) return;
   homeSuspended = false;
+  if (pairingConflict) void refreshPairingStatus();
   if (!pairingAvailable) { if (window.pairingReady) void checkPairingStatus(); return; }
   if (!selectedId) connectSidebarStatuses();
   void loadDevices();

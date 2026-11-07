@@ -144,6 +144,23 @@ export class PairingRegistry {
     return Boolean(this.db.prepare('SELECT 1 FROM hosts JOIN devices ON devices.host_id = hosts.id WHERE hosts.id = ? AND devices.id = ? AND devices.id = hosts.active_device_id').get(hostId, deviceId));
   }
 
+  devicePairingState(hostId, deviceId) {
+    return this.db.prepare('SELECT hosts.active_device_id AS activeDeviceId FROM hosts JOIN devices ON devices.host_id = hosts.id WHERE hosts.id = ? AND devices.id = ?').get(hostId, deviceId) ?? null;
+  }
+
+  restoreDevice(hostId, deviceId, expectedActiveDeviceId) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const state = this.devicePairingState(hostId, deviceId);
+      if (!state) { this.db.exec('COMMIT'); return null; }
+      if (state.activeDeviceId === deviceId) { this.db.exec('COMMIT'); return { hostId, deviceId, previousDeviceId: null, alreadyActive: true }; }
+      if (state.activeDeviceId !== expectedActiveDeviceId) { this.db.exec('COMMIT'); return { conflict: true }; }
+      this.db.prepare('UPDATE hosts SET active_device_id = ? WHERE id = ?').run(deviceId, hostId);
+      this.db.exec('COMMIT');
+      return { hostId, deviceId, previousDeviceId: state.activeDeviceId };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
   revokeDeviceId(deviceId) {
     this.db.prepare('UPDATE hosts SET active_device_id = NULL WHERE active_device_id = ?').run(deviceId);
     return this.db.prepare('DELETE FROM devices WHERE id = ?').run(deviceId).changes === 1;
