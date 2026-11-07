@@ -20,7 +20,7 @@ async function fixture() {
     focus() { this.focused = true; }
   }
   const nodes = new Map(), timers = new Map(), listeners = new Map(), requests = [];
-  const document = { querySelector(key) { if (!nodes.has(key)) nodes.set(key, new Element()); return nodes.get(key); }, createElement() { return new Element(); }, createDocumentFragment() { return new Element(); } };
+  const document = { hidden: false, addEventListener(type, fn) { listeners.set(type, fn); }, querySelector(key) { if (!nodes.has(key)) nodes.set(key, new Element()); return nodes.get(key); }, createElement() { return new Element(); }, createDocumentFragment() { return new Element(); } };
   let state = { state: 'replaced', activeDeviceId: b }, restoreCode = 200, statusCode = 200, pendingRestore, delayRestore = false;
   const window = { pairingReady: Promise.resolve('replaced'), pairingConflictState: { activeDeviceId: b }, addEventListener(type, fn) { listeners.set(type, fn); } };
   const context = vm.createContext({ document, AbortController, TextDecoder, sessionStorage: { removeItem() {} }, window,
@@ -42,6 +42,7 @@ async function fixture() {
   await flush();
   return { context, nodes, timers, listeners, requests, run: code => vm.runInContext(code, context),
     setState(value) { state = value; }, setRestoreCode(value) { restoreCode = value; }, setStatusCode(value) { statusCode = value; },
+    setHidden(value) { document.hidden = value; listeners.get('visibilitychange')(); },
     holdRestore() { delayRestore = true; }, releaseRestore() { pendingRestore(); },
     dispose() { listeners.get('pagehide')(); } };
 }
@@ -114,5 +115,24 @@ test('background page stops polling and foreground checks which phone is active'
     await f.run('refreshPairingStatus()');
     assert.equal(f.run('pairingWasReplaced'), false);
     assert.equal(f.nodes.get('#pairing-conflict').hidden, true);
+  } finally { f.dispose(); }
+});
+
+test('active phone keeps watching after replacement and pauses while the document is hidden', async () => {
+  const f = await fixture();
+  try {
+    f.setState({ state: 'active', activeDeviceId: a });
+    await f.run('refreshPairingStatus()');
+    f.setState({ state: 'replaced', activeDeviceId: b });
+    await f.run('refreshPairingStatus()');
+    assert.ok([...f.timers.values()].some(t => t.ms === 4000));
+    f.setHidden(true);
+    const count = f.requests.length;
+    assert.equal(f.timers.size, 0);
+    await f.run('refreshPairingStatus()');
+    assert.equal(f.requests.length, count);
+    f.setHidden(false); await flush();
+    assert.ok(f.requests.length > count);
+    assert.ok([...f.timers.values()].some(t => t.ms === 4000));
   } finally { f.dispose(); }
 });

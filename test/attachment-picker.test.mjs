@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-async function setup() {
+async function setup({ modeResponse } = {}) {
   class Element {
     constructor(tag = 'div') { this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.listeners = {}; this.value = ''; this.files = []; this.classList = { toggle() {}, contains() { return false; } }; this.clicks = 0; }
     addEventListener(type, callback) { this.listeners[type] = callback; }
@@ -18,21 +18,59 @@ async function setup() {
   }
   const nodes = new Map(), revoked = [], requests = [];
   const document = { querySelector(selector) { if (!nodes.has(selector)) nodes.set(selector, new Element()); return nodes.get(selector); }, createElement(tag) { return new Element(tag); }, createDocumentFragment() { return new Element(); }, addEventListener() {} };
-  const context = vm.createContext({ document, fetch: async url => { requests.push(url); return { ok: true, json: async () => ({ projects: [], recent: [] }) }; }, AbortController, TextDecoder, URL: { createObjectURL: file => `blob:${file.name}`, revokeObjectURL: url => revoked.push(url) }, setTimeout() { return 1; }, clearTimeout() {}, sessionStorage: { removeItem() {} }, window: { addEventListener() {} } });
+  const context = vm.createContext({ document, fetch: async url => { requests.push(url); if (url.endsWith('/mode') && modeResponse) return modeResponse; return { ok: true, json: async () => ({ projects: [], recent: [] }) }; }, AbortController, TextDecoder, URL: { createObjectURL: file => `blob:${file.name}`, revokeObjectURL: url => revoked.push(url) }, setTimeout() { return 1; }, clearTimeout() {}, sessionStorage: { removeItem() {} }, window: { addEventListener() {} } });
   vm.runInContext(await readFile(new URL('../public/desktop.js', import.meta.url), 'utf8'), context);
+  nodes.get('#attachment-menu').hidden = true;
   vm.runInContext("selectedId='11111111-1111-1111-1111-111111111111'; connected=true; imageUploadAvailable=true; currentDeviceId='device'; recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'}); recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'}); updateComposer()", context);
   return { context, nodes, revoked, requests };
 }
 
-test('attachment action opens one system picker without opening a second menu or submitting', async () => {
+test('plus opens the menu and attachment action opens the system picker without submitting', async () => {
   const { context, nodes, requests } = await setup();
   nodes.get('#attachment-toggle').click();
+  assert.equal(nodes.get('#attachment-file').clicks, 0);
+  assert.equal(nodes.get('#attachment-menu').hidden, false);
+  assert.equal(nodes.get('#image-choose').hidden, true);
+  nodes.get('#file-choose').click();
   assert.equal(nodes.get('#attachment-file').clicks, 1);
   assert.equal(nodes.get('#attachment-menu').hidden, true);
   assert.ok(requests.every(url => !/uploads|messages/.test(url)));
   vm.runInContext('imageUploadAvailable=false; updateComposer()', context);
   nodes.get('#attachment-toggle').click();
   assert.equal(nodes.get('#attachment-file').clicks, 1);
+});
+
+test('plan mode remains accessible through the plus menu when attachments are unavailable', async () => {
+  const { context, nodes } = await setup();
+  vm.runInContext("imageUploadAvailable=false; liveMode='default'; liveRuntimeStatus='idle'; updateComposer()", context);
+  assert.equal(nodes.get('#attachment-control').hidden, false);
+  assert.equal(nodes.get('#attachment-toggle').disabled, false);
+  nodes.get('#attachment-toggle').click();
+  assert.equal(nodes.get('#attachment-menu').hidden, false);
+  assert.equal(nodes.get('#file-choose').hidden, true);
+  assert.equal(nodes.get('#mode-choose').hidden, false);
+  assert.equal(nodes.get('#mode-choose').disabled, false);
+  assert.equal(nodes.get('#attachment-file').clicks, 0);
+});
+
+test('selecting plan mode keeps the menu open through pending and confirmed states', async () => {
+  let confirm;
+  const modeResponse = new Promise(resolve => { confirm = resolve; });
+  const { context, nodes, requests } = await setup({ modeResponse });
+  vm.runInContext("liveMode='default'; liveRuntimeStatus='idle'; updateComposer()", context);
+  nodes.get('#attachment-toggle').click();
+  const pending = nodes.get('#mode-choose').listeners.click();
+  assert.equal(nodes.get('#attachment-menu').hidden, false);
+  assert.equal(nodes.get('#mode-choose').textContent, '正在切换模式');
+  assert.equal(nodes.get('#mode-choose').disabled, true);
+  confirm({ ok: true }); await pending;
+  assert.equal(nodes.get('#attachment-menu').hidden, false);
+  vm.runInContext("liveMode='plan'; modeChanges.delete(selectedId); updateComposer()", context);
+  assert.equal(nodes.get('#mode-choose').textContent, '计划模式 ✓');
+  assert.equal(nodes.get('#attachment-menu').hidden, false);
+  assert.equal(requests.filter(url => url.endsWith('/mode')).length, 1);
+  nodes.get('#attachment-toggle').click();
+  assert.equal(nodes.get('#attachment-menu').hidden, true);
 });
 
 test('mixed attachments keep image upload semantics and thumbnails, with removable file cards', async () => {
@@ -95,6 +133,8 @@ test('new chat uses the same mixed attachment picker and removable thumbnails be
   const { context, nodes, revoked, requests } = await setup();
   vm.runInContext("selectedId=null; newDraft={projectId:'project',attachments:[],pending:false,uncertain:false}; updateComposer()", context);
   nodes.get('#attachment-toggle').click();
+  assert.equal(nodes.get('#attachment-menu').hidden, false);
+  nodes.get('#file-choose').click();
   assert.equal(nodes.get('#attachment-file').clicks, 1);
   const input = nodes.get('#attachment-file');
   input.files = [{ name: 'photo.png', type: 'image/png', size: 200 }, { name: 'notes.txt', type: 'text/plain', size: 32 }];

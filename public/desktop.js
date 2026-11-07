@@ -797,8 +797,9 @@ function clearImageDrafts() {
 }
 function closeAttachmentMenu() { attachmentMenu.hidden = true; attachmentToggle.setAttribute('aria-expanded', 'false'); }
 attachmentToggle.addEventListener('click', () => {
-  if (attachmentToggle.disabled || !imageUploadAvailable || (!selectedId && !newDraft) || !connected) return;
-  closeAttachmentMenu(); fileInput.click();
+  if (attachmentToggle.disabled) return;
+  attachmentMenu.hidden = !attachmentMenu.hidden;
+  attachmentToggle.setAttribute('aria-expanded', String(!attachmentMenu.hidden));
 });
 document.addEventListener?.('click', event => { if (!attachmentControl.contains(event.target)) closeAttachmentMenu(); });
 document.addEventListener?.('keydown', event => { if (event.key === 'Escape' && !attachmentMenu.hidden) { closeAttachmentMenu(); attachmentToggle.focus(); } });
@@ -812,7 +813,7 @@ modeChoose.addEventListener('click', async () => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(`/api/threads/${encodeURIComponent(id)}/mode`, {
+    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/mode`, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: change.target }),
     });
@@ -918,7 +919,7 @@ function updateComposer() {
     messageInput.style.height = `${Math.min(messageInput.scrollHeight, Math.min(300, (window.innerHeight || 844) * 0.35))}px`;
   }
   messageInput.disabled = newDraft ? !connected || !newDraft.projectId || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared) : !selectedId || !connected || recoveryBlocksWrite();
-  imageChoose.hidden = !imageUploadAvailable;
+  imageChoose.hidden = true;
   imageChoose.disabled = !imageUploadAvailable || messageInput.disabled || Boolean(state?.pending || state?.uncertain);
   fileChoose.hidden = !imageUploadAvailable;
   fileChoose.disabled = imageChoose.disabled;
@@ -933,8 +934,8 @@ function updateComposer() {
   cancelModelPrepared.disabled = !connected || Boolean(modelChange?.cancelling);
   cancelModelPrepared.textContent = modelChange?.checkAfterCancel ? '重新检查' : '取消模型切换';
   updateModelControl();
-  attachmentControl.hidden = !imageUploadAvailable;
-  attachmentToggle.disabled = imageChoose.disabled;
+  attachmentControl.hidden = !imageUploadAvailable && !modeAvailable;
+  attachmentToggle.disabled = messageInput.disabled || (fileChoose.disabled && !modeAvailable);
   if (attachmentToggle.disabled) closeAttachmentMenu();
   for (const removeImage of imageDraft.querySelectorAll?.('.image-draft-remove') || []) removeImage.disabled = Boolean(state?.pending || state?.uncertain);
   if (voiceSession && (messageInput.disabled || voiceSession.threadId !== selectedId || voiceSession.draft !== newDraft)) { stopVoice(); voiceStatus.textContent = ''; }
