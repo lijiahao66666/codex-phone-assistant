@@ -57,15 +57,15 @@ export class DesktopIpc extends EventEmitter {
     this.#socket.write(Buffer.concat([header, body]));
   }
 
-  #request(method, params, { sourceClientId = this.clientId, version = 1, targetClientId } = {}) {
+  #request(method, params, { sourceClientId = this.clientId, version = 1, targetClientId, timeout = this.timeout } = {}) {
     const versions = { initialize: 1, 'thread-owner-discovery': 1, 'thread-follower-start-turn': 2,
       'thread-follower-steer-turn': 1, 'thread-follower-interrupt-turn': 4, 'thread-follower-update-thread-settings': 2,
       'thread-follower-command-approval-decision': 1, 'thread-follower-file-approval-decision': 1,
-      'thread-follower-submit-user-input': 1 };
+      'thread-follower-submit-user-input': 1, 'thread-follower-load-complete-history': 1 };
     if (versions[method] !== version) throw new Error('Unsupported IPC method or version');
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(requestId); reject(new Error(`${method} timed out`)); }, this.timeout);
+      const timer = setTimeout(() => { this.pending.delete(requestId); reject(new Error(`${method} timed out`)); }, timeout);
       this.pending.set(requestId, { resolve, reject, timer });
       try { this.#send({ type: 'request', requestId, sourceClientId, version, method, params, ...(targetClientId ? { targetClientId } : {}) }); }
       catch (error) { clearTimeout(timer); this.pending.delete(requestId); reject(error); }
@@ -78,6 +78,17 @@ export class DesktopIpc extends EventEmitter {
     const response = await this.#request('thread-owner-discovery', { hostId, conversationId });
     if (!response.handledByClientId) throw new Error('Thread owner not found');
     return { ownerId: response.handledByClientId, result: response.result };
+  }
+
+  // Read-only liveness probe for a thread that another client claims to own.
+  // `thread-owner-discovery` answers from Desktop's ownership cache, so a cached
+  // owner can outlive the process that really held the writer. Asking that client
+  // for the history revision is the cheapest way to prove it still responds.
+  async probeOwner(conversationId, ownerId, { timeout = 2000 } = {}) {
+    if (this.state !== 'ready') throw new Error('IPC not ready');
+    if (typeof conversationId !== 'string' || !conversationId || typeof ownerId !== 'string' || !ownerId) throw new TypeError('conversationId and ownerId required');
+    const response = await this.#request('thread-follower-load-complete-history', { conversationId }, { targetClientId: ownerId, timeout });
+    return response?.result ?? null;
   }
 
   async #control(method, conversationId, params, version = 1, expectedOwnerId, beforeWrite) {

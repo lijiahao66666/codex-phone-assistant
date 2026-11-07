@@ -8,10 +8,11 @@ function unavailable(code, cause) {
 
 // The adapters must distinguish an explicit missing owner from an unavailable bus.
 export class OwnerRouter {
-  constructor({ discover, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 5000, recoveryPollMs = 300, recoveryLockTtlMs = 90_000, competeUnknown = false }) {
+  constructor({ discover, verifyOwner = null, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 5000, recoveryPollMs = 300, recoveryLockTtlMs = 90_000, competeUnknown = false }) {
     if (typeof discover !== 'function' || !localOwner || typeof projects !== 'function') throw new TypeError('Missing owner adapters');
     this.competeUnknown = competeUnknown;
     this.discover = discover;
+    this.verifyOwner = verifyOwner;
     this.localOwner = localOwner;
     this.projects = projects;
     this.journal = journal; this.hostId = hostId;
@@ -77,17 +78,25 @@ export class OwnerRouter {
     } catch { return true; }
   }
 
+  // A live desktop owner already streams the thread: the phone only needs to
+  // follow it. Resuming in that case always fails with a writer conflict, which
+  // used to surface as 正在连接任务 even though the thread was perfectly usable.
+  async #ownerResponds(threadId, ownerId) {
+    if (typeof this.verifyOwner !== 'function') return false;
+    try { return await this.verifyOwner(threadId, ownerId) === true; } catch { return false; }
+  }
+
   async #route(threadId, isCancelled, deviceId, requestId) {
-    if (this.isRecoveryLocked(threadId)) throw unavailable('resume-unknown');
     const first = await this.discover(threadId);
     if (this.closed || isCancelled()) throw unavailable('unavailable');
-    // "Some owner exists" is not recovery: the phone needs THIS bridge to own
-    // the thread. Reporting success for a foreign owner produced a live-looking
-    // session that could never write, and left the phone stuck on 正在连接任务.
+    // Following never writes, so it is allowed even while an earlier takeover
+    // reservation is still cooling down.
     if (first?.kind === 'owner' && first.ownerId) {
       const ownId = typeof this.localOwner.ownerId === 'function' ? await this.localOwner.ownerId() : null;
       if (ownId && first.ownerId === ownId) return first;
+      if (await this.#ownerResponds(threadId, first.ownerId)) return first;
     } else if (first?.kind !== 'missing' && !(this.competeUnknown && first?.kind === 'unknown')) throw unavailable('owner-unknown');
+    if (this.isRecoveryLocked(threadId)) throw unavailable('resume-unknown');
     const attemptId = requestId || randomUUID();
     if (!this.hostId || !(deviceId ? this.journal?.dispatchRecovery?.(this.hostId, deviceId, threadId, attemptId) : this.journal?.beginRecovery?.(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
     this.uncertainRecovery.set(threadId, Date.now());
@@ -111,6 +120,14 @@ export class OwnerRouter {
       try { current = await this.discover(threadId); currentOwnId = typeof this.localOwner.ownerId === 'function' ? await this.localOwner.ownerId() : null; } catch { current = null; currentOwnId = null; }
       if (current?.kind === 'owner' && current.ownerId && currentOwnId && current.ownerId === currentOwnId) {
         if (!(deviceId ? this.journal.completeRecovery(this.hostId, deviceId, threadId, attemptId, 'accepted') : this.journal.endRecovery(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
+        this.uncertainRecovery.delete(threadId);
+        if (this.closed || isCancelled()) throw unavailable('unavailable');
+        return current;
+      }
+      // Desktop kept the writer and still answers for it. Following is the only
+      // way in, so close the reservation and hand its owner back to the caller.
+      if (current?.kind === 'owner' && current.ownerId && !(currentOwnId && current.ownerId === currentOwnId) && await this.#ownerResponds(threadId, current.ownerId)) {
+        if (!(deviceId ? this.journal.completeRecovery(this.hostId, deviceId, threadId, attemptId, 'rejected') : this.journal.endRecovery(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
         this.uncertainRecovery.delete(threadId);
         if (this.closed || isCancelled()) throw unavailable('unavailable');
         return current;

@@ -1,4 +1,4 @@
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -34,10 +34,35 @@ export async function localProjects(codexHome = join(homedir(), '.codex')) {
   });
 }
 
+// A bridge that dies without reaping its app-server leaves an orphan holding the
+// thread writers. Every later resume then fails with "already has an active
+// writer" and the phone can never take a task over again.
+async function releaseStaleAppServer(pidFile) {
+  try {
+    const raw = await readFile(pidFile, 'utf8');
+    let entry;
+    try { entry = JSON.parse(raw); } catch { entry = { pid: Number(raw) }; }
+    const pid = Number(entry?.pid);
+    if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return;
+    if (Number(entry?.bridge) === process.pid) return;
+    try { process.kill(pid, 0); } catch { return; }
+    try { process.kill(pid, 'SIGTERM'); } catch { return; }
+    await new Promise(resolve => setTimeout(resolve, 400));
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  } catch { /* no pid file */ }
+}
+
 export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '.codex'), dataDir = join(homedir(), '.config/codex-hub'), ownerOptions = {}, projects = () => localProjects(codexHome) }) {
   const bundled = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
   const socketPath = ownerOptions.socketPath ?? join(codexHome, 'ipc/ipc.sock');
+  const pidFile = join(dataDir, 'app-server.pid');
+  await releaseStaleAppServer(pidFile);
   const owner = await new LocalOwner({ binary: process.env.CODEX_BIN || (existsSync(bundled) ? bundled : 'codex'), cwd: homedir(), ...ownerOptions, socketPath }).start();
+  const childPid = owner.client?.child?.pid;
+  if (Number.isInteger(childPid)) {
+    await writeFile(pidFile, JSON.stringify({ pid: childPid, bridge: process.pid }), { mode: 0o600 }).catch(() => {});
+    process.once('exit', () => { try { process.kill(childPid, 'SIGTERM'); } catch { /* already gone */ } });
+  }
   let journal, modelJournal;
   try {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -45,17 +70,24 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
     journal = new CreationJournal(join(dataDir, 'creations.sqlite'));
     modelJournal = new ModelJournal(join(dataDir, 'creations.sqlite'));
     const discover = async threadId => {
-      const ipc = new DesktopIpc({ socketPath });
+      const ipc = new DesktopIpc({ socketPath, timeout: 1500 });
       try { await ipc.connect(); const { ownerId } = await ipc.discover(threadId); return { kind: 'owner', ownerId }; }
       catch { return { kind: 'unknown' }; }
       finally { ipc.close(); }
     };
-    const router = new OwnerRouter({ discover, localOwner: owner, projects, journal, hostId, competeUnknown: true,
+    const verifyOwner = async (threadId, ownerId) => {
+      const ipc = new DesktopIpc({ socketPath, timeout: 1500 });
+      try { await ipc.connect(); return Boolean(await ipc.probeOwner(threadId, ownerId, { timeout: 2500 })); }
+      catch { return false; }
+      finally { ipc.close(); }
+    };
+    const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, projects, journal, hostId, competeUnknown: true,
       confirmRecovery: (threadId, ownerId) => confirmRecoverySnapshot(threadId, ownerId, { socketPath }) });
     return { router, owner, modelJournal, async close() {
       router.beginShutdown();
       try { await owner.close(); } catch (error) { router.cancelShutdown(); throw error; }
       router.close(); journal.close(); modelJournal.close();
+      await unlink(pidFile).catch(() => {});
     } };
   } catch (error) { modelJournal?.close(); journal?.close(); await owner.close({ force: true }); throw error; }
 }

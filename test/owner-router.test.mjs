@@ -104,3 +104,41 @@ test('the in-memory recovery guard expires with the same TTL', async () => {
     assert.equal(router.uncertainRecovery.has('thread'), false);
   } finally { router.close(); journal.close(); }
 });
+
+test('a responsive desktop owner is followed instead of resumed', async () => {
+  const journal = new CreationJournal(':memory:');
+  let resumed = 0;
+  const localOwner = { ownerId: () => 'bridge-owner', async resume() { resumed++; return { threadId: 'thread' }; } };
+  const router = new OwnerRouter({ discover: async () => ({ kind: 'owner', ownerId: 'desktop-owner' }),
+    verifyOwner: async () => true, localOwner, projects: async () => [], journal, hostId: 'host' });
+  try {
+    const result = await router.route('thread');
+    assert.deepEqual(result, { kind: 'owner', ownerId: 'desktop-owner' });
+    assert.equal(resumed, 0);
+  } finally { router.close(); journal.close(); }
+});
+
+test('a cached owner that stopped answering is taken over', async () => {
+  const journal = new CreationJournal(':memory:');
+  let resumed = 0, owned = false;
+  const localOwner = { ownerId: () => (owned ? 'bridge-owner' : null), async resume() { resumed++; owned = true; return { threadId: 'thread' }; } };
+  const router = new OwnerRouter({ discover: async () => ({ kind: 'owner', ownerId: owned ? 'bridge-owner' : 'stale-desktop-owner' }),
+    verifyOwner: async () => false, localOwner, projects: async () => [], journal, hostId: 'host', confirmRecovery: async () => true });
+  try {
+    const result = await router.route('thread');
+    assert.equal(result.ownerId, 'bridge-owner');
+    assert.equal(resumed, 1);
+  } finally { router.close(); journal.close(); }
+});
+
+test('following is allowed while an earlier takeover reservation is cooling down', async () => {
+  const journal = new CreationJournal(':memory:');
+  const router = new OwnerRouter({ discover: async () => ({ kind: 'owner', ownerId: 'desktop-owner' }),
+    verifyOwner: async () => true, localOwner: { ownerId: () => 'bridge-owner', async resume() { throw new Error('must not resume'); } },
+    projects: async () => [], journal, hostId: 'host' });
+  try {
+    router.uncertainRecovery.set('thread', Date.now());
+    const result = await router.route('thread');
+    assert.equal(result.ownerId, 'desktop-owner');
+  } finally { router.close(); journal.close(); }
+});
