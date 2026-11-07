@@ -178,3 +178,33 @@ button.file-change-path::after,.file-change-path:not(button)::after,.summary-fil
 .current-project{display:none;max-width:min(46vw,220px);min-width:0;height:30px;padding:0 18px 0 0;border:0;border-radius:0;background:transparent;color:#737b77;font:inherit;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.current-project:not([hidden]){display:block}.current-project:disabled{opacity:1;color:#737b77}.current-project:focus{outline:0}.new-project-bar{display:none!important}
 .model-controls select{-webkit-appearance:none;appearance:none;border:0;outline:0;box-shadow:none;background:transparent;background-color:transparent;border-radius:0;-webkit-tap-highlight-color:transparent}
 .model-controls select:focus,.model-controls select:focus-visible,.model-controls select:active{outline:0;box-shadow:none;border:0}
+/* In-app pickers: native selects stay as hidden logic interfaces. */
+.model-controls{position:relative;overflow:visible}
+.model-controls>select,.device-bar>.current-project{position:absolute!important;top:0;left:0;width:1px;height:1px;min-width:0;max-width:none;padding:0;opacity:0;pointer-events:none;overflow:hidden;clip-path:inset(50%)}
+.picker-trigger{display:flex;align-items:center;gap:4px;min-width:0;height:34px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:#59625d;font-family:inherit;font-size:12px;font-weight:500;line-height:1.2;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.picker-trigger[hidden]{display:none}
+.picker-trigger:disabled{opacity:.55;cursor:default}
+.picker-trigger:focus-visible{outline:2px solid #637b70;outline-offset:1px}
+.picker-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.picker-chevron{flex:none;width:6px;height:6px;margin:1px 0 0 2px;border-right:1.4px solid currentColor;border-bottom:1.4px solid currentColor;transform:rotate(45deg);opacity:.65}
+.picker-trigger[aria-expanded="true"] .picker-chevron{margin-top:3px;transform:rotate(225deg)}
+.picker-model{flex:1;min-width:96px;max-width:156px;justify-content:space-between}
+.picker-effort{flex:none;min-width:58px;max-width:86px;justify-content:space-between}
+.picker-project{max-width:min(46vw,220px);height:30px;padding:0 4px;color:#737b77;font-size:13px;font-weight:400}
+.picker-panel{position:absolute;z-index:20;min-width:160px;max-width:min(280px,calc(100vw - 32px));max-height:min(60vh,360px);overflow:auto;padding:4px;background:#fff;border:1px solid #dce1de;border-radius:8px;box-shadow:0 8px 24px #0002;-webkit-tap-highlight-color:transparent}
+.picker-panel[hidden]{display:none}
+.picker-up{bottom:calc(100% + 8px);left:0}
+.picker-up.picker-align-right{left:auto;right:0}
+.picker-down{top:calc(100% + 6px);left:16px}
+.picker-panel-title{padding:6px 10px 5px;color:#727a76;font-size:12px;font-weight:600}
+.picker-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:36px;padding:7px 10px;border:0;border-radius:5px;background:transparent;color:#252826;font:inherit;font-size:13px;text-align:left;white-space:nowrap;cursor:pointer}
+.picker-option:hover,.picker-option:active{background:#f1f2f1}
+.picker-option.is-current{color:#176b50;font-weight:600}
+.picker-option.is-current::after{content:'✓';flex:none;font-size:13px}
+.picker-empty{padding:10px;color:#959d98;font-size:12px;text-align:center}
+/* History notices are text only; paging is driven by scrolling to the top. */
+.history{display:none}
+.load-earlier{position:sticky;top:0;z-index:2;display:block;margin:0 auto 8px;padding:0;border:0;background:transparent;color:#8b938e;font:inherit;font-size:12px;text-align:center;cursor:default}
+.load-earlier[hidden]{display:none}
+/* Stop iOS double-tap zoom on the composer and pickers. */
+body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-option{touch-action:manipulation}

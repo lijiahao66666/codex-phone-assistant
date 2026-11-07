@@ -46,7 +46,7 @@ test('failed automatic page waits for manual retry and late response cannot cros
   vm.runInContext(`selectedId='${id}'; connected=true; streamView={id:selectedId,turns:[{id:'recent',items:[]}],history:{historicalHash:'${hash}',cursor:'recent',keyField:'id'}}; historyCanLoad=true; updateHistoryControl()`,context);
   const scroll=nodes.get('.conversation'); scroll.scrollTop=400; scroll.listeners.scroll(); scroll.scrollTop=60; scroll.listeners.scroll();
   await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(nodes.get('#history').textContent,'历史加载失败，请重试');
+  assert.equal(nodes.get('#history').textContent,'');
   scroll.scrollTop=20; scroll.listeners.scroll(); assert.equal(count,1);
   const button=vm.runInContext('loadEarlier',context); assert.equal(button.hidden,false); assert.equal(button.textContent,'重新加载更早消息');
   const retry=button.listeners.click(); assert.equal(count,2);

@@ -39,7 +39,7 @@ test('history is editable without takeover and only the explicit send recovers b
 test('uncertain recovery keeps the queued message unsent and cannot silently retry takeover',async()=>{
   const f=await fixture(url=>url.endsWith('/recover')?response({error:'outcome-unknown'},504):undefined);
   f.run("messageInput.value='continue'");await f.submit();await tick();
-  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unknown');assert.equal(f.nodes.get('#recover-chat').hidden,false);
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unknown');assert.equal(f.nodes.get('#recover-chat').hidden,true);
   f.run('updateComposer()');await f.run('runOutgoingQueue(selectedId)');await tick();
   assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,1);assert.equal(f.requests.some(r=>r.url.endsWith('/messages')),false);assert.equal(f.nodes.get('#message').disabled,true);
 });
@@ -53,6 +53,55 @@ test('new chat model and effort use the same composer controls and preserve prep
   f.run("newDraft.prepared={threadId:'prepared'};updateComposer()");assert.equal(f.run('modelControl.disabled'),true);assert.equal(f.run('effortControl.disabled'),true);
   f.run("effortControl.value='high';effortControl.listeners.change()");assert.equal(f.run('newDraft.effort'),'low');
   assert.equal(f.requests.some(r=>r.url.endsWith('/model')),false);
+});
+
+test('running tasks keep model and effort pickers usable and apply the choice when idle',async()=>{
+  const f=await fixture();
+  f.run("connected=true;modelCatalog=[{model:'a',displayName:'A',supportedReasoningEfforts:['low','high'],defaultReasoningEffort:'high'}];liveModel={model:'a',effort:'low'};liveMode='default';liveRuntimeStatus='active';updateComposer()");
+  assert.equal(f.run('modelControl.disabled'),false);assert.equal(f.run('effortControl.disabled'),false);
+  f.run("effortControl.value='high';effortControl.listeners.change()");
+  assert.equal(f.run("pendingModelChanges.get(selectedId).effort"),'high');
+  assert.equal(f.requests.some(r=>r.url.endsWith('/model')),false);
+  f.run("showState({id:selectedId,title:'t',runtimeStatus:'idle',model:'a',reasoningEffort:'low',collaborationMode:'default',turns:[],requests:[],history:{complete:true}},true)");
+  assert.equal(f.requests.some(r=>r.url.endsWith('/model')),true);
+  assert.equal(f.run('pendingModelChanges.has(selectedId)'),false);
+});
+
+test('running tasks keep plan mode usable and apply the choice when idle',async()=>{
+  const f=await fixture();
+  f.run("connected=true;modelCatalog=[{model:'a',displayName:'A',supportedReasoningEfforts:['low'],defaultReasoningEffort:'low'}];liveModel={model:'a',effort:'low'};liveMode='default';liveRuntimeStatus='active';updateComposer()");
+  assert.equal(f.nodes.get('#mode-choose').disabled,false);
+  f.nodes.get('#mode-choose').listeners.click();
+  assert.equal(f.run("pendingModeChanges.get(selectedId)"),'plan');
+  assert.equal(f.requests.some(r=>r.url.endsWith('/mode')),false);
+  f.run("showState({id:selectedId,title:'t',runtimeStatus:'idle',model:'a',reasoningEffort:'low',collaborationMode:'default',turns:[],requests:[],history:{complete:true}},true)");
+  assert.equal(f.requests.some(r=>r.url.endsWith('/mode')),true);
+  assert.equal(f.run('pendingModeChanges.has(selectedId)'),false);
+});
+
+test('new chat defaults to a concrete model and effort and the in-app pickers drive them',async()=>{
+  const f=await fixture();
+  f.run("connected=true;selectedId=null;newModels=[{model:'a',displayName:'A',supportedReasoningEfforts:['low','high'],defaultReasoningEffort:'high',isDefault:true},{model:'b',displayName:'B',supportedReasoningEfforts:['medium'],defaultReasoningEffort:'medium'}];newDraft={projectId:'p',attachments:[],model:null,effort:null,pending:false,uncertain:false};updateComposer()");
+  assert.equal(f.run('newDraft.model'),'a');assert.equal(f.run('newDraft.effort'),'high');
+  assert.equal(f.run('newEffort.disabled'),false);
+  assert.equal(f.run("[...modelControl.children].some(o=>o.value==='')"),false);
+  assert.equal(f.run("[...effortControl.children].some(o=>o.value==='')"),false);
+  assert.equal(f.run('modelPicker.label.textContent'),'A');assert.equal(f.run('effortPicker.label.textContent'),'high');
+  f.run('openPicker(effortPicker)');assert.equal(f.run('effortPicker.panel.hidden'),false);assert.equal(f.run('effortPicker.panel.children.length'),3);
+  f.run('effortPicker.panel.children[1].listeners.click()');
+  assert.equal(f.run('newDraft.effort'),'low');assert.equal(f.run('effortPicker.panel.hidden'),true);
+  f.run("modelControl.value='b';modelControl.listeners.change()");
+  assert.equal(f.run('newDraft.model'),'b');assert.equal(f.run('newDraft.effort'),'medium');
+  assert.equal(f.run('effortPicker.label.textContent'),'medium');
+});
+
+test('new chat hides the load-earlier action and never writes a history notice',async()=>{
+  const f=await fixture();
+  f.run("newDraft={projectId:'p',attachments:[],model:null,effort:null,pending:false,uncertain:false};historyCanLoad=true;updateHistoryControl()");
+  assert.equal(f.run('loadEarlier.hidden'),true);
+  f.run('newDraft=null;updateHistoryControl()');assert.equal(f.run('loadEarlier.hidden'),false);
+  f.run("history.textContent='部分历史未加载';selectedId='11111111-1111-4111-8111-111111111111';streamView={id:selectedId,title:'t',turns:[],requests:[],history:{complete:false}};showState(streamView,true)");
+  assert.equal(f.nodes.get('#history').textContent,'');
 });
 
 test('new chats without older history do not show a paging button or partial-history notice',async()=>{

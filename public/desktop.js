@@ -39,7 +39,85 @@ effortControl.title = '选择推理强度';
 effortControl.disabled = true;
 modelControls.append?.(modelControl, effortControl);
 document.querySelector('.composer-inner')?.insertBefore?.(modelControls, document.querySelector('#voice-input'));
+// Native selects stay as hidden logic interfaces. The visible controls are in-app
+// panels, so iOS shows the same option sheet as the rest of the UI instead of the OS wheel.
+const pickerRegistry = [];
+function pickerOptions(select) {
+  if (select.options && typeof select.options.length === 'number') return Array.from(select.options);
+  return Array.isArray(select.children) ? select.children.slice() : [];
+}
+function closeAllPickers() {
+  for (const item of pickerRegistry) { item.panel.hidden = true; item.trigger.setAttribute?.('aria-expanded', 'false'); }
+}
+function renderPickerPanel(item) {
+  const options = pickerOptions(item.select);
+  const rows = options.map(option => {
+    const button = element('button', 'picker-option' + (String(option.value) === String(item.select.value) ? ' is-current' : ''), option.textContent || option.value || '默认');
+    button.type = 'button';
+    button.setAttribute?.('role', 'option');
+    button.addEventListener('click', () => { applyPickerValue(item.select, option.value); closeAllPickers(); });
+    return button;
+  });
+  item.panel.replaceChildren?.(element('div', 'picker-panel-title', item.title), ...rows);
+  if (!rows.length) item.panel.append?.(element('div', 'picker-empty', '暂无可选项'));
+}
+function syncPicker(item) {
+  const options = pickerOptions(item.select);
+  const current = options.find(option => String(option.value) === String(item.select.value)) || options[0];
+  item.label.textContent = current?.textContent || item.placeholder;
+  item.trigger.hidden = Boolean(item.select.hidden);
+  item.trigger.disabled = Boolean(item.select.disabled);
+  if (item.select.hidden || item.select.disabled) { item.panel.hidden = true; item.trigger.setAttribute?.('aria-expanded', 'false'); }
+  else if (!item.panel.hidden) renderPickerPanel(item);
+}
+function syncAllPickers() { for (const item of pickerRegistry) syncPicker(item); }
+function applyPickerValue(select, value) {
+  select.value = value;
+  if (typeof select.dispatchEvent === 'function' && typeof Event === 'function') select.dispatchEvent(new Event('change', { bubbles: true }));
+  else if (typeof select.listeners?.change === 'function') select.listeners.change();
+  syncAllPickers();
+}
+function openPicker(item) {
+  if (item.select.hidden || item.select.disabled) return;
+  const closed = item.panel.hidden;
+  closeAllPickers();
+  if (!closed) return;
+  renderPickerPanel(item);
+  item.panel.hidden = false;
+  item.trigger.setAttribute?.('aria-expanded', 'true');
+}
+function createPicker(select, { className, title, placeholder, direction = 'up', align = 'left' }) {
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'picker-trigger ' + className;
+  trigger.setAttribute?.('aria-label', title);
+  trigger.setAttribute?.('aria-haspopup', 'listbox');
+  trigger.setAttribute?.('aria-expanded', 'false');
+  const label = element('span', 'picker-value', placeholder);
+  const chevron = element('span', 'picker-chevron', '');
+  trigger.append?.(label, chevron);
+  const panel = element('div', 'picker-panel picker-' + direction + (align === 'right' ? ' picker-align-right' : ''), '');
+  panel.hidden = true;
+  panel.setAttribute?.('role', 'listbox');
+  const item = { select, trigger, label, panel, title, placeholder };
+  trigger.addEventListener('click', event => { event?.stopPropagation?.(); openPicker(item); });
+  pickerRegistry.push(item);
+  return item;
+}
+const modelPicker = createPicker(modelControl, { className: 'picker-model', title: '选择模型', placeholder: '模型' });
+const effortPicker = createPicker(effortControl, { className: 'picker-effort', title: '选择推理强度', placeholder: '强度', align: 'right' });
+modelControls.append?.(modelPicker.trigger, effortPicker.trigger, modelPicker.panel, effortPicker.panel);
+const projectPicker = createPicker(currentProject, { className: 'picker-project', title: '选择项目目录', placeholder: '项目', direction: 'down' });
+currentProject.after?.(projectPicker.trigger);
+projectPicker.trigger.after?.(projectPicker.panel);
+document.addEventListener?.('click', event => {
+  const target = event?.target;
+  if (target?.closest?.('.picker-trigger') || target?.closest?.('.picker-panel')) return;
+  closeAllPickers();
+});
+window.addEventListener?.('keydown', event => { if (event?.key === 'Escape') closeAllPickers(); });
 const modelChanges = new Map();
+const pendingModelChanges = new Map();
 const cancelModelPrepared = document.createElement('button');
 cancelModelPrepared.type = 'button';
 cancelModelPrepared.className = 'unlock-send';
@@ -92,23 +170,38 @@ async function loadModels() {
 }
 function updateModelControl() {
   if (newDraft) { modelControls.hidden = false; renderNewModels(); return; }
+  const pending = selectedId ? pendingModelChanges.get(selectedId) : null;
+  const shownModel = pending?.model || liveModel?.model;
+  const shownEffort = pending?.effort || liveModel?.effort;
   modelControl.replaceChildren();
-  const matching = modelCatalog.find(entry => entry.model === liveModel?.model);
-  if (!matching) { const option = document.createElement('option'); option.value = ''; option.textContent = liveModel?.model || '模型'; modelControl.append?.(option); }
-  for (const entry of modelCatalog) { const option = document.createElement('option'); option.value = entry.model; option.textContent = entry.displayName; option.selected = entry.model === liveModel?.model; modelControl.append?.(option); }
+  const matching = modelCatalog.find(entry => entry.model === shownModel);
+  if (!matching) { const option = document.createElement('option'); option.value = ''; option.textContent = shownModel || '模型'; modelControl.append?.(option); }
+  for (const entry of modelCatalog) { const option = document.createElement('option'); option.value = entry.model; option.textContent = entry.displayName; option.selected = entry.model === shownModel; modelControl.append?.(option); }
   effortControl.replaceChildren();
   const efforts = matching?.supportedReasoningEfforts || [];
-  if (!efforts.includes(liveModel?.effort)) { const option = document.createElement('option'); option.value = ''; option.textContent = liveModel?.effort || '默认'; effortControl.append?.(option); }
-  for (const effort of efforts) { const option = document.createElement('option'); option.value = effort; option.textContent = effort; option.selected = effort === liveModel?.effort; effortControl.append?.(option); }
-  const disabled = !selectedId || !connected || liveRuntimeStatus !== 'idle' || !modelCatalog.length || modelChanges.has(selectedId) || modeChanges.has(selectedId) || hasPendingOutgoing(selectedId) || recoveryBlocksWrite();
+  if (!efforts.includes(shownEffort)) { const option = document.createElement('option'); option.value = ''; option.textContent = shownEffort || '默认'; effortControl.append?.(option); }
+  for (const effort of efforts) { const option = document.createElement('option'); option.value = effort; option.textContent = effort; option.selected = effort === shownEffort; effortControl.append?.(option); }
+  const disabled = !selectedId || !connected || !modelCatalog.length || modelChanges.has(selectedId) || modeChanges.has(selectedId) || recoveryBlocksWrite();
   modelControls.hidden = Boolean(newDraft) || !selectedId;
   modelControl.disabled = disabled;
   effortControl.disabled = disabled || !matching || !efforts.length;
+  syncAllPickers();
+}
+function flushPendingModelChange() {
+  const id = selectedId;
+  if (!id || newDraft || !connected || liveRuntimeStatus !== 'idle') return;
+  const pending = pendingModelChanges.get(id);
+  if (!pending) return;
+  if (modelChanges.has(id) || modeChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return;
+  pendingModelChanges.delete(id);
+  void requestModelChange(pending.model, pending.effort);
 }
 async function requestModelChange(model, effort) {
   const id = selectedId, selected = modelCatalog.find(entry => entry.model === model);
-  if (!id || !selected || !connected || liveRuntimeStatus !== 'idle' || modelChanges.has(id) || modeChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return updateModelControl();
-  if (!selected.supportedReasoningEfforts.includes(effort) || (model === liveModel?.model && effort === liveModel?.effort)) return updateModelControl();
+  if (!id || !selected || !connected || modelChanges.has(id) || modeChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return updateModelControl();
+  if (!selected.supportedReasoningEfforts.includes(effort)) return updateModelControl();
+  if (liveRuntimeStatus !== 'idle') { pendingModelChanges.set(id, { model, effort }); return updateModelControl(); }
+  if (model === liveModel?.model && effort === liveModel?.effort) return updateModelControl();
   const change = { model, effort, message: '正在切换模型' }; modelWriteGeneration++; modelChanges.set(id, change); updateComposer();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30000);
   try {
@@ -298,14 +391,11 @@ function updateRecoveryControl() {
   const checkNotice = check?.status === 'failed' || check?.status === 'locked' || (connected && check?.status === 'checking');
   const visible = Boolean(selectedId && currentDeviceId && !newDraft && (checkNotice || (state && !['unavailable', 'clear'].includes(state.status))));
   recoveryControl.hidden = !visible;
-  recoverChat.hidden = !['failed', 'locked'].includes(check?.status) && state?.status !== 'unknown';
+  // Recovery is automatic; no manual retry or cancel buttons are exposed.
+  recoverChat.hidden = true;
+  cancelRecovery.hidden = true;
   if (!visible) return;
-  const checkingAttempt = state?.checking === true || state?.cancelling === true;
-  cancelRecovery.hidden = state?.status !== 'unknown' || !state.requestId;
-  cancelRecovery.disabled = checkingAttempt;
-  recoverChat.textContent = '重新检查';
-  recoverChat.disabled = checkingAttempt || (state?.status === 'unknown' && !state.requestId) || (state?.status !== 'unknown' && check?.status !== 'failed' && (check?.status !== 'ready' || Boolean(state && !['unavailable', 'clear'].includes(state.status))));
-  recoveryStatus.textContent = check?.status === 'failed' ? '无法确认任务状态' : check?.status === 'locked' ? '恢复结果未知，请在电脑上查看任务' : check?.status !== 'ready' ? '正在核对任务状态' : state?.message || '';
+  recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理' : '正在连接任务…';
 }
 async function checkRecoveryAttempt(id, deviceId, state) {
   if (state.checking || state.cancelling || !state.requestId) return;
@@ -372,7 +462,10 @@ async function checkRecoveryStatus(id, deviceId, stream) {
     if (recoveryChecks.get(key) === check && recoveryStream === stream && !stream.controller.signal.aborted) check.status = 'failed';
   } finally {
     clearTimeout(timer);
-    if (selectedId === id && currentDeviceId === deviceId) updateComposer();
+    if (selectedId === id && currentDeviceId === deviceId) {
+      updateComposer();
+      if (check.status === 'ready' && recoverableHistoryId === id && !connected) void recoverSelectedChat();
+    }
   }
 }
 const newProjectBar = document.querySelector('#new-project-bar');
@@ -382,17 +475,27 @@ const newEffort = effortControl;
 for (const selector of ['#new-model', '#new-effort']) { const old = document.querySelector(selector); if (old) { old.hidden = true; old.disabled = true; } }
 const newChat = document.querySelector('#new-chat');
 let newModels = [];
+function preferredNewModel() { return newModels.find(item => item.isDefault) || newModels[0] || null; }
+function normalizeNewModelChoice() {
+  if (!newDraft || newDraft.pending || newDraft.uncertain || newDraft.prepared || !newModels.length) return;
+  const fallback = preferredNewModel();
+  if (!newModels.some(item => item.model === newDraft.model)) newDraft.model = fallback?.model || null;
+  const model = newModels.find(item => item.model === newDraft.model);
+  if (model && !model.supportedReasoningEfforts.includes(newDraft.effort)) {
+    newDraft.effort = model.supportedReasoningEfforts.includes(model.defaultReasoningEffort) ? model.defaultReasoningEffort : (model.supportedReasoningEfforts[0] || null);
+  }
+}
 function renderNewModels() {
-  const model = newModels.find(item => item.model === newDraft?.model);
-  const autoModel = element('option', '', '自动'); autoModel.value = '';
-  newModel.replaceChildren(autoModel, ...newModels.map(item => { const option = element('option', '', item.displayName || item.model); option.value = item.model; return option; }));
-  newModel.value = newDraft?.model || '';
+  normalizeNewModelChoice();
+  const model = newModels.find(item => item.model === newDraft?.model) || preferredNewModel();
+  newModel.replaceChildren(...newModels.map(item => { const option = element('option', '', item.displayName || item.model); option.value = item.model; return option; }));
+  newModel.value = model?.model || '';
   const efforts = model?.supportedReasoningEfforts || [];
-  const autoEffort = element('option', '', '自动'); autoEffort.value = '';
-  newEffort.replaceChildren(autoEffort, ...efforts.map(value => { const option = element('option', '', value); option.value = value; return option; }));
-  newEffort.value = newDraft?.effort || '';
+  newEffort.replaceChildren(...efforts.map(value => { const option = element('option', '', value); option.value = value; return option; }));
+  newEffort.value = efforts.includes(newDraft?.effort) ? newDraft.effort : (efforts.includes(model?.defaultReasoningEffort) ? model.defaultReasoningEffort : (efforts[0] || ''));
   newModel.disabled = !newDraft || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared) || !newModels.length;
-  newEffort.disabled = !model || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
+  newEffort.disabled = !model || !efforts.length || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
+  syncAllPickers();
 }
 async function loadNewModels(draft, deviceId) {
   try {
@@ -406,14 +509,16 @@ async function loadNewModels(draft, deviceId) {
 }
 function selectNewModel() {
   if (!newDraft || newDraft.pending || newDraft.uncertain || newDraft.prepared) return;
-  const model = newModels.find(item => item.model === newModel.value);
+  const model = newModels.find(item => item.model === newModel.value) || preferredNewModel();
   newDraft.model = model?.model || null;
-  newDraft.effort = model && model.supportedReasoningEfforts.includes(newDraft.effort) ? newDraft.effort : (model?.supportedReasoningEfforts.includes(model.defaultReasoningEffort) ? model.defaultReasoningEffort : null);
+  if (!model) newDraft.effort = null;
+  else if (!model.supportedReasoningEfforts.includes(newDraft.effort)) newDraft.effort = model.supportedReasoningEfforts.includes(model.defaultReasoningEffort) ? model.defaultReasoningEffort : (model.supportedReasoningEfforts[0] || null);
   renderNewModels();
 }
 function selectNewEffort() {
   const model = newModels.find(item => item.model === newDraft?.model);
   if (newDraft && !newDraft.pending && !newDraft.uncertain && !newDraft.prepared && model) newDraft.effort = model.supportedReasoningEfforts.includes(newEffort.value) ? newEffort.value : null;
+  syncAllPickers();
 }
 function projectStorageKey() { return currentDeviceId ? `codex-last-project:${currentDeviceId}` : null; }
 function rememberedProject() { try { return localStorage.getItem(projectStorageKey()); } catch { return null; } }
@@ -424,11 +529,12 @@ function updateNewProjectOptions() {
   currentProject.replaceChildren(...options.map(option => option.cloneNode(true)));
   currentProject.hidden = !availableProjects.length || (!selectedId && !newDraft);
   currentProject.disabled = !newDraft || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
-  if (!newDraft) return;
+  if (!newDraft) { syncAllPickers(); return; }
   if (!newDraft.pending && !newDraft.prepared && !newDraft.uncertain && !availableProjects.some(project => project.id === newDraft.projectId)) newDraft.projectId = availableProjects[0]?.id || '';
   newProject.value = newDraft.projectId;
   newProject.disabled = newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
   currentProject.value = newDraft.projectId;
+  syncAllPickers();
 }
 function openNewChat(projectId) {
   if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; }
@@ -687,6 +793,7 @@ async function loadCapabilities() {
 const submissions = new Map();
 const stops = new Map();
 const modeChanges = new Map();
+const pendingModeChanges = new Map();
 const modeNotices = new Map();
 let liveMode = null, liveRuntimeStatus = null;
 let activeTurnId = null;
@@ -823,17 +930,15 @@ document.addEventListener?.('click', event => { if (!attachmentControl.contains(
 document.addEventListener?.('keydown', event => { if (event.key === 'Escape' && !attachmentMenu.hidden) { closeAttachmentMenu(); attachmentToggle.focus(); } });
 imageChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && (selectedId || newDraft) && connected) imageFile.click(); });
 fileChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && (selectedId || newDraft) && connected) fileInput.click(); });
-modeChoose.addEventListener('click', async () => {
-  const id = selectedId;
-  if (!id || !connected || liveRuntimeStatus !== 'idle' || !['default', 'plan'].includes(liveMode) || modeChanges.has(id) || modelChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return;
-  const change = { target: liveMode === 'plan' ? 'default' : 'plan', message: '正在切换模式' };
+async function applyModeChange(id, target) {
+  const change = { target, message: '正在切换模式' };
   modeNotices.delete(id); modeChanges.set(id, change); updateComposer();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/mode`, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: change.target }),
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: target }),
     });
     if (modeChanges.get(id) !== change) return;
     if (response.ok) change.message = '等待电脑确认模式';
@@ -845,6 +950,26 @@ modeChoose.addEventListener('click', async () => {
     clearTimeout(timer);
     if (selectedId === id) updateComposer();
   }
+}
+function flushPendingModeChange() {
+  const id = selectedId;
+  if (!id || newDraft || !connected || liveRuntimeStatus !== 'idle') return;
+  const target = pendingModeChanges.get(id);
+  if (!target || !['default', 'plan'].includes(liveMode) || modeChanges.has(id) || modelChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return;
+  pendingModeChanges.delete(id);
+  void applyModeChange(id, target);
+}
+modeChoose.addEventListener('click', async () => {
+  const id = selectedId;
+  if (!id || !connected || !['default', 'plan'].includes(liveMode) || modeChanges.has(id) || modelChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return;
+  const target = (pendingModeChanges.get(id) || liveMode) === 'plan' ? 'default' : 'plan';
+  if (liveRuntimeStatus !== 'idle') {
+    if (target === liveMode) pendingModeChanges.delete(id);
+    else pendingModeChanges.set(id, target);
+    updateComposer();
+    return;
+  }
+  await applyModeChange(id, target);
 });
 function addAttachments(input, kind) {
   const files = [...(input.files || [])];
@@ -943,10 +1068,11 @@ function updateComposer() {
   fileChoose.disabled = imageChoose.disabled;
   const modeAvailable = ['default', 'plan'].includes(liveMode);
   const modeChange = selectedId && modeChanges.get(selectedId);
+  const pendingMode = selectedId && pendingModeChanges.get(selectedId);
   modeChoose.hidden = !modeAvailable;
-  modeChoose.textContent = modeChange && !modeChange.message.includes('未知') ? '正在切换模式' : liveMode === 'plan' ? '计划模式 ✓' : '计划模式';
-  modeChoose.disabled = messageInput.disabled || liveRuntimeStatus !== 'idle' || Boolean(modeChange) || Boolean(selectedId && modelChanges.has(selectedId)) || hasPendingOutgoing(selectedId);
-  modeStatus.textContent = (modeChange?.message.includes('未知') ? modeChange.message : '') || (selectedId && modelChanges.get(selectedId)?.message) || (selectedId && modeNotices.get(selectedId)) || '';
+  modeChoose.textContent = modeChange && !modeChange.message.includes('未知') ? '正在切换模式' : (pendingMode || liveMode) === 'plan' ? '计划模式 ✓' : '计划模式';
+  modeChoose.disabled = messageInput.disabled || Boolean(modeChange) || Boolean(selectedId && modelChanges.has(selectedId)) || hasPendingOutgoing(selectedId);
+  modeStatus.textContent = (modeChange?.message.includes('未知') ? modeChange.message : '') || (selectedId && modelChanges.get(selectedId)?.message) || (selectedId && modeNotices.get(selectedId)) || (pendingMode ? '将在当前回合结束后切换' : '');
   const modelChange = selectedId && modelChanges.get(selectedId);
   cancelModelPrepared.hidden = !modelChange || (!modelChange.checkAfterCancel && !uuid.test(modelChange.preparedOperationId || ''));
   cancelModelPrepared.disabled = !connected || Boolean(modelChange?.cancelling);
@@ -1848,14 +1974,16 @@ function scheduleVisibleStatusRefresh() {
 }
 projectList.addEventListener('scroll', scheduleVisibleStatusRefresh, { passive: true });
 function visibleStatusIds() {
-  const pending = [...statusHandovers.keys()];
-  if (!sidebar.classList.contains?.('open')) return pending.slice(0, 4);
-  const bounds = projectList.getBoundingClientRect();
-  const visible = [...projectList.querySelectorAll('.task')].filter(task => {
-    const rect = task.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
-  }).map(task => task.dataset.id).filter(id => uuid.test(id));
-  return [...new Set([...pending, ...visible])].slice(0, 4);
+  const ids = [...statusHandovers.keys()];
+  if (uuid.test(selectedId || '')) ids.push(selectedId);
+  if (sidebar.classList.contains?.('open')) {
+    const bounds = projectList.getBoundingClientRect();
+    for (const task of projectList.querySelectorAll('.task')) {
+      const rect = task.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom && uuid.test(task.dataset.id)) ids.push(task.dataset.id);
+    }
+  }
+  return [...new Set(ids)].slice(0, 4);
 }
 let listRequestGeneration = 0;
 let listChangeTimer;
@@ -2077,16 +2205,14 @@ async function loadRecordedPage() {
   } catch (error) {
     if (!controller.signal.aborted && historyRequest === controller && scopeGeneration === historyScopeGeneration && selectedId === id) {
       historyAutoBlocked = true;
-      if (error.stale) {
-        recordedHistory = { ...(previous || { id, turns: [], initialized: false, olderComplete: false }), stale: true };
-        history.textContent = '历史已变化，刷新后可继续加载';
-      } else history.textContent = '历史加载失败，请重试';
+      if (error.stale) recordedHistory = { ...(previous || { id, turns: [], initialized: false, olderComplete: false }), stale: true };
+      history.textContent = '';
     }
   } finally { if (historyRequest === controller) { historyRequest = null; updateHistoryControl(); } }
 }
 function updateHistoryControl() {
   const shortContent = !conversation || !Number.isFinite(conversation.scrollHeight) || !Number.isFinite(conversation.clientHeight) || conversation.scrollHeight <= conversation.clientHeight + 1;
-  loadEarlier.hidden = !historyCanLoad || (!historyRequest && !historyAutoBlocked && !historyIsStale() && !shortContent);
+  loadEarlier.hidden = Boolean(newDraft) || !historyCanLoad || (!historyRequest && !historyAutoBlocked && !historyIsStale() && !shortContent);
   loadEarlier.disabled = Boolean(historyRequest);
   loadEarlier.textContent = historyRequest ? '加载中...' : historyIsStale() ? '历史已变化，刷新' : historyAutoBlocked ? '重新加载更早消息' : '加载更早消息';
 }
@@ -2142,7 +2268,7 @@ async function loadEarlierPage() {
     const height = conversation?.scrollHeight || 0, top = conversation?.scrollTop || 0;
     followLatest = false; showState(streamView);
     if (conversation) conversation.scrollTop = top + Math.max(0, conversation.scrollHeight - height);
-  } catch { if (!controller.signal.aborted && selectedId === id) { historyAutoBlocked = true; history.textContent = '历史加载失败，请重试'; } }
+  } catch { if (!controller.signal.aborted && selectedId === id) { historyAutoBlocked = true; history.textContent = ''; } }
   finally { if (historyRequest === controller) { historyRequest = null; updateHistoryControl(); } }
 }
 loadEarlier.addEventListener('click', () => loadEarlierPage());
@@ -2194,6 +2320,8 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   const modelChange = selectedId && modelChanges.get(selectedId);
   if (modelChange && typeof modelChange.model === 'string' && liveModel?.model === modelChange.model && liveModel.effort === modelChange.effort) { modelChange.observed = true; if (modelChange.confirmed) modelChanges.delete(selectedId); }
   liveRuntimeStatus = live ? view.runtimeStatus : null;
+  flushPendingModelChange();
+  flushPendingModeChange();
   const modeChange = selectedId && modeChanges.get(selectedId);
   if (modeChange && liveMode === modeChange.target) modeChanges.delete(selectedId);
   const goal = live ? view.goal : null;
@@ -2209,11 +2337,11 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   const oldScrollTop = conversation?.scrollTop;
   const running = controlTurns.filter(turn => turn.status === 'inProgress' && uuid.test(turn.id || ''));
   activeTurnId = live && running.length === 1 ? running[0].id : null;
-  updateLiveTaskStatus(selectedId, live && (view.runtimeStatus === 'active' || (view.runtimeStatus == null && running.length > 0)) ? 'active' : 'unknown');
+  updateLiveTaskStatus(selectedId, live && (taskStatusIsActive(view.runtimeStatus) || running.length > 0 || Boolean(activeTurnId)) ? 'active' : 'unknown');
   if (selectedId && stops.has(selectedId) && stops.get(selectedId).turnId !== activeTurnId && !stops.get(selectedId).pending && !stops.get(selectedId).goalPauseFailed && (activeTurnId || !stops.get(selectedId).error)) stops.delete(selectedId);
   selectedTitle = view.title || selectedTitle || '未命名任务';
   title.textContent = selectedTitle;
-  history.textContent = live ? (loadedHistory?.gap ? '历史可能存在缺口，请刷新' : historyIsStale() ? '历史已变化，刷新后可继续加载' : historyCanLoad ? '部分历史未加载' : '') : '已保存的历史，非实时内容';
+  history.textContent = '';
   error.hidden = true;
   const fragment = document.createDocumentFragment();
   const questionFragment = document.createDocumentFragment();
