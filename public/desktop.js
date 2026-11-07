@@ -94,7 +94,7 @@ function createPicker(select, { className, title, placeholder, direction = 'up',
   trigger.setAttribute?.('aria-haspopup', 'listbox');
   trigger.setAttribute?.('aria-expanded', 'false');
   const label = element('span', 'picker-value', placeholder);
-  const chevron = element('span', 'picker-chevron', '');
+  const chevron = chevronIcon();
   trigger.append?.(label, chevron);
   const panel = element('div', 'picker-panel picker-' + direction + (align === 'right' ? ' picker-align-right' : ''), '');
   panel.hidden = true;

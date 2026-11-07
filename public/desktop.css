@@ -181,15 +181,16 @@ button.file-change-path::after,.file-change-path:not(button)::after,.summary-fil
 /* In-app pickers: native selects stay as hidden logic interfaces. */
 .model-controls{position:relative;overflow:visible}
 .model-controls>select,.device-bar>.current-project{position:absolute!important;top:0;left:0;width:1px;height:1px;min-width:0;max-width:none;padding:0;opacity:0;pointer-events:none;overflow:hidden;clip-path:inset(50%)}
-.picker-trigger{display:flex;align-items:center;gap:4px;min-width:0;height:34px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:#59625d;font-family:inherit;font-size:12px;font-weight:500;line-height:1.2;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.picker-trigger{display:flex;align-items:center;gap:5px;min-width:0;height:34px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:#59625d;font-family:inherit;font-size:12px;font-weight:500;line-height:1.2;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .picker-trigger[hidden]{display:none}
 .picker-trigger:disabled{opacity:.55;cursor:default}
 .picker-trigger:focus-visible{outline:2px solid #637b70;outline-offset:1px}
 .picker-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.picker-chevron{flex:none;width:6px;height:6px;margin:1px 0 0 2px;border-right:1.4px solid currentColor;border-bottom:1.4px solid currentColor;transform:rotate(45deg);opacity:.65}
-.picker-trigger[aria-expanded="true"] .picker-chevron{margin-top:3px;transform:rotate(225deg)}
-.picker-model{flex:1;min-width:96px;max-width:156px;justify-content:space-between}
-.picker-effort{flex:none;min-width:58px;max-width:86px;justify-content:space-between}
+.picker-trigger .chevron-icon{width:12px;height:12px;flex:none;transform:rotate(90deg);transition:transform .16s ease}
+.picker-trigger[aria-expanded="true"] .chevron-icon{transform:rotate(-90deg)}
+@media(prefers-reduced-motion:reduce){.picker-trigger .chevron-icon{transition:none}}
+.picker-model{flex:1;min-width:96px;max-width:156px}
+.picker-effort{flex:none;min-width:58px;max-width:86px}
 .picker-project{max-width:min(46vw,220px);height:30px;padding:0 4px;color:#737b77;font-size:13px;font-weight:400}
 .picker-panel{position:absolute;z-index:20;min-width:160px;max-width:min(280px,calc(100vw - 32px));max-height:min(60vh,360px);overflow:auto;padding:4px;background:#fff;border:1px solid #dce1de;border-radius:8px;box-shadow:0 8px 24px #0002;-webkit-tap-highlight-color:transparent}
 .picker-panel[hidden]{display:none}
@@ -208,6 +209,9 @@ button.file-change-path::after,.file-change-path:not(button)::after,.summary-fil
 .load-earlier[hidden]{display:none}
 /* Stop iOS double-tap zoom on the composer and pickers. */
 body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-option{touch-action:manipulation}
+/* Keep picker row bottom-aligned with the + and send buttons on every engine. */
+.composer-inner:has(.model-controls:not([hidden])) .model-controls{align-self:end;height:34px;align-items:center}
+.picker-trigger{height:34px;line-height:1}
 /* No status text below the composer, and feedback never changes its height. */
 .composer>.send-status,.composer>.voice-status,.composer>.send-feedback>.send-status{display:none!important}
 .composer>.send-feedback{position:absolute;left:0;right:0;bottom:100%;width:auto;max-width:none;margin:0;padding:4px 16px;display:flex;justify-content:center;gap:10px;flex-wrap:wrap;pointer-events:none}
