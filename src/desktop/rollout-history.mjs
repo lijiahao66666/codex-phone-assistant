@@ -7,31 +7,31 @@ import { desktopView } from './view.mjs';
 import { insidePath } from '../common/path-utils.mjs';
 
 // Rollout data is historical and must never authorize live control operations.
-export async function readRolloutHistory(threadId, { codexHome = join(homedir(), '.codex'), maxBytes = 16 * 1024 * 1024, parentThreadId = null } = {}) {
+export async function readRolloutHistory(threadId, { codexHome = join(homedir(), '.codex'), maxBytes = 16 * 1024 * 1024, parentThreadId = null, phoneThreadIds = [] } = {}) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) throw new TypeError('Invalid thread');
   if (parentThreadId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parentThreadId)) throw new TypeError('Invalid parent');
   try {
-    const history = await readRolloutFile(threadId, codexHome, maxBytes, parentThreadId);
+    const history = await readRolloutFile(threadId, codexHome, maxBytes, parentThreadId, phoneThreadIds);
     if (history) return history;
   } catch (error) {
     if (!['ENOENT', 'EACCES'].includes(error.code)) throw error;
   }
-  return readProjectedHistory(threadId, codexHome, parentThreadId);
+  return readProjectedHistory(threadId, codexHome, parentThreadId, phoneThreadIds);
 }
 
-function permittedRow(db, threadId, parentThreadId) {
+function permittedRow(db, threadId, parentThreadId, phoneThreadIds) {
   const row = db.prepare('SELECT rollout_path, title, name, source, thread_source, archived FROM threads WHERE id = ?').get(threadId);
   if (!row || row.archived !== 0) return null;
-  if (parentThreadId === null) return row.source === 'vscode' && ['user', 'agent_created_thread'].includes(row.thread_source) ? row : null;
+  if (parentThreadId === null) return row.source === 'vscode' && (['user', 'agent_created_thread'].includes(row.thread_source) || (row.thread_source === null && phoneThreadIds.includes(threadId))) ? row : null;
   if (row.thread_source !== 'subagent') return null;
   try { return JSON.parse(row.source)?.subagent?.thread_spawn?.parent_thread_id === parentThreadId ? row : null; }
   catch { return null; }
 }
 
-async function readRolloutFile(threadId, codexHome, maxBytes, parentThreadId) {
+async function readRolloutFile(threadId, codexHome, maxBytes, parentThreadId, phoneThreadIds) {
   const db = new DatabaseSync(join(codexHome, 'state_5.sqlite'), { readOnly: true });
   let row;
-  try { row = permittedRow(db, threadId, parentThreadId); }
+  try { row = permittedRow(db, threadId, parentThreadId, phoneThreadIds); }
   finally { db.close(); }
   if (!row || typeof row.rollout_path !== 'string') return null;
   const root = await realpath(join(codexHome, 'sessions'));
@@ -80,10 +80,10 @@ async function readRolloutFile(threadId, codexHome, maxBytes, parentThreadId) {
   } finally { await file.close(); }
 }
 
-function readProjectedHistory(threadId, codexHome, parentThreadId) {
+function readProjectedHistory(threadId, codexHome, parentThreadId, phoneThreadIds) {
   const state = new DatabaseSync(join(codexHome, 'state_5.sqlite'), { readOnly: true });
   let row;
-  try { row = permittedRow(state, threadId, parentThreadId); }
+  try { row = permittedRow(state, threadId, parentThreadId, phoneThreadIds); }
   finally { state.close(); }
   if (!row) return null;
   let db;

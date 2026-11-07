@@ -37,6 +37,18 @@ test('lists only visible desktop user threads in assigned projects and paginates
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('only includes assistant-created null-source threads when explicitly recorded', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phone-list-'));
+  try {
+    const db = new DatabaseSync(join(dir, 'state_5.sqlite'));
+    db.exec("CREATE TABLE threads (id TEXT, title TEXT, name TEXT, recency_at_ms INTEGER, archived INTEGER, source TEXT, thread_source TEXT, preview TEXT, cwd TEXT); INSERT INTO threads VALUES ('owned','Owned',NULL,2,0,'vscode',NULL,'shown',NULL),('other','Other',NULL,1,0,'vscode',NULL,'shown',NULL)");
+    db.close();
+    await writeFile(join(dir, '.codex-global-state.json'), '{}');
+    assert.deepEqual((await listDesktopThreads({ codexHome: dir })).recent, []);
+    assert.deepEqual((await listDesktopThreads({ codexHome: dir, phoneThreadIds: ['owned'] })).recent.map(thread => thread.id), ['owned']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('only projects unread state for the current identity and unambiguous local host', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'codex-hub-unread-'));
   try {

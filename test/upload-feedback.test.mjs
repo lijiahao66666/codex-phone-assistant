@@ -17,7 +17,7 @@ test('upload failure reports stage/status/time and never submits a message', asy
     return {ok:true,status:200,json:async()=>({projects:[],recent:[]})};
   }});
   vm.runInContext(await readFile(new URL('../public/desktop.js',import.meta.url),'utf8'),context);
-  vm.runInContext("selectedId='11111111-1111-4111-8111-111111111111'; connected=true; imageUploadAvailable=true; imageDrafts.set(selectedId,[{kind:'file',file:Object.assign(new Blob(['test']),{name:'test.txt'})}]);",context);
+  vm.runInContext("selectedId='11111111-1111-4111-8111-111111111111'; currentDeviceId='33333333-3333-4333-8333-333333333333'; recoveryChecks.set(recoveryKey(currentDeviceId, selectedId), {status:'ready'}); recoveries.set(recoveryKey(currentDeviceId, selectedId), {status:'clear'}); connected=true; imageUploadAvailable=true; imageDrafts.set(selectedId,[{kind:'file',file:Object.assign(new Blob(['test']),{name:'test.txt'})}]);",context);
   await nodes.get('#composer-form').listeners.submit({preventDefault(){}});
   assert.match(nodes.get('#send-status').textContent,/传输 1\/1 · 503 · unavailable · \d+秒/);
   assert.doesNotMatch(nodes.get('#send-status').textContent,/private server detail/);

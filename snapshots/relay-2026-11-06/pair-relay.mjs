@@ -3,12 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { isIP } from 'node:net';
 import { readFile } from 'node:fs/promises';
-import { createGzip, gunzip, constants as zlibConstants } from 'node:zlib';
-import { promisify } from 'node:util';
-import { PairingRegistry } from '../../src/pairing/registry.mjs';
+import { createGzip, constants as zlibConstants } from 'node:zlib';
+import { PairingRegistry } from './pairing-registry.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const decompressUploadChunk = promisify(gunzip);
 
 // Experimental relay. TLS must terminate at a trusted loopback-only proxy.
 export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
@@ -35,8 +33,6 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     }
     for (const [id, entry] of pending) if (entry.hostId === paired.hostId && entry.deviceId !== paired.deviceId) cancel(id, { unknown: entry.writing });
     for (const entry of bodyReads) if (entry.hostId === paired.hostId && entry.deviceId !== paired.deviceId) rejectBodyRead(entry, 'device-replaced');
-    const peer = peers.get(paired.hostId);
-    if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify({ type: 'device-restored', deviceId: paired.deviceId }));
   }
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024, perMessageDeflate: { threshold: 1024 } });
   let closed = false, pairRequests = 0, enrollmentRequests = 0;
@@ -59,9 +55,8 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   const sameOriginRead = req => (!req.headers.origin || req.headers.origin === base.origin) && req.headers['sec-fetch-site'] === 'same-origin';
   const assets = {
     '/pair': ['desktop.html', 'text/html; charset=utf-8'],
-    '/app-icon.png': ['app-icon-chatgpt.png', 'image/png'],
-    '/app-icon-20261104.png': ['app-icon-chatgpt.png', 'image/png'],
-    '/app-icon-chatgpt.png': ['app-icon-chatgpt.png', 'image/png'],
+    '/app-icon.png': ['app-icon.png', 'image/png'],
+    '/app-icon-20261104.png': ['app-icon.png', 'image/png'],
     '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json; charset=utf-8'],
     '/install-prompt.js': ['install-prompt.js', 'text/javascript; charset=utf-8'],
     '/pair.js': ['pair.js', 'text/javascript; charset=utf-8'],
@@ -71,6 +66,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     '/pair.css': ['pair.css', 'text/css; charset=utf-8'],
     '/': ['desktop.html', 'text/html; charset=utf-8'],
     '/desktop.js': ['desktop.js', 'text/javascript; charset=utf-8'],
+    '/recovery-attempt-store.js': ['recovery-attempt-store.js', 'text/javascript; charset=utf-8'],
     '/markdown-parser.js': ['../node_modules/marked/lib/marked.umd.js', 'text/javascript; charset=utf-8'],
     '/html-sanitizer.js': ['../node_modules/dompurify/dist/purify.min.js', 'text/javascript; charset=utf-8'],
     '/desktop.css': ['desktop.css', 'text/css; charset=utf-8'],
@@ -268,29 +264,58 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       }
       const phone = device(req);
       if (!phone) return send(res, 401, { error: 'unauthorized' });
-      if (req.url === '/api/pairing/status' && req.method === 'GET') {
-        if (!sameOriginRead(req)) return send(res, 403, { error: 'forbidden' });
-        const state = registry.devicePairingState(phone.hostId, phone.deviceId);
-        if (!state) return send(res, 401, { error: 'unauthorized' });
-        return send(res, 200, { state: state.activeDeviceId === phone.deviceId ? 'active' : 'replaced', activeDeviceId: state.activeDeviceId });
-      }
-      if (req.url === '/api/pairing/restore' && req.method === 'POST') {
-        if (!sameOrigin(req) || req.headers['content-type'] !== 'application/json') return send(res, 403, { error: 'forbidden' });
-        const data = await body(req);
-        if (!data || Object.keys(data).join(',') !== 'expectedActiveDeviceId' || (data.expectedActiveDeviceId !== null && (typeof data.expectedActiveDeviceId !== 'string' || !uuid.test(data.expectedActiveDeviceId)))) return send(res, 400, { error: 'invalid' });
-        const restored = registry.restoreDevice(phone.hostId, phone.deviceId, data.expectedActiveDeviceId);
-        if (!restored) return send(res, 401, { error: 'unauthorized' });
-        if (restored.conflict) return send(res, 409, { error: 'pairing-changed' });
-        if (!restored.alreadyActive) activatePair(restored);
-        return send(res, 200, { ok: true });
-      }
-      if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) {
-        const state = registry.devicePairingState(phone.hostId, phone.deviceId);
-        return send(res, 401, { error: 'device-replaced', activeDeviceId: state?.activeDeviceId ?? null });
-      }
+      if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
       if (req.headers['x-codex-expected-device'] && req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
       if (!(req.method === 'GET' ? sameOriginRead(req) : sameOrigin(req))) return send(res, 403, { error: 'forbidden' });
       const requested = req.url || '';
+      if (['/api/chats/prepare', '/api/chats/submit'].includes(requested) && req.method === 'POST') {
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 65536);
+        if (res.writableEnded || res.destroyed) return;
+        const data = reserved?.data, prepare = requested.endsWith('/prepare');
+        const allowed = prepare ? ['requestId', 'projectId', 'digest', 'model', 'effort'] : ['requestId', 'text', 'model', 'effort', 'attachmentIds'];
+        if (!data || Object.keys(data).some(k => !allowed.includes(k)) || !uuid.test(data.requestId || '') || (data.model !== undefined && (typeof data.model !== 'string' || !data.model || data.model.length > 200)) || (data.effort !== undefined && (typeof data.effort !== 'string' || !data.effort || !data.model || data.effort.length > 100)) || (prepare ? typeof data.projectId !== 'string' || !data.projectId || data.projectId.length > 4096 || !/^[a-f0-9]{64}$/.test(data.digest || '') : typeof data.text !== 'string' || Buffer.byteLength(data.text) > 32768 || !Array.isArray(data.attachmentIds) || !data.attachmentIds.length || data.attachmentIds.length > 4 || new Set(data.attachmentIds).size !== data.attachmentIds.length || data.attachmentIds.some(id => !uuid.test(id)))) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved?.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, creating: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved?.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: prepare ? 'prepare-chat' : 'submit-chat', id, deviceId: phone.deviceId, ...data }));
+        return;
+      }
+      if (requested === '/api/chats/status' && req.method === 'POST') {
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 1024);
+        if (res.writableEnded || res.destroyed) return;
+        if (!reserved?.data || Object.keys(reserved.data).length !== 1 || !uuid.test(reserved.data.requestId || '')) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: false, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'creation-status', id, deviceId: phone.deviceId, requestId: reserved.data.requestId }));
+        return;
+      }
+      if (requested === '/api/chats' && req.method === 'POST') {
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 65536);
+        if (res.writableEnded || res.destroyed) return;
+        const data = reserved?.data;
+        if (!data || Object.keys(data).some(k => !['projectId', 'text', 'requestId', 'model', 'effort'].includes(k)) || !uuid.test(data.requestId || '') || typeof data.projectId !== 'string' || !data.projectId || data.projectId.length > 4096 || typeof data.text !== 'string' || !data.text.trim() || Buffer.byteLength(data.text) > 32768 || (data.model !== undefined && (typeof data.model !== 'string' || !data.model || data.model.length > 200)) || (data.effort !== undefined && (typeof data.effort !== 'string' || !data.effort || data.effort.length > 100 || !data.model))) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved?.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, creating: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved?.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'create-chat', id, deviceId: phone.deviceId, ...data }));
+        return;
+      }
       const historyPage = /^\/api\/threads\/([0-9a-f-]{36})\/(history-page|history-validate)\?(.+)$/i.exec(requested);
       if (historyPage) {
         if (req.method !== 'GET' || !uuid.test(historyPage[1])) return send(res, 404, { error: 'not-found' });
@@ -311,7 +336,61 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         phonePresence.set(phone.deviceId, now());
         return send(res, 200, { online: Boolean(peer && peer.readyState === WebSocket.OPEN) });
       }
-      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: 131072, uploadCompression: 'gzip' });
+      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: 131072 });
+      const modelCancel = /^\/api\/threads\/([0-9a-f-]{36})\/model-cancel$/i.exec(requested);
+      if (modelCancel) {
+        if (!uuid.test(modelCancel[1])) return send(res, 404, { error: 'not-found' });
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 1024);
+        if (res.writableEnded || res.destroyed) return;
+        if (!reserved?.data || Array.isArray(reserved.data) || Object.keys(reserved.data).length !== 1 || !uuid.test(reserved.data.operationId || '')) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'model-cancel', id, deviceId: phone.deviceId, conversationId: modelCancel[1], operationId: reserved.data.operationId }));
+        return;
+      }
+      const cancelUnseen = /^\/api\/threads\/([0-9a-f-]{36})\/recovery-cancel$/i.exec(requested);
+      if (cancelUnseen) {
+        if (!uuid.test(cancelUnseen[1])) return send(res, 404, { error: 'not-found' });
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 1024);
+        if (res.writableEnded || res.destroyed) return;
+        if (!reserved?.data || Array.isArray(reserved.data) || Object.keys(reserved.data).length !== 1 || !uuid.test(reserved.data.requestId || '')) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'cancel-unseen-recovery', id, deviceId: phone.deviceId, conversationId: cancelUnseen[1], requestId: reserved.data.requestId }));
+        return;
+      }
+      const recovery = /^\/api\/threads\/([0-9a-f-]{36})\/recover$/i.exec(requested);
+      if (recovery) {
+        if (!uuid.test(recovery[1])) return send(res, 404, { error: 'not-found' });
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 1024);
+        if (res.writableEnded || res.destroyed) return;
+        if (!reserved?.data || Array.isArray(reserved.data) || Object.keys(reserved.data).length !== 1 || !uuid.test(reserved.data.requestId || '')) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'recover-chat', id, deviceId: phone.deviceId, conversationId: recovery[1], requestId: reserved.data.requestId }));
+        return;
+      }
       const agentHistory = /^\/api\/threads\/([0-9a-f-]{36})\/agents\/([0-9a-f-]{36})\/history$/i.exec(requested);
       if (agentHistory) {
         if (req.method !== 'GET' || !uuid.test(agentHistory[1]) || !uuid.test(agentHistory[2])) return send(res, 404, { error: 'not-found' });
@@ -374,16 +453,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
           data = await body(req); action = 'start';
           if (!data || Object.keys(data).some(key => !['name','size','kind'].includes(key)) || typeof data.name !== 'string' || !data.name || data.name.length > 255 || /[\x00-\x1f\x7f/\\\u2028\u2029]/.test(data.name) || (data.kind !== undefined && !['image','file'].includes(data.kind)) || !Number.isSafeInteger(data.size) || data.size < 1 || data.size > 20971520) return send(res, 400, { error: 'invalid' });
         } else if (upload[2] && upload[3]?.startsWith('chunks/') && req.method === 'PUT' && req.headers['content-type'] === 'application/octet-stream') {
-          const encoding = req.headers['content-encoding'];
-          if (encoding !== undefined && encoding !== 'identity' && encoding !== 'gzip') return send(res, 415, { error: 'unsupported-encoding' });
-          let chunk = await bytesBody(req, 131072);
-          if (!chunk?.length) return send(res, 400, { error: 'invalid' });
-          if (encoding === 'gzip') {
-            try { chunk = await decompressUploadChunk(chunk, { maxOutputLength: 131072 }); }
-            catch (error) { return send(res, error.code === 'ERR_BUFFER_TOO_LARGE' ? 413 : 400, { error: 'invalid-compressed-chunk' }); }
-            if (!chunk.length) return send(res, 400, { error: 'invalid' });
-          }
-          action = 'chunk'; data = { seq: Number(upload[4]), data: chunk.toString('base64') };
+          const chunk = await bytesBody(req, 131072); if (!chunk?.length) return send(res, 400, { error: 'invalid' }); action = 'chunk'; data = { seq: Number(upload[4]), data: chunk.toString('base64') };
           if (!Number.isSafeInteger(data.seq)) return send(res, 400, { error: 'invalid' });
         } else if (upload[2] && upload[3] === 'finish' && req.method === 'POST') { action = 'finish'; data = {}; }
         else if (upload[2] && !upload[3] && req.method === 'DELETE') { action = 'delete'; data = {}; }
@@ -394,26 +464,31 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (!entry || res.destroyed) return;
         clearTimeout(entry.timer);
         entry.timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        const creationId = req.headers['x-creation-id'];
+        if (creationId !== undefined && !uuid.test(creationId)) return send(res, 400, { error: 'invalid' });
         entry.uploadSent = true;
-        peer.send(JSON.stringify({ type: 'upload', id, action, conversationId: upload[1], deviceId: phone.deviceId, uploadId: upload[2], ...data }));
+        peer.send(JSON.stringify({ type: 'upload', id, action, conversationId: upload[1], deviceId: phone.deviceId, uploadId: upload[2], creationId, ...data }));
         return;
         } finally {
           const entry = pending.get(id);
           if (entry && !entry.uploadSent) { clearTimeout(entry.timer); pending.delete(id); }
         }
       }
-      const localPath = /^\/api(\/sidebar\/events|\/threads(?:\/[0-9a-f-]{36}\/(?:events|messages|stop|approvals|user-input|async-question|mode))?)$/i.exec(requested);
-      const match = localPath ? [requested, phone.hostId, localPath[1]] : /^\/api\/hosts\/([0-9a-f-]{36})(\/sidebar\/events|\/threads(?:\/[0-9a-f-]{36}\/(?:events|messages|stop|approvals|user-input|async-question|mode))?)$/i.exec(requested);
+      const localPath = /^\/api(\/models|\/sidebar\/events|\/threads(?:\/[0-9a-f-]{36}\/(?:events|messages|stop|approvals|user-input|async-question|mode|model|model-status|recovery-status|recovery-attempt\/[0-9a-f-]{36}))?)$/i.exec(requested);
+      const match = localPath ? [requested, phone.hostId, localPath[1]] : /^\/api\/hosts\/([0-9a-f-]{36})(\/models|\/sidebar\/events|\/threads(?:\/[0-9a-f-]{36}\/(?:events|messages|stop|approvals|user-input|async-question|mode|model|model-status|recovery-status|recovery-attempt\/[0-9a-f-]{36}))?)$/i.exec(requested);
       if (!match || !uuid.test(match[1])) return send(res, 404, { error: 'not-found' });
       if (phone.hostId !== match[1]) return send(res, 403, { error: 'forbidden' });
-      const threadId = /^\/threads\/([^/]+)\/(?:events|messages|stop|approvals|user-input|async-question|mode)$/i.exec(match[2])?.[1];
+      const threadId = /^\/threads\/([^/]+)\/(?:events|messages|stop|approvals|user-input|async-question|mode|model|model-status|recovery-status|recovery-attempt\/[0-9a-f-]{36})$/i.exec(match[2])?.[1];
       if (threadId && !uuid.test(threadId)) return send(res, 404, { error: 'not-found' });
+      const recoveryAttemptId = /\/recovery-attempt\/([^/]+)$/i.exec(match[2])?.[1];
+      if (recoveryAttemptId && !uuid.test(recoveryAttemptId)) return send(res, 404, { error: 'not-found' });
       const stop = match[2].endsWith('/stop');
       const approval = match[2].endsWith('/approvals');
       const modeUpdate = match[2].endsWith('/mode');
+      const modelUpdate = match[2].endsWith('/model');
       const asyncQuestion = match[2].endsWith('/async-question');
       const userInput = match[2].endsWith('/user-input') || asyncQuestion;
-      const write = match[2].endsWith('/messages') || stop || approval || userInput || modeUpdate;
+      const write = match[2].endsWith('/messages') || stop || approval || userInput || modeUpdate || modelUpdate;
       let text, reservation, visibleThreads, handoverThread;
       if (match[2] === '/threads' && req.method === 'POST') {
         if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
@@ -429,9 +504,10 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (res.writableEnded || res.destroyed) return;
         const data = reserved?.data; reservation = reserved?.reservation;
         if (modeUpdate && (!data || Object.keys(data).length !== 1 || !['default', 'plan'].includes(data.mode))) return send(res, 400, { error: 'invalid' });
-        if (!modeUpdate && (stop ? (!data || Object.keys(data).length !== 1 || typeof data.turnId !== 'string' || !uuid.test(data.turnId)) : approval ? (!data || Object.keys(data).some(k => !['requestId','kind','decision'].includes(k)) || !['command','file'].includes(data.kind) || !['accept','decline'].includes(data.decision) || !['string','number'].includes(typeof data.requestId)) : userInput ? (!data || Object.keys(data).some(k => !['requestId','answers'].includes(k)) || !['string','number'].includes(typeof data.requestId) || !data.answers || typeof data.answers !== 'object' || Array.isArray(data.answers) || Object.keys(data.answers).length > 10 || Object.values(data.answers).some(v => typeof v !== 'string' || Buffer.byteLength(v) > 8192)) : (!data || Object.keys(data).some(k => !['text','attachmentId','attachmentIds'].includes(k)) || typeof data.text !== 'string' || (data.attachmentId !== undefined && data.attachmentIds !== undefined) || (!data.text.trim() && !data.attachmentId && !data.attachmentIds?.length) || Buffer.byteLength(data.text) > 32768 || (data.attachmentId !== undefined && (!imageUpload || !uuid.test(data.attachmentId))) || (data.attachmentIds !== undefined && (!imageUpload || !Array.isArray(data.attachmentIds) || data.attachmentIds.length < 1 || data.attachmentIds.length > 4 || new Set(data.attachmentIds).size !== data.attachmentIds.length || data.attachmentIds.some(id => typeof id !== 'string' || !uuid.test(id))))))) return send(res, 400, { error: 'invalid' });
+        if (modelUpdate && (!data || Object.keys(data).some(k => !['model', 'effort'].includes(k)) || typeof data.model !== 'string' || !data.model || data.model.length > 200 || (data.effort !== undefined && (typeof data.effort !== 'string' || !data.effort || data.effort.length > 64)))) return send(res, 400, { error: 'invalid' });
+        if (!modeUpdate && !modelUpdate && (stop ? (!data || Object.keys(data).length !== 1 || typeof data.turnId !== 'string' || !uuid.test(data.turnId)) : approval ? (!data || Object.keys(data).some(k => !['requestId','kind','decision'].includes(k)) || !['command','file'].includes(data.kind) || !['accept','decline'].includes(data.decision) || !['string','number'].includes(typeof data.requestId)) : userInput ? (!data || Object.keys(data).some(k => !['requestId','answers'].includes(k)) || !['string','number'].includes(typeof data.requestId) || !data.answers || typeof data.answers !== 'object' || Array.isArray(data.answers) || Object.keys(data.answers).length > 10 || Object.values(data.answers).some(v => typeof v !== 'string' || Buffer.byteLength(v) > 8192)) : (!data || Object.keys(data).some(k => !['text','attachmentId','attachmentIds'].includes(k)) || typeof data.text !== 'string' || (data.attachmentId !== undefined && data.attachmentIds !== undefined) || (!data.text.trim() && !data.attachmentId && !data.attachmentIds?.length) || Buffer.byteLength(data.text) > 32768 || (data.attachmentId !== undefined && (!imageUpload || !uuid.test(data.attachmentId))) || (data.attachmentIds !== undefined && (!imageUpload || !Array.isArray(data.attachmentIds) || data.attachmentIds.length < 1 || data.attachmentIds.length > 4 || new Set(data.attachmentIds).size !== data.attachmentIds.length || data.attachmentIds.some(id => typeof id !== 'string' || !uuid.test(id))))))) return send(res, 400, { error: 'invalid' });
         if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
-        text = data.text; var attachmentId = data.attachmentId, attachmentIds = data.attachmentIds, turnId = data.turnId, requestId = data.requestId, kind = data.kind, decision = data.decision, answers = data.answers, mode = data.mode;
+        text = data.text; var attachmentId = data.attachmentId, attachmentIds = data.attachmentIds, turnId = data.turnId, requestId = data.requestId, kind = data.kind, decision = data.decision, answers = data.answers, mode = data.mode, model = data.model, effort = data.effort;
       } else if ((req.method !== 'GET' && !(match[2] === '/threads' && req.method === 'POST')) || write) return send(res, 405, { error: 'method-not-allowed' });
       const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
       const entries = [...pending.values()];
@@ -449,7 +525,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       pending.set(id, { res, output, timer, heartbeat, streaming, sidebar: match[2] === '/sidebar/events', writing: write, stop, hostId: phone.hostId, deviceId: phone.deviceId });
       if (reservation) bodyReads.delete(reservation);
       res.once('close', () => { if (streaming && pending.has(id)) console.warn('stream client disconnected'); cancel(id); if (output !== res) output.destroy(); });
-      if (write) peer.send(JSON.stringify({ type: stop ? 'stop' : approval ? 'approve' : userInput ? 'user-input' : modeUpdate ? 'mode' : 'write', id, conversationId: match[2].split('/')[2], deviceId: phone.deviceId, ...(stop ? { turnId } : approval ? { requestId, kind, decision } : userInput ? { requestId, answers, ...(asyncQuestion ? { asyncQuestion: true } : {}) } : modeUpdate ? { mode } : { text, ...(attachmentId ? { attachmentId } : {}), ...(attachmentIds ? { attachmentIds } : {}) }) }));
+      if (write) peer.send(JSON.stringify({ type: stop ? 'stop' : approval ? 'approve' : userInput ? 'user-input' : modeUpdate ? 'mode' : modelUpdate ? 'model' : 'write', id, conversationId: match[2].split('/')[2], deviceId: phone.deviceId, ...(stop ? { turnId } : approval ? { requestId, kind, decision } : userInput ? { requestId, answers, ...(asyncQuestion ? { asyncQuestion: true } : {}) } : modeUpdate ? { mode } : modelUpdate ? { model, ...(effort ? { effort } : {}) } : { text, ...(attachmentId ? { attachmentId } : {}), ...(attachmentIds ? { attachmentIds } : {}) }) }));
       else {
         peer.send(JSON.stringify({ type: 'request', id, deviceId: phone.deviceId, path: `/api${match[2]}`, ...(visibleThreads ? { visibleThreads } : {}), ...(typeof handoverThread === 'string' && visibleThreads?.includes(handoverThread) ? { handoverThread } : {}), ...(streaming && req.headers['x-codex-sidebar-status'] === '1' ? { sidebarStatus: true } : {}), ...(streaming && req.headers['x-codex-history-window'] === '1' ? { historyWindow: true } : {}), ...(streaming && req.headers['x-codex-staged-preview'] === '1' ? { stagedPreview: true } : {}), ...(streaming && ['1', '2', '3'].includes(req.headers['x-codex-view-delta']) ? { viewDelta: Number(req.headers['x-codex-view-delta']) } : {}) }));
       }
@@ -560,7 +636,12 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       } else if (msg.type === 'response' && !entry.streaming) {
         clearTimeout(entry.timer); clearTimeout(entry.hardTimer); pending.delete(msg.id);
         if (entry.res.headersSent) { entry.res.destroy(); return; }
-        if (entry.writing) { const partial = entry.stop && msg.status === 'stopped-goal-pause-failed'; const status = msg.status === 'accepted' || partial ? 202 : msg.status === 'unavailable' ? 409 : 504; send(entry.res, status, status === 202 ? { status: partial ? 'stopped-goal-pause-failed' : 'accepted' } : { error: status === 409 ? 'unavailable' : 'outcome-unknown' }); }
+        if (entry.creating) {
+          if (msg.status === 'accepted' && uuid.test(msg.threadId || '')) send(entry.res, 202, { threadId: msg.threadId });
+          else if (msg.status === 'start-unknown' && uuid.test(msg.threadId || '')) send(entry.res, 504, { error: 'start-unknown', threadId: msg.threadId });
+          else send(entry.res, msg.status === 'invalid-project' ? 400 : 504, { error: msg.status === 'invalid-project' ? 'invalid-project' : 'outcome-unknown' });
+        }
+        else if (entry.writing) { const partial = entry.stop && msg.status === 'stopped-goal-pause-failed'; const status = msg.status === 'accepted' || partial ? 202 : msg.status === 'unavailable' ? 409 : 504; send(entry.res, status, status === 202 ? { status: partial ? 'stopped-goal-pause-failed' : 'accepted' } : { error: status === 409 ? 'unavailable' : 'outcome-unknown' }); }
         else send(entry.res, msg.ok ? 200 : 503, msg.ok ? msg.data : { error: msg.error === 'busy' ? 'busy' : 'unavailable' });
       } else if (msg.type === 'end' && entry.streaming) { console.warn('connector ended stream'); cancel(msg.id); }
     });

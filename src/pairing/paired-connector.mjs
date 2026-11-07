@@ -6,7 +6,7 @@ import { createPreviewConnector } from '../transport/preview-connector.mjs';
 import { isCredentialStatSecure } from './credential-security.mjs';
 
 // Read the credential produced by pairing-cli without exposing it to logs.
-export async function createPairedDesktopConnector({ credentialPath, allowInsecureForTests = false, ...options }) {
+export async function createPairedDesktopConnector({ credentialPath, allowInsecureForTests = false, createOwnerRouter, ...options }) {
   if (typeof credentialPath !== 'string' || !isAbsolute(credentialPath)) throw new TypeError('Absolute credential path required');
   const file = await open(credentialPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
   let config;
@@ -24,7 +24,8 @@ export async function createPairedDesktopConnector({ credentialPath, allowInsecu
       origin.pathname !== '/' || origin.search || origin.hash || origin.username || origin.password) throw new Error('Invalid relay origin');
   const url = new URL('/connector', origin);
   url.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
-  return createPreviewConnector({ ...options, hostId: config.hostId, url: url.href, secret: config.secret, allowInsecureForTests });
+  const ownerRouter = createOwnerRouter ? await createOwnerRouter(config.hostId) : options.ownerRouter;
+  return createPreviewConnector({ ...options, ownerRouter, hostId: config.hostId, url: url.href, secret: config.secret, allowInsecureForTests });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

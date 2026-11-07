@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createServer } from 'node:net';
-import { createPairRelay } from '../snapshots/relay-2026-11-06/pair-relay.mjs';
+import { createPairRelay } from '../src/relay/server.mjs';
 import { createPreviewConnector } from '../src/transport/preview-connector.mjs';
 
 test('two phones can explicitly restore retained credentials and only the active phone can read', { timeout: 15000 }, async () => {

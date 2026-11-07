@@ -1,6 +1,45 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { desktopView } from '../src/desktop/view.mjs';
+import { referencedMediaPaths } from '../src/media/media-resolver.mjs';
+
+test('projects the initial owner prompt from turn params before the assistant response', () => {
+  const turn = { turnId: 'turn', params: { input: [{ type: 'input_text', text: 'first phone message' }] }, items: [{ type: 'agentMessage', id: 'reply', text: 'reply' }] };
+  const input = { id: 'thread', turns: [turn] };
+  const view = desktopView(input);
+  assert.deepEqual(view.turns[0].items.map(item => [item.type, item.text]), [['userMessage', 'first phone message'], ['agentMessage', 'reply']]);
+  assert.equal(turn.items.length, 1, 'projection does not mutate retained IPC state');
+  const canonical = desktopView({ id: 'thread', turnHistory: { kind: 'canonical', history: { isComplete: true, islands: [{ entries: [{ value: 'turn' }] }], entitiesByKey: { turn } } } });
+  assert.deepEqual(canonical.turns[0].items, view.turns[0].items);
+});
+
+test('deduplicates the initial prompt echo while preserving subsequent identical steering', () => {
+  const content = [{ type: 'text', text: 'continue' }];
+  const view = desktopView({ id: 'thread', turns: [{ turnId: 'turn', params: { input: [{ type: 'input_text', text: 'continue' }] }, items: [
+    { type: 'userMessage', id: 'echo', content },
+    { type: 'agentMessage', id: 'answer', text: 'done' },
+    { type: 'steeringUserMessage', id: 'steer', input: content },
+  ] }] });
+  assert.deepEqual(view.turns[0].items.map(item => item.text), ['continue', 'done', 'continue']);
+  assert.equal(view.turns[0].items.at(-1).id, 'steer');
+});
+
+test('initial image prompts use scoped handles and authorize only structured local image references', () => {
+  const state = { id: 'thread', turns: [{ turnId: 'turn', params: { input: [
+    { type: 'text', text: 'look at /private/unmentioned.png' },
+    { type: 'localImage', path: '/private/first.png' },
+    { type: 'image', url: 'file:///private/second%20photo.png' },
+    { type: 'image', url: 'https://example.com/private/remote.png' },
+    { type: 'image', url: 'file://remote-host/private/remote.png' },
+  ] }, items: [] }] };
+  const view = desktopView(state, { imageHandles: new Map([['/private/first.png', 'first-handle'], ['/private/second photo.png', 'second-handle']]) });
+  assert.deepEqual(view.turns[0].items[0].images, ['first-handle', 'second-handle']);
+  assert.equal(view.turns[0].items[0].imageCount, 2);
+  assert.deepEqual([...referencedMediaPaths(state)], ['/private/first.png', '/private/second photo.png']);
+  assert.doesNotMatch(JSON.stringify(view), /second%20|second photo|https:|file:/);
+  const canonical = { id: 'thread', turnHistory: { kind: 'canonical', history: { islands: [{ entries: [{ value: 'key' }] }], entitiesByKey: { key: state.turns[0] } } } };
+  assert.deepEqual([...referencedMediaPaths(canonical)], [...referencedMediaPaths(state)]);
+});
 
 test('omits completed wait calls without targets or agent states, preserving actionable calls', () => {
   const view = desktopView({ id: 'thread', turns: [{ turnId: 'turn', items: [

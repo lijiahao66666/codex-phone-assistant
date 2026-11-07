@@ -2,6 +2,7 @@ import { inspectApproval } from './approval-guard.mjs';
 import { inspectUserInput } from './user-input-guard.mjs';
 import { inspectQuestions } from './async-question-guard.mjs';
 import { createHash } from 'node:crypto';
+import { userInputImagePath } from '../media/user-input-media.mjs';
 
 // Project the desktop's private conversation state into a display-only view.
 // Unknown or unloaded history is explicitly marked incomplete.
@@ -53,7 +54,7 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     ...(viewKeys ? { viewKey: viewKeys[index] } : {}),
     status: typeof turn.status === 'string' ? turn.status : 'unknown',
     startedAt: turn.turnStartedAtMs ?? null,
-    items: Array.isArray(turn.items) ? orderSteeringMessages(turn.items).filter(item => (item?.type !== 'steeringUserMessage' || !item.serverUserMessageId || !userMessageIds.has(item.serverUserMessageId)) && !emptyCompletedWait(item)).map(item => displayItem(item, imageHandles, mediaHandles)) : [],
+    items: orderSteeringMessages(turnDisplayItems(turn, index)).filter(item => (item?.type !== 'steeringUserMessage' || !item.serverUserMessageId || !userMessageIds.has(item.serverUserMessageId)) && !emptyCompletedWait(item)).map(item => displayItem(item, imageHandles, mediaHandles)),
   }));
   const rawGoal = state.threadGoal;
   const goal = rawGoal?.threadId === state.id && typeof rawGoal.objective === 'string' &&
@@ -65,6 +66,8 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
   return {
     id: state.id,
     collaborationMode: ['default', 'plan'].includes(state.latestCollaborationMode?.mode) ? state.latestCollaborationMode.mode : null,
+    model: typeof state.latestCollaborationMode?.settings?.model === 'string' ? state.latestCollaborationMode.settings.model : null,
+    reasoningEffort: typeof state.latestCollaborationMode?.settings?.reasoning_effort === 'string' ? state.latestCollaborationMode.settings.reasoning_effort : null,
     title: typeof state.title === 'string' ? state.title : '',
     runtimeStatus: ['active', 'idle'].includes(state.threadRuntimeStatus?.type) ? state.threadRuntimeStatus.type : 'unknown',
     goal,
@@ -73,6 +76,28 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     // Keep only the request identity and method until each response contract is verified.
     requests: Array.isArray(state.requests) ? state.requests.filter(request => request?.completed !== true).map(request => inspectApproval(request, state.id) || inspectUserInput(request, state.id) || ({ id: request?.id, method: request?.method })).filter(request => request.id !== undefined) : [],
   };
+}
+
+function inputIdentity(content) {
+  return JSON.stringify((Array.isArray(content) ? content : []).flatMap(part => {
+    if (['text', 'input_text'].includes(part?.type) && typeof part.text === 'string') return [{ text: part.text }];
+    const path = userInputImagePath(part);
+    return path ? [{ image: path }] : [];
+  }));
+}
+
+function turnDisplayItems(turn, index) {
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  const input = turn.params?.input;
+  if (!Array.isArray(input) || inputIdentity(input) === '[]') return items;
+  // Desktop renders the initial bubble from params.input. Its app-server echo
+  // can briefly coexist as the first user item; do not duplicate that bubble.
+  // A later identical input after work or an answer remains a genuine message.
+  const prePromptTypes = new Set(['automaticApprovalReview', 'forkedFromConversation', 'modelChanged', 'modelRerouted', 'personalityChanged', 'remoteTaskCreated', 'worktreeInit']);
+  const first = items.findIndex(item => !prePromptTypes.has(item?.type));
+  const duplicate = items[first]?.type === 'userMessage' && inputIdentity(items[first].content) === inputIdentity(input);
+  const prompt = { type: 'userMessage', id: `initial-user:${turn.turnId ?? index}`, content: input };
+  return [prompt, ...items.filter((_, itemIndex) => !duplicate || itemIndex !== first)];
 }
 
 function emptyCompletedWait(item) {
@@ -118,10 +143,11 @@ function displayItem(item, imageHandles, mediaHandles) {
   if (item.type === 'userMessage' || item.type === 'steeringUserMessage') {
     const content = item.type === 'steeringUserMessage' ? item.input : item.content;
     const text = Array.isArray(content)
-      ? content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n')
+      ? content.filter(part => ['text', 'input_text'].includes(part?.type) && typeof part.text === 'string').map(part => part.text).join('\n')
       : typeof item.text === 'string' ? item.text : '';
-    const imageCount = Array.isArray(content) ? content.filter(part => part?.type === 'localImage').length : 0;
-    const images = Array.isArray(content) ? content.filter(part => part?.type === 'localImage').map(part => imageHandles.get(part.path)).filter(Boolean) : [];
+    const paths = Array.isArray(content) ? content.map(userInputImagePath).filter(Boolean) : [];
+    const imageCount = paths.length;
+    const images = paths.map(path => imageHandles.get(path)).filter(Boolean);
     return { ...base, type: 'userMessage', text: displayUserText(text, imageCount), ...(imageCount ? { imageCount } : {}), ...(images.length ? { images } : {}) };
   }
   if (item.type === 'imageView' || item.type === 'imageGeneration') {

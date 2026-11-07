@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createPairRelay } from '../snapshots/relay-2026-11-06/pair-relay.mjs';
+import { createPairRelay } from '../src/relay/server.mjs';
 import { createPreviewConnector } from '../src/transport/preview-connector.mjs';
 import { UploadStore } from '../src/media/upload-store.mjs';
 import { ChunkUploads } from '../src/media/chunk-upload.mjs';
