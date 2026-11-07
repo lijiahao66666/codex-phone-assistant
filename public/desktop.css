@@ -269,3 +269,21 @@ body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-
 .composer-inner:has(.model-controls:not([hidden])) #stop-turn,
 .composer-inner:has(.model-controls:not([hidden])) #send-message{grid-column:4;grid-row:2}
 .composer-inner:has(.model-controls:not([hidden])) textarea{min-height:34px;padding:2px 4px 2px}
+
+/* Keep the buttons off the composer's bottom edge without moving the model
+   text: the control row grows and only the round buttons carry the offset. */
+.composer-inner:has(.model-controls:not([hidden])),
+.composer-inner:focus-within,
+.composer-inner:has(textarea:not(:placeholder-shown)){grid-template-rows:auto 44px}
+.composer-inner:has(.model-controls:not([hidden])) .attachment-control,
+.composer-inner:has(.model-controls:not([hidden])) #voice-input,
+.composer-inner:has(.model-controls:not([hidden])) #stop-turn,
+.composer-inner:has(.model-controls:not([hidden])) #send-message,
+.composer-inner:focus-within .attachment-control,
+.composer-inner:focus-within #voice-input,
+.composer-inner:focus-within #stop-turn,
+.composer-inner:focus-within #send-message,
+.composer-inner:has(textarea:not(:placeholder-shown)) .attachment-control,
+.composer-inner:has(textarea:not(:placeholder-shown)) #voice-input,
+.composer-inner:has(textarea:not(:placeholder-shown)) #stop-turn,
+.composer-inner:has(textarea:not(:placeholder-shown)) #send-message{align-self:end;margin-bottom:10px}

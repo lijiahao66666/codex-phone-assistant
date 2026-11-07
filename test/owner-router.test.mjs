@@ -66,3 +66,41 @@ test('an unknown resume result remains locked and is not automatically dispatche
     assert.equal(resumes, 1);
   } finally { first.close(); restarted?.close(); journal.close(); }
 });
+
+test('a recovery reservation that never reports back stops blocking after its TTL', async () => {
+  const journal = new CreationJournal(':memory:');
+  try {
+    assert.equal(journal.beginRecovery('host', 'thread', 'attempt'), true);
+    assert.equal(journal.recoveryPending('host', 'thread'), true);
+    // Simulate a bridge restart in the middle of a resume: the reservation is
+    // still on disk but no request can complete it anymore.
+    journal.db.prepare('UPDATE recovery_writes SET created_at=? WHERE host_id=? AND thread_id=?').run(Date.now() - 120000, 'host', 'thread');
+    assert.equal(journal.recoveryPending('host', 'thread'), false);
+    assert.equal(journal.recoveryPending('host', 'thread'), false);
+    const retry = journal.beginRecovery('host', 'thread', 'next-attempt');
+    assert.equal(retry, true);
+  } finally { journal.close(); }
+});
+
+test('legacy recovery reservations without a timestamp are treated as abandoned', async () => {
+  const journal = new CreationJournal(':memory:');
+  try {
+    journal.db.prepare('INSERT INTO recovery_writes (host_id,thread_id,attempt_id,created_at) VALUES (?,?,?,0)').run('host', 'thread', 'legacy');
+    assert.equal(journal.recoveryPending('host', 'thread'), false);
+    assert.equal(journal.db.prepare('SELECT COUNT(*) AS count FROM recovery_writes').get().count, 0);
+  } finally { journal.close(); }
+});
+
+test('the in-memory recovery guard expires with the same TTL', async () => {
+  const journal = new CreationJournal(':memory:');
+  const localOwner = { async resume() { throw Object.assign(new Error('lost response'), { code: 'outcome-unknown' }); } };
+  const router = new OwnerRouter({ discover: async () => ({ kind: 'unknown' }), localOwner, projects: async () => [], journal, hostId: 'host', competeUnknown: true, recoveryLockTtlMs: 0 });
+  try {
+    await assert.rejects(router.route('thread'), { code: 'resume-unknown' });
+    assert.equal(router.uncertainRecovery.has('thread'), true);
+    // The in-memory guard must not outlive the TTL even when the journal still
+    // holds the reservation; the journal applies the same TTL on its own.
+    assert.equal(router.isRecoveryLocked('thread'), true);
+    assert.equal(router.uncertainRecovery.has('thread'), false);
+  } finally { router.close(); journal.close(); }
+});

@@ -8,7 +8,7 @@ function unavailable(code, cause) {
 
 // The adapters must distinguish an explicit missing owner from an unavailable bus.
 export class OwnerRouter {
-  constructor({ discover, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 5000, recoveryPollMs = 300, competeUnknown = false }) {
+  constructor({ discover, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 5000, recoveryPollMs = 300, recoveryLockTtlMs = 90_000, competeUnknown = false }) {
     if (typeof discover !== 'function' || !localOwner || typeof projects !== 'function') throw new TypeError('Missing owner adapters');
     this.competeUnknown = competeUnknown;
     this.discover = discover;
@@ -16,9 +16,9 @@ export class OwnerRouter {
     this.projects = projects;
     this.journal = journal; this.hostId = hostId;
     this.confirmRecovery = confirmRecovery;
-    this.recoveryTimeoutMs = recoveryTimeoutMs; this.recoveryPollMs = recoveryPollMs;
+    this.recoveryTimeoutMs = recoveryTimeoutMs; this.recoveryPollMs = recoveryPollMs; this.recoveryLockTtlMs = recoveryLockTtlMs;
     this.pending = new Map();
-    this.uncertainRecovery = new Set();
+    this.uncertainRecovery = new Map();
     this.lateRecoveries = new Map();
     this.closed = false;
     this.stopping = false;
@@ -65,19 +65,32 @@ export class OwnerRouter {
   }
 
   isRecoveryLocked(threadId) {
-    try { return this.uncertainRecovery.has(threadId) || Boolean(this.journal?.recoveryPending?.(this.hostId, threadId)); }
-    catch { return true; }
+    try {
+      const since = this.uncertainRecovery.get(threadId);
+      if (since !== undefined) {
+        if (Date.now() - since < this.recoveryLockTtlMs) return true;
+        // The resume never reported back; after the TTL its in-memory guard is
+        // stale too, otherwise the phone stays on 任务正在电脑上处理 for good.
+        this.uncertainRecovery.delete(threadId);
+      }
+      return Boolean(this.journal?.recoveryPending?.(this.hostId, threadId));
+    } catch { return true; }
   }
 
   async #route(threadId, isCancelled, deviceId, requestId) {
     if (this.isRecoveryLocked(threadId)) throw unavailable('resume-unknown');
     const first = await this.discover(threadId);
     if (this.closed || isCancelled()) throw unavailable('unavailable');
-    if (first?.kind === 'owner' && first.ownerId) return first;
-    if (first?.kind !== 'missing' && !(this.competeUnknown && first?.kind === 'unknown')) throw unavailable('owner-unknown');
+    // "Some owner exists" is not recovery: the phone needs THIS bridge to own
+    // the thread. Reporting success for a foreign owner produced a live-looking
+    // session that could never write, and left the phone stuck on 正在连接任务.
+    if (first?.kind === 'owner' && first.ownerId) {
+      const ownId = typeof this.localOwner.ownerId === 'function' ? await this.localOwner.ownerId() : null;
+      if (ownId && first.ownerId === ownId) return first;
+    } else if (first?.kind !== 'missing' && !(this.competeUnknown && first?.kind === 'unknown')) throw unavailable('owner-unknown');
     const attemptId = requestId || randomUUID();
     if (!this.hostId || !(deviceId ? this.journal?.dispatchRecovery?.(this.hostId, deviceId, threadId, attemptId) : this.journal?.beginRecovery?.(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
-    this.uncertainRecovery.add(threadId);
+    this.uncertainRecovery.set(threadId, Date.now());
     if (this.closed || isCancelled()) {
       const cleared = deviceId
         ? this.journal.completeRecovery(this.hostId, deviceId, threadId, attemptId, 'rejected')
@@ -94,9 +107,9 @@ export class OwnerRouter {
         }
         throw unavailable('resume-unknown', error);
       }
-      let current;
-      try { current = await this.discover(threadId); } catch { current = null; }
-      if (current?.kind === 'owner' && current.ownerId) {
+      let current, currentOwnId;
+      try { current = await this.discover(threadId); currentOwnId = typeof this.localOwner.ownerId === 'function' ? await this.localOwner.ownerId() : null; } catch { current = null; currentOwnId = null; }
+      if (current?.kind === 'owner' && current.ownerId && currentOwnId && current.ownerId === currentOwnId) {
         if (!(deviceId ? this.journal.completeRecovery(this.hostId, deviceId, threadId, attemptId, 'accepted') : this.journal.endRecovery(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
         this.uncertainRecovery.delete(threadId);
         if (this.closed || isCancelled()) throw unavailable('unavailable');

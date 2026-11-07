@@ -1,5 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 
+// A recovery that never reports back (bridge restart, dropped IPC response)
+// must not lock a thread forever: a live attempt settles in seconds, so any
+// reservation older than this cannot have a request behind it anymore.
+const RECOVERY_LOCK_TTL_MS = 90_000;
+
 // The database is local to the assistant; tokens and message contents are not stored.
 export class CreationJournal {
   constructor(path, { coordinateWritesForTests = false } = {}) {
@@ -12,6 +17,7 @@ export class CreationJournal {
       this.db.exec(`CREATE TABLE IF NOT EXISTS creations (host_id TEXT NOT NULL, device_id TEXT NOT NULL, request_id TEXT NOT NULL, project_id TEXT NOT NULL, payload_digest TEXT NOT NULL, phase TEXT NOT NULL, thread_id TEXT, PRIMARY KEY(host_id, device_id, request_id))`);
       this.db.exec('CREATE TABLE IF NOT EXISTS recovery_writes (host_id TEXT NOT NULL, thread_id TEXT NOT NULL, attempt_id TEXT, PRIMARY KEY(host_id, thread_id))');
       if (!this.db.prepare('PRAGMA table_info(recovery_writes)').all().some(column => column.name === 'attempt_id')) this.db.exec('ALTER TABLE recovery_writes ADD COLUMN attempt_id TEXT');
+      if (!this.db.prepare('PRAGMA table_info(recovery_writes)').all().some(column => column.name === 'created_at')) this.db.exec('ALTER TABLE recovery_writes ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
       this.db.exec('CREATE TABLE IF NOT EXISTS recovery_attempts (host_id TEXT NOT NULL, device_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(host_id,device_id,request_id))');
       this.db.exec('CREATE TABLE IF NOT EXISTS message_writes (host_id TEXT NOT NULL, thread_id TEXT NOT NULL, operation_id TEXT NOT NULL, phase TEXT NOT NULL, PRIMARY KEY(host_id,thread_id), UNIQUE(host_id,operation_id))');
       this.db.exec('CREATE TABLE IF NOT EXISTS model_writes (host_id TEXT NOT NULL, thread_id TEXT NOT NULL, device_id TEXT NOT NULL, operation_id TEXT, phase TEXT NOT NULL DEFAULT \'unknown\', PRIMARY KEY(host_id,thread_id))');
@@ -80,11 +86,28 @@ export class CreationJournal {
       this.db.exec('COMMIT'); return true;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  recoveryPending(hostId, threadId) { return Boolean(this.db.prepare('SELECT 1 FROM recovery_writes WHERE host_id=? AND thread_id=?').get(hostId, threadId)); }
+  recoveryPending(hostId, threadId) {
+    const row = this.db.prepare('SELECT created_at AS createdAt FROM recovery_writes WHERE host_id=? AND thread_id=?').get(hostId, threadId);
+    if (!row) return false;
+    const startedAt = Number.isFinite(row.createdAt) ? row.createdAt : 0;
+    if (startedAt > 0 && Date.now() - startedAt < RECOVERY_LOCK_TTL_MS) return true;
+    // Legacy rows carry no timestamp; treat them as abandoned as well.
+    this.releaseStaleRecovery(hostId, threadId, startedAt);
+    return false;
+  }
+  releaseStaleRecovery(hostId, threadId, startedAt = 0) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const removed = this.db.prepare('DELETE FROM recovery_writes WHERE host_id=? AND thread_id=? AND created_at=?').run(hostId, threadId, startedAt).changes === 1;
+      this.db.prepare("UPDATE recovery_attempts SET status='rejected' WHERE host_id=? AND thread_id=? AND status IN ('registered','dispatching','pending')").run(hostId, threadId);
+      this.db.exec('COMMIT');
+      return removed;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   beginRecovery(hostId, threadId, attemptId = null) {
     if (![hostId, threadId].every(value => typeof value === 'string' && value.length > 0 && value.length <= 200)) throw new TypeError('invalid recovery identity');
     if (attemptId !== null && (typeof attemptId !== 'string' || !attemptId || attemptId.length > 200)) throw new TypeError('invalid recovery attempt');
-    return this.db.prepare("INSERT OR IGNORE INTO recovery_writes (host_id,thread_id,attempt_id) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM message_writes WHERE host_id=? AND thread_id=?) AND NOT EXISTS (SELECT 1 FROM model_writes WHERE host_id=? AND thread_id=?) AND NOT EXISTS (SELECT 1 FROM raw_request_experiment WHERE phase != 'resolved' AND (host_id=? OR host_id='') AND (thread=? OR thread=''))").run(hostId, threadId, attemptId, hostId, threadId, hostId, threadId, hostId, threadId).changes === 1;
+    return this.db.prepare("INSERT OR IGNORE INTO recovery_writes (host_id,thread_id,attempt_id,created_at) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM message_writes WHERE host_id=? AND thread_id=?) AND NOT EXISTS (SELECT 1 FROM model_writes WHERE host_id=? AND thread_id=?) AND NOT EXISTS (SELECT 1 FROM raw_request_experiment WHERE phase != 'resolved' AND (host_id=? OR host_id='') AND (thread=? OR thread=''))").run(hostId, threadId, attemptId, Date.now(), hostId, threadId, hostId, threadId, hostId, threadId).changes === 1;
   }
   endRecovery(hostId, threadId, attemptId = null) { return this.db.prepare('DELETE FROM recovery_writes WHERE host_id=? AND thread_id=? AND attempt_id IS ?').run(hostId, threadId, attemptId).changes === 1; }
   beginMessage(hostId, threadId, operationId) {
