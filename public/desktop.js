@@ -17,13 +17,6 @@ const attachmentControl = document.querySelector('#attachment-control');
 const attachmentToggle = document.querySelector('#attachment-toggle');
 const attachmentMenu = document.querySelector('#attachment-menu');
 const imageFile = document.querySelector('#image-file');
-const cameraChoose = document.createElement('button');
-cameraChoose.type = 'button'; cameraChoose.textContent = '拍照'; cameraChoose.hidden = true; cameraChoose.disabled = true;
-if (attachmentMenu.insertBefore) attachmentMenu.insertBefore(cameraChoose, imageChoose); else attachmentMenu.append(cameraChoose);
-const cameraInput = document.createElement('input');
-cameraInput.type = 'file'; cameraInput.accept = 'image/*'; cameraInput.setAttribute('capture', 'environment'); cameraInput.hidden = true;
-attachmentControl.append(cameraInput);
-imageChoose.textContent = '照片'; imageFile.accept = 'image/*';
 const fileChoose = document.querySelector('#file-choose');
 const modeChoose = document.querySelector('#mode-choose');
 const modeStatus = document.querySelector('#mode-status');
@@ -392,15 +385,49 @@ const groupExpanded = new Map();
 const expandedGroups = new Set();
 let connected = false;
 let voiceSession = null;
+let attachmentPreviewModule;
+function disposeAttachmentDraft(draft) {
+  draft.disposed = true;
+  draft.previewController?.abort();
+  draft.previewElement = null;
+  if (draft.url) URL.revokeObjectURL(draft.url);
+}
+function addFileThumbnail(draft, holder, fallback) {
+  const threadId = selectedId;
+  if (!draft.previewPromise) {
+    draft.previewController = new AbortController();
+    draft.previewPromise = (attachmentPreviewModule ||= import('/attachment-preview.mjs').catch(error => { attachmentPreviewModule = null; throw error; }))
+      .then(module => module.createAttachmentPreview(draft.file, { signal: draft.previewController.signal }))
+      .then(element => { if (!draft.disposed) draft.previewElement = element; })
+      .catch(() => {});
+  }
+  const show = () => {
+    if (!draft.previewElement || draft.disposed || selectedId !== threadId || !holder.isConnected || !(imageDrafts.get(threadId) || []).includes(draft)) return;
+    const preview = document.createElement('span'); preview.className = 'attachment-preview';
+    const name = document.createElement('span'); name.className = 'attachment-preview-name'; name.textContent = draft.file.name;
+    preview.append(draft.previewElement, name); fallback.replaceWith(preview);
+  };
+  if (draft.previewElement) show(); else void draft.previewPromise.then(show);
+}
 function renderImageDraft() {
   const drafts = (selectedId && imageDrafts.get(selectedId)) || [];
   imageDraft.replaceChildren();
   imageDraft.hidden = !drafts.length;
   for (const draft of drafts) {
   const holder = document.createElement('div'); holder.className = 'image-draft-item';
-  const image = document.createElement(draft.kind === 'file' ? 'span' : 'img');
-  if (draft.kind === 'file') { image.className = 'attachment-name'; image.textContent = draft.file.name; }
-  else { image.src = draft.url; image.alt = draft.file.name; }
+  const fileCard = () => {
+    const card = document.createElement('span'); card.className = 'attachment-card'; card.title = draft.file.name;
+    const type = document.createElement('span'); type.className = 'attachment-type'; type.textContent = draft.file.name.includes('.') ? draft.file.name.split('.').at(-1).slice(0, 8).toUpperCase() : '文件';
+    const name = document.createElement('span'); name.className = 'attachment-name'; name.textContent = draft.file.name;
+    const size = document.createElement('span'); size.className = 'attachment-size'; size.textContent = draft.file.size < 1024 ? `${draft.file.size} B` : draft.file.size < 1024 * 1024 ? `${Math.ceil(draft.file.size / 1024)} KB` : `${(draft.file.size / (1024 * 1024)).toFixed(1)} MB`;
+    card.append(type, name, size); return card;
+  };
+  const image = draft.url ? document.createElement('img') : fileCard();
+  holder.title = draft.file.name;
+  if (draft.url) {
+    image.src = draft.url; image.alt = draft.file.name;
+    image.addEventListener('error', () => image.replaceWith(fileCard()), { once: true });
+  }
   const remove = document.createElement('button');
   remove.type = 'button';
   remove.className = 'image-draft-remove';
@@ -409,18 +436,19 @@ function renderImageDraft() {
   remove.disabled = Boolean(submissions.get(selectedId)?.pending || submissions.get(selectedId)?.uncertain);
   remove.textContent = '×';
   remove.addEventListener('click', () => {
-    if (draft.url) URL.revokeObjectURL(draft.url);
+    disposeAttachmentDraft(draft);
     const remaining = (imageDrafts.get(selectedId) || []).filter(item => item !== draft);
     if (remaining.length) imageDrafts.set(selectedId, remaining); else imageDrafts.delete(selectedId);
-    imageFile.value = '';
+    fileInput.value = '';
     renderImageDraft();
     updateComposer();
   });
   holder.append(image, remove); imageDraft.append(holder);
+  if (!draft.url) addFileThumbnail(draft, holder, image);
   }
 }
 function clearImageDrafts() {
-  for (const drafts of imageDrafts.values()) for (const draft of drafts) if (draft.url) URL.revokeObjectURL(draft.url);
+  for (const drafts of imageDrafts.values()) for (const draft of drafts) disposeAttachmentDraft(draft);
   imageDrafts.clear();
   renderImageDraft();
 }
@@ -429,7 +457,6 @@ attachmentToggle.addEventListener('click', () => { if (attachmentToggle.disabled
 document.addEventListener?.('click', event => { if (!attachmentControl.contains(event.target)) closeAttachmentMenu(); });
 document.addEventListener?.('keydown', event => { if (event.key === 'Escape' && !attachmentMenu.hidden) { closeAttachmentMenu(); attachmentToggle.focus(); } });
 imageChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && selectedId && connected) imageFile.click(); });
-cameraChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && selectedId && connected) cameraInput.click(); });
 fileChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && selectedId && connected) fileInput.click(); });
 modeChoose.addEventListener('click', async () => {
   const id = selectedId;
@@ -458,19 +485,26 @@ function addAttachments(input, kind) {
   const files = [...(input.files || [])];
   if (!imageUploadAvailable || !selectedId || !connected || !files.length) return;
   const previous = imageDrafts.get(selectedId) || [];
+  if (files.some(file => (file.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|ogv|avi|mkv|wmv|flv|3gp|mpeg|mpg|mts|m2ts)$/i.test(file.name)) && file.size > 10 * 1024 * 1024)) {
+    input.value = '';
+    sendStatus.textContent = '视频不能超过 10 MB';
+    return;
+  }
   const invalidFormat = kind === 'image' && files.some(file => !['image/png', 'image/jpeg', 'image/webp'].includes(file.type));
   if (previous.length + files.length > 4 || invalidFormat || files.some(file => file.size < 1 || file.size > 20 * 1024 * 1024 || !file.name || file.name.length > 255 || /[\x00-\x1f\x7f/\\\u2028\u2029]/.test(file.name))) {
     input.value = '';
     sendStatus.textContent = invalidFormat ? '图片仅支持 PNG、JPEG 或 WebP 格式' : '附件无效：最多 4 个，每个不超过 20 MB';
     return;
   }
-  imageDrafts.set(selectedId, [...previous, ...files.map(file => ({ file, kind, ...(kind === 'image' ? { url: URL.createObjectURL(file) } : {}) }))]);
+  imageDrafts.set(selectedId, [...previous, ...files.map(file => {
+    const image = kind === 'image' || ['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || (!file.type && /\.(png|jpe?g|webp)$/i.test(file.name));
+    return { file, kind: image ? 'image' : 'file', ...(image || file.type.startsWith('image/') ? { url: URL.createObjectURL(file) } : {}) };
+  })]);
   input.value = '';
   renderImageDraft();
   updateComposer();
 }
 imageFile.addEventListener('change', () => addAttachments(imageFile, 'image'));
-cameraInput.addEventListener('change', () => addAttachments(cameraInput, 'image'));
 fileInput.addEventListener('change', () => addAttachments(fileInput, 'file'));
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 function stopVoice() {
@@ -534,10 +568,8 @@ function updateComposer() {
     messageInput.style.height = `${Math.min(messageInput.scrollHeight, Math.min(300, (window.innerHeight || 844) * 0.35))}px`;
   }
   messageInput.disabled = !selectedId || !connected;
-  imageChoose.hidden = !imageUploadAvailable;
+  imageChoose.hidden = true;
   imageChoose.disabled = !imageUploadAvailable || messageInput.disabled || Boolean(state?.pending || state?.uncertain);
-  cameraChoose.hidden = imageChoose.hidden;
-  cameraChoose.disabled = imageChoose.disabled;
   fileChoose.hidden = !imageUploadAvailable;
   fileChoose.disabled = imageChoose.disabled;
   const modeAvailable = ['default', 'plan'].includes(liveMode);
@@ -547,7 +579,7 @@ function updateComposer() {
   modeChoose.disabled = messageInput.disabled || liveRuntimeStatus !== 'idle' || Boolean(modeChange);
   modeStatus.textContent = (modeChange?.message.includes('未知') ? modeChange.message : '') || (selectedId && modeNotices.get(selectedId)) || '';
   attachmentControl.hidden = !imageUploadAvailable && !modeAvailable;
-  attachmentToggle.disabled = messageInput.disabled || (imageChoose.disabled && !modeAvailable);
+  attachmentToggle.disabled = messageInput.disabled || (fileChoose.disabled && !modeAvailable);
   if (attachmentToggle.disabled) closeAttachmentMenu();
   for (const removeImage of imageDraft.querySelectorAll?.('.image-draft-remove') || []) removeImage.disabled = Boolean(state?.pending || state?.uncertain);
   if (voiceSession && (messageInput.disabled || voiceSession.threadId !== selectedId)) { stopVoice(); voiceStatus.textContent = ''; }
@@ -669,7 +701,7 @@ composerForm.addEventListener('submit', async event => {
     });
     if (response.ok) {
       if (drafts.get(id) === text) drafts.delete(id);
-      if (images.length && imageDrafts.get(id) === images) { for (const image of images) if (image.url) URL.revokeObjectURL(image.url); imageDrafts.delete(id); if (selectedId === id) renderImageDraft(); }
+      if (images.length && imageDrafts.get(id) === images) { for (const image of images) disposeAttachmentDraft(image); imageDrafts.delete(id); if (selectedId === id) renderImageDraft(); }
       submissions.delete(id);
       if (selectedId === id && messageInput.value === text) messageInput.value = '';
     } else {
