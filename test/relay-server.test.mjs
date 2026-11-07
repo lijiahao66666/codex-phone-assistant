@@ -23,7 +23,7 @@ test('relay serves the repository H5 assets and forwards authenticated model req
   const post = (path, body, extra = {}) => fetch(base + path, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) });
   let peer;
   try {
-    for (const [path, mime] of [['/', 'text/html'], ['/recovery-attempt-store.js', 'javascript'], ['/history-projection.mjs', 'javascript'], ['/state-chunks.mjs', 'javascript'], ['/app-icon-20261106.png', 'image/png'], ['/markdown-parser.js', 'javascript']]) {
+    for (const [path, mime] of [['/', 'text/html'], ['/desktop.js?v=20261107-stable1', 'javascript'], ['/desktop.css?v=20261107-stable1', 'text/css'], ['/pair.js?v=20261107-stable1', 'javascript'], ['/recovery-attempt-store.js', 'javascript'], ['/history-projection.mjs', 'javascript'], ['/state-chunks.mjs', 'javascript'], ['/app-icon-20261106.png', 'image/png'], ['/markdown-parser.js', 'javascript']]) {
       const response = await fetch(base + path, { headers });
       assert.equal(response.status, 200, path);
       assert.match(response.headers.get('content-type'), new RegExp(mime));

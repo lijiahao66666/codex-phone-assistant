@@ -1,10 +1,10 @@
 # Codex 手机助手
 
-在手机上通过 H5 查看和控制本机 Codex 任务的桌面助手。项目由本机桌面端、本机配对面板和远程 H5 组成，使用 Codex Desktop 的本地 IPC 读取任务状态，并沿用桌面端的安全决策。
+在手机上通过 H5 查看和控制本机 Codex 任务的桌面助手。项目包括电脑助手、电脑配对面板和手机 H5。已有聊天通过 Codex Desktop 本地 IPC 同步；新聊天与确认恢复的历史聊天由助手运行，并同步到桌面。
 
 > 这不是 OpenAI 官方产品。桌面端依赖未公开、可能随 Codex 版本变化的 IPC 协议。
 >
-> 手机端是电脑版 Codex 的伴生界面。目标模式、插件和应用尚未接入；当前开发分支已接入新聊天、历史恢复、模型和推理强度，线上及 Release 安装包仍需发布后验证。
+> 手机端是电脑版 Codex 的伴生界面。目标模式、插件和应用仍未接入；当前稳定版代码已接入新聊天、历史恢复、模型和推理强度。v0.2.0 安装包和公网切换将在稳定版验收后发布。
 >
 > 仓库目前为私有。图片、GIF 和 Release 附件需要登录有访问权限的 GitHub 账号；第三方 Markdown 阅读器可能无法加载私有仓库媒体。
 
@@ -18,14 +18,14 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.1) 下载最新安装包：
+稳定版 v0.2.0 尚未发布。发布后，macOS 安装包将使用 v0.2.0；Windows 继续使用已发布的 v0.1.1：
 
 | 平台 | 安装包 | 说明 |
 | --- | --- | --- |
 | Windows | [安装器](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64-setup.exe) · [便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64.zip) | Windows 10/11 x64，支持高 DPI |
-| macOS | [Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-macos-arm64.dmg) | macOS 12+，Apple 芯片 |
+| macOS（待发布） | [Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/codex-phone-assistant-macos-arm64.dmg) · [ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/codex-phone-assistant-macos-arm64.zip) | macOS 12+，Apple 芯片 |
 
-校验文件：[SHA256SUMS.txt](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/SHA256SUMS.txt)
+校验文件（v0.2.0 发布后更新）：[SHA256SUMS.txt](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/SHA256SUMS.txt)
 
 安装步骤：
 
@@ -37,15 +37,15 @@
 | 已支持 | 未支持 |
 | --- | --- |
 | 配对和切换已配对的电脑 | 新建项目 |
-| 查看项目和任务的已有列表 | 新建、重命名、移动、归档或删除项目/任务 |
+| 查看项目、实时任务列表，选择项目新建聊天（macOS） | 项目创建；聊天重命名、移动、归档或删除 |
 | 查看历史、工具活动、文件变更和子智能体摘要 | 在手机上选择目标模式 |
-| 发送消息、补充输入和停止任务 | 选择插件、Apps、MCP 或连接器 |
+| 发送消息、补充输入、停止任务，确认恢复历史聊天（macOS） | 选择插件、Apps、MCP 或连接器 |
 | 切换 `Plan`/`Default` 协作模式 | 选择 cwd、分支、worktree 或执行环境 |
 | 回复问题和处理已支持的命令/文件审批 | Windows 默认启用图片/文件上传 |
 
-目标是**只读展示**：手机端可以看到已有目标的状态、内容和计时，但不能创建、修改、暂停、恢复或清除目标。
+目标信息仍是只读展示：手机端可以看到已有目标的状态、内容和计时，但不能创建、修改、暂停、恢复或清除目标。
 
-当前开发分支另提供项目选择、新聊天、无 owner 历史聊天恢复，以及模型和推理强度选择。首条消息发送时才创建聊天；桌面持有的聊天继续通过桌面 IPC 操作。助手持有的聊天由独立 app-server 运行，遇到 active writer 冲突会拒绝恢复；运行中和写入结果未知时拒绝普通退出。桌面新任务通过列表变化通知触发手机刷新。上述能力已做隔离流程和浏览器验证，公网与 iPhone 验收尚未完成。
+当前稳定版候选代码提供项目选择、新聊天、无 owner 历史聊天恢复，以及模型和推理强度选择。首条消息发送时才创建聊天；桌面持有的聊天继续通过桌面 IPC 操作。助手持有的聊天由独立 app-server 运行，遇到 active writer 冲突会拒绝恢复；运行中和写入结果未知时拒绝普通退出。桌面新任务通过列表变化通知触发手机刷新。上述能力已通过隔离流程、协议测试和浏览器模拟验收；公网切换、iPhone 真机和 Windows 新能力仍需稳定版发布前逐项复核。
 
 完整能力矩阵和实现边界见 [手机端与 Codex 能力对照](docs/CODEX-CAPABILITIES.md)。
 
@@ -114,7 +114,7 @@ npm ci
 npm run build:macos
 ```
 
-默认输出为 `build/codex手机助手.app`。Apple Silicon 包已完成构建、资源一致性和本地 ad-hoc 签名校验；当前候选的安装替换、配对和公网 iPhone 流程仍需验收。下载、未公证提示处理、配对和常见问题见 [macOS 安装与使用](macos/README.md)。
+默认输出为 `build/codex手机助手.app`。Apple Silicon 包使用本地 ad-hoc 签名。安装、配对和浏览器验收结果在发布前记录；下载、未公证提示处理、配对和常见问题见 [macOS 安装与使用](macos/README.md)。
 
 ## 配置
 
@@ -140,13 +140,13 @@ Windows 图片能力默认关闭；文字配对、历史、发送和停止不依
 
 Windows 版已完成以下真实验证：
 
-- 52 项自动化测试全部通过
+- 当前组合测试 182 项全部通过（包含协议、历史、上传、配对恢复和模型流程）
 - Windows 命名管道握手、项目与任务读取
 - Windows 150% 缩放下的 Per-Monitor V2 清晰渲染
 - H5 配对、历史、发送与停止
 - 关闭到托盘、再次启动唤回
 - 安装、卸载和重新安装
 
-H5 的 JS 和 CSS 已合入 2026-11-06 本地发布基线，并保留仓库中的分片模块路径调整。CSS 包含当时线上使用的独立窗口灰色安全区样式，顶部模糊及侧栏关闭后的安全区不一致仍待修复和 iPhone 验证。
+H5 已移除灰色安全区，标题与按钮居中，保留用户确认清晰的 8 CSS 像素独立窗口留白。附件使用无损压缩与协商并发，消息点击发送后进入聊天并在后台传输。新聊天、历史恢复、模型切换和只读历史分页已纳入当前组合测试。
 
-当前中转入口为 `npm run start:relay`，配置与本地验证见 [运行中转服务](docs/RELAY.md)。`snapshots/relay-2026-11-06/` 保留本地发布记录中的历史源码，不作为当前启动入口；当前代码尚未核实与线上运行版本完全一致。仓库不授予再分发许可。公开或商业发布前仍需确定许可证、检查图标与第三方依赖授权，并补充对应服务端版本说明。
+当前中转入口为 `npm run start:relay`，配置与本地验证见 [运行中转服务](docs/RELAY.md)。稳定版发布前仍需核对线上入口、静态资源哈希、数据库备份、Mac 安装包和下载页内容；历史快照不作为当前启动入口。仓库不授予再分发许可，公开或商业发布前仍需确定许可证、检查图标与第三方依赖授权。

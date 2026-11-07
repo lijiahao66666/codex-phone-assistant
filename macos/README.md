@@ -6,10 +6,10 @@ macOS 客户端使用 Swift、WKWebView 和菜单栏入口，随包 Node 后台�
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.1) 下载：
+稳定版 v0.2.0 发布后从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.2.0) 下载：
 
-- [macOS Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-macos-arm64.dmg)
-- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/SHA256SUMS.txt)
+- [macOS Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/codex-phone-assistant-macos-arm64.dmg)
+- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/SHA256SUMS.txt)
 
 也可以从[项目下载页](https://codex.air-inc.top/download/)获取同一安装包。
 
@@ -60,9 +60,17 @@ Intel Mac 当前未提供安装包。
 3. 在手机浏览器打开 <https://codex.air-inc.top/>，输入配对码并在 Mac 客户端确认；也可以扫描电脑上的二维码。
 4. 配对成功后，在手机端打开左上角任务面板并选择任务。
 
+## 新聊天、历史恢复和模型
+
+- 在项目列表或顶部选择项目后，可创建手机助手持有的新聊天；首次发送时才创建任务。
+- 无 owner 的历史聊天先以只读方式打开。点击“继续聊天”后，助手会重新确认归属；发现电脑或其他手机已占用时停止写入。
+- 模型和推理强度使用电脑返回的可用列表，只能在任务空闲且没有待确认写入时切换。
+
+这些能力属于当前稳定版候选代码。v0.2.0 公网发布前仍需完成服务器切换和真机逐项验收。
+
 ## 手机端限制
 
-手机端是电脑版 Codex 的伴生界面。当前开发分支已接入项目选择、新聊天、无 owner 历史恢复、模型和推理强度；这些能力尚未完成公网与 iPhone 验收，既有 Release 不包含本轮改动。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入。目标信息目前只能查看。既有发布版本对照见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
+手机端是电脑版 Codex 的伴生界面。当前稳定版候选代码已接入项目选择、新聊天、无 owner 历史恢复、模型和推理强度；既有 v0.1.1 Release 不包含本轮改动。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入。目标信息目前只能查看。既有发布版本对照见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
 
 ## 托盘与退出
 
@@ -97,4 +105,4 @@ npm run build:macos
 
 ## 验证状态
 
-当前仓库在 Windows 真机完成了完整 H5 联调。macOS 安装说明来自项目下载页，构建脚本已适配新目录结构，但 macOS 安装、配对、消息和停止仍需要在真实 Mac 上复验。
+当前组合自动化测试和浏览器模拟已通过。iPhone 真机和服务器切换后的公网流程仍需复验。Mac 安装后的配对、消息和停止也要在发布前复验。

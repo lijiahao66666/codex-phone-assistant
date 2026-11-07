@@ -186,7 +186,7 @@ async function scopedFetch(url, options = {}) {
   return response;
 }
 function resetHistoryScope(clearStored = false) {
-  cancelOutgoingForScopeChange(); historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
+  cancelOutgoingForScopeChange(); historyRequest?.abort(); historyRequest = null; recordedHistory = null; historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
 }
 function deviceChanged() {
   resetHistoryScope(); clearTimeout(reconnectTimer); active?.abort(); active = undefined;
@@ -717,7 +717,7 @@ conversation?.addEventListener('scroll', () => {
   previousHistoryScrollTop = top;
   followLatest = conversation.scrollHeight - conversation.clientHeight - conversation.scrollTop < 80;
   updateScrollButton();
-  if (upward && top < 120 && historyCanLoad && !historyAutoBlocked && !loadedHistory?.stale) void loadEarlierPage();
+  if (upward && top < 120 && historyCanLoad && !historyAutoBlocked && !historyIsStale()) void loadEarlierPage();
 });
 scrollBottomButton?.addEventListener('click', () => {
   followLatest = true;
@@ -1268,24 +1268,61 @@ composerForm.addEventListener('submit', async event => {
         }
         const base = `/api/threads/${encodeURIComponent(preparedThread)}/uploads`;
         const uploadHeaders = { 'x-creation-id': draft.requestId };
+        const uploadDeviceId = currentDeviceId, uploadScopeGeneration = historyScopeGeneration;
+        const ensureDraftUploadScope = () => {
+          if (newDraft !== draft || currentDeviceId !== uploadDeviceId || historyScopeGeneration !== uploadScopeGeneration) {
+            // The old receiver expires the upload; never clean it up with another device's credentials.
+            inProgressUpload = undefined;
+            throw new Error('upload');
+          }
+          if (controller.signal.aborted) throw new Error('upload');
+        };
         for (const [index, entry] of draft.attachments.entries()) {
           if (stagedIds[index]) continue;
+          await loadCapabilities(); ensureDraftUploadScope();
+          if (!imageUploadAvailable) throw new Error('upload');
+          const chunkBytes = imageChunkBytes, concurrency = uploadConcurrency;
           const start = await scopedFetch(base, { method: 'POST', credentials: 'same-origin', signal: controller.signal, headers: { ...uploadHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ name: entry.file.name, size: entry.file.size, kind: entry.kind || 'image' }) });
           if (!start.ok) throw new Error('upload');
           const uploadId = (await start.json()).uploadId;
           if (!uuid.test(uploadId || '')) throw new Error('upload');
           inProgressUpload = uploadId;
-          for (let offset = 0, seq = 0; offset < entry.file.size; offset += imageChunkBytes, seq++) {
-            const encoded = await encodeUploadChunk(entry.file.slice(offset, offset + imageChunkBytes), controller.signal);
-            const chunk = await scopedFetch(`${base}/${uploadId}/chunks/${seq}`, { method: 'PUT', credentials: 'same-origin', signal: controller.signal, headers: { ...uploadHeaders, ...encoded.headers }, body: encoded.body });
-            if (!chunk.ok) throw new Error('upload');
-          }
+          const fileController = new AbortController(), abortFile = () => fileController.abort();
+          controller.signal.addEventListener('abort', abortFile, { once: true });
+          let nextSeq = 0, firstError, compressionAllowed = true;
+          const count = Math.ceil(entry.file.size / chunkBytes);
+          const worker = async () => {
+            while (!fileController.signal.aborted) {
+              const seq = nextSeq++;
+              if (seq >= count) return;
+              try {
+                ensureDraftUploadScope();
+                const offset = seq * chunkBytes;
+                const encoded = await encodeUploadChunk(entry.file.slice(offset, offset + chunkBytes), fileController.signal, compressionAllowed);
+                if (seq === 0 && encoded.compressionRatio > 0.98) compressionAllowed = false;
+                ensureDraftUploadScope();
+                if (fileController.signal.aborted) throw new Error('upload');
+                const chunk = await scopedFetch(`${base}/${uploadId}/chunks/${seq}`, { method: 'PUT', credentials: 'same-origin', signal: fileController.signal, headers: { ...uploadHeaders, ...encoded.headers }, body: encoded.body });
+                if (!chunk.ok) throw new Error('upload');
+                ensureDraftUploadScope();
+              } catch (error) {
+                if (!firstError) firstError = error;
+                fileController.abort(); return;
+              }
+            }
+          };
+          try { await Promise.all(Array.from({ length: Math.min(concurrency, count) }, () => worker())); }
+          finally { controller.signal.removeEventListener('abort', abortFile); }
+          if (firstError) throw firstError;
+          ensureDraftUploadScope();
           const finish = await scopedFetch(`${base}/${uploadId}/finish`, { method: 'POST', credentials: 'same-origin', signal: controller.signal, headers: uploadHeaders });
           if (!finish.ok) throw new Error('upload');
           const attachmentId = (await finish.json()).attachmentId;
+          ensureDraftUploadScope();
           if (!uuid.test(attachmentId || '')) throw new Error('upload');
           stagedIds[index] = attachmentId; inProgressUpload = undefined;
         }
+        ensureDraftUploadScope();
         dispatched = true;
         response = await scopedFetch('/api/chats/submit', { method: 'POST', credentials: 'same-origin', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, text, attachmentIds: stagedIds, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
       } else {
@@ -1363,7 +1400,7 @@ async function responseError(response, fallback) {
   return fallback;
 }
 let displayedHistoryId = null, homeErrorSource = null;
-function clearConversation() { cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
+function clearConversation() { cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
 function diffStats(changes) {
   let added = 0, removed = 0;
   for (const change of changes || []) {
@@ -1935,12 +1972,76 @@ async function loadThreads() {
     }
   }
 }
-let loadedHistory = null, historyRequest = null;
+let loadedHistory = null, historyRequest = null, recordedHistory = null;
+function historyIsStale() { return Boolean(loadedHistory?.stale || recordedHistory?.stale); }
+function mergeHistoryTurns(older, newer) {
+  const key = turn => typeof turn.id === 'string' && turn.id ? `id:${turn.id}` : typeof turn.viewKey === 'string' && turn.viewKey ? `view:${turn.viewKey}` : null;
+  const previous = new Map(older.filter(turn => key(turn)).map(turn => [key(turn), turn]));
+  const recent = new Set(newer.map(key).filter(Boolean));
+  return [...older.filter(turn => !key(turn) || !recent.has(key(turn))), ...newer.map(turn => {
+    const old = previous.get(key(turn));
+    if (!old) return turn;
+    const latest = new Map((turn.items || []).map(item => [item.id, item]));
+    const items = [...(old.items || []).filter(item => !latest.has(item.id)), ...(turn.items || [])];
+    const pagination = old.itemsPagination || turn.itemsPagination;
+    return { ...old, ...turn, items, ...(pagination ? { itemsPagination: { ...pagination,
+      hasLoadedNewest: Boolean(old.itemsPagination?.hasLoadedNewest || turn.itemsPagination?.hasLoadedNewest),
+      hasLoadedOldest: Boolean(old.itemsPagination?.hasLoadedOldest || turn.itemsPagination?.hasLoadedOldest) } } : {}) };
+  })];
+}
+function validateRecordedPage(page, id) {
+  if (page?.id !== id || page.history?.readOnly !== true || !Array.isArray(page.turns) || page.turns.length > 50 ||
+      typeof page.history.olderComplete !== 'boolean' || !(page.nextCursor === null || (typeof page.nextCursor === 'string' && page.nextCursor.length > 0 && page.nextCursor.length <= 8192)) ||
+      (page.history.olderComplete !== (page.nextCursor === null))) throw new Error('invalid recorded history');
+  const turns = new Set();
+  for (const turn of page.turns) {
+    if (!turn || typeof turn.id !== 'string' || !turn.id || turns.has(turn.id) || !Array.isArray(turn.items)) throw new Error('invalid recorded turn');
+    turns.add(turn.id); const items = new Set();
+    for (const item of turn.items) { if (!item || typeof item.id !== 'string' || !item.id || items.has(item.id)) throw new Error('invalid recorded item'); items.add(item.id); }
+  }
+}
+function recordedHistoryAvailable() {
+  const liveComplete = streamView && (streamView.history?.complete === true || (loadedHistory?.complete === true && !loadedHistory.stale));
+  return Boolean(selectedId && !liveComplete && !recordedHistory?.olderComplete);
+}
+async function loadRecordedPage() {
+  const id = selectedId;
+  if (!id || historyRequest || !recordedHistoryAvailable()) return;
+  const refresh = recordedHistory?.stale === true, previous = recordedHistory;
+  const cursor = !refresh && previous?.initialized ? previous.nextCursor : null;
+  const controller = new AbortController(), scopeGeneration = historyScopeGeneration;
+  historyRequest = controller; updateHistoryControl();
+  try {
+    const query = cursor ? `?${new URLSearchParams({ cursor })}` : '';
+    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recorded-history${query}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'x-codex-history-chunks': '1' } });
+    if ([409, 410].includes(response.status)) throw Object.assign(new Error('history changed'), { stale: true });
+    const page = await readHistoryPage(response, controller.signal);
+    if (page?.error === 'history-changed') throw Object.assign(new Error('history changed'), { stale: true });
+    if (historyRequest !== controller || controller.signal.aborted || scopeGeneration !== historyScopeGeneration || selectedId !== id) return;
+    validateRecordedPage(page, id);
+    if (cursor && page.nextCursor === cursor) throw new Error('history cursor did not advance');
+    const turns = refresh ? page.turns : mergeHistoryTurns(page.turns, previous?.turns || []);
+    const baseView = refresh && !streamView ? page : previous?.baseView || { id, title: page.title, turns: [], history: { readOnly: true }, requests: [], runtimeStatus: 'unknown' };
+    recordedHistory = { id, baseView, turns, nextCursor: page.nextCursor, initialized: true, olderComplete: page.history.olderComplete, stale: false };
+    historyAutoBlocked = false;
+    const height = conversation?.scrollHeight || 0, top = conversation?.scrollTop || 0;
+    followLatest = false; showState(streamView || baseView, Boolean(streamView));
+    if (conversation) conversation.scrollTop = top + Math.max(0, conversation.scrollHeight - height);
+  } catch (error) {
+    if (!controller.signal.aborted && historyRequest === controller && scopeGeneration === historyScopeGeneration && selectedId === id) {
+      historyAutoBlocked = true;
+      if (error.stale) {
+        recordedHistory = { ...(previous || { id, turns: [], initialized: false, olderComplete: false }), stale: true };
+        history.textContent = '历史已变化，刷新后可继续加载';
+      } else history.textContent = '历史加载失败，请重试';
+    }
+  } finally { if (historyRequest === controller) { historyRequest = null; updateHistoryControl(); } }
+}
 function updateHistoryControl() {
   const shortContent = !conversation || !Number.isFinite(conversation.scrollHeight) || !Number.isFinite(conversation.clientHeight) || conversation.scrollHeight <= conversation.clientHeight + 1;
-  loadEarlier.hidden = !historyCanLoad || (!historyRequest && !historyAutoBlocked && !loadedHistory?.stale && !shortContent);
+  loadEarlier.hidden = !historyCanLoad || (!historyRequest && !historyAutoBlocked && !historyIsStale() && !shortContent);
   loadEarlier.disabled = Boolean(historyRequest);
-  loadEarlier.textContent = historyRequest ? '加载中...' : loadedHistory?.stale ? '历史已变化，刷新' : historyAutoBlocked ? '重新加载更早消息' : '加载更早消息';
+  loadEarlier.textContent = historyRequest ? '加载中...' : historyIsStale() ? '历史已变化，刷新' : historyAutoBlocked ? '重新加载更早消息' : '加载更早消息';
 }
 async function readHistoryPage(response, signal) {
   if (!response.ok) throw new Error('history unavailable');
@@ -1971,7 +2072,9 @@ async function readHistoryPage(response, signal) {
 }
 async function loadEarlierPage() {
   const source = streamView, id = selectedId, metadata = source?.history;
-  if (!connected || !id || !metadata?.historicalHash || loadEarlier.disabled) return;
+  if (!id || loadEarlier.disabled) return;
+  const liveBefore = loadedHistory ? loadedHistory.nextBefore : metadata?.cursor;
+  if (recordedHistory?.stale || !connected || !metadata?.historicalHash || (!liveBefore && !loadedHistory?.stale)) return loadRecordedPage();
   if (loadedHistory?.stale) { loadedHistory = null; showState(streamView); }
   const previous = loadedHistory?.hash === metadata.historicalHash ? loadedHistory : null;
   const before = previous?.nextBefore ?? (previous ? null : metadata.cursor);
@@ -2018,6 +2121,13 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   for (const key of transientWorkKeys) if (key !== immediateWork?.key && (!immediateWork || ![...immediateKeys.values()].includes(key))) expandedWork.delete(key);
   transientWorkKeys.clear();
   const controlTurns = view.turns || [];
+  if (!live && typeof view.id === 'string' && view.id && view.id === selectedId && recordedHistory?.baseView !== view) {
+    const indexed = view.history?.readOnly === true;
+    if (indexed) validateRecordedPage(view, selectedId);
+    const old = recordedHistory && recordedHistory.id === view.id ? recordedHistory : null;
+    recordedHistory = { id: view.id, baseView: view, turns: mergeHistoryTurns(old?.turns || [], view.turns || []),
+      nextCursor: indexed ? view.nextCursor : null, initialized: indexed, olderComplete: indexed && view.history.olderComplete, stale: false };
+  }
   if (live && view.history?.historicalHash) {
     if (loadedHistory && (loadedHistory.hash !== view.history.historicalHash || loadedHistory.mediaRevision !== view.history.mediaRevision)) loadedHistory.stale = true;
     const previous = loadedHistory, field = view.history.keyField;
@@ -2028,6 +2138,8 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
       view = { ...view, turns: [...old, ...view.turns], history: { ...view.history, complete: !previous.stale && previous.complete } };
     }
   } else { loadedHistory = null; historyCanLoad = false; }
+  if (recordedHistory && recordedHistory.id === view.id) view = { ...view, turns: mergeHistoryTurns(recordedHistory.turns, view.turns || []) };
+  if (recordedHistoryAvailable()) historyCanLoad = true;
   displayedHistoryId = !live && view.id === selectedId ? selectedId : null;
   clearImageObservers();
   liveMode = live && ['default', 'plan'].includes(view.collaborationMode) ? view.collaborationMode : null;
@@ -2048,13 +2160,13 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   const firstRender = renderedThreadId !== selectedId;
   if (firstRender) { followLatest = true; renderedThreadId = selectedId; }
   const oldScrollTop = conversation?.scrollTop;
-  const running = (view.turns || []).filter(turn => turn.status === 'inProgress' && uuid.test(turn.id || ''));
+  const running = controlTurns.filter(turn => turn.status === 'inProgress' && uuid.test(turn.id || ''));
   activeTurnId = live && running.length === 1 ? running[0].id : null;
   updateLiveTaskStatus(selectedId, live && (view.runtimeStatus === 'active' || (view.runtimeStatus == null && running.length > 0)) ? 'active' : 'unknown');
   if (selectedId && stops.has(selectedId) && stops.get(selectedId).turnId !== activeTurnId && !stops.get(selectedId).pending && !stops.get(selectedId).goalPauseFailed && (activeTurnId || !stops.get(selectedId).error)) stops.delete(selectedId);
   selectedTitle = view.title || selectedTitle || '未命名任务';
   title.textContent = selectedTitle;
-  history.textContent = live ? (loadedHistory?.gap ? '历史可能存在缺口，请刷新' : loadedHistory?.stale ? '历史已变化，刷新后可继续加载' : view.history?.complete ? '' : '部分历史未加载') : '已保存的历史，非实时内容';
+  history.textContent = live ? (loadedHistory?.gap ? '历史可能存在缺口，请刷新' : historyIsStale() ? '历史已变化，刷新后可继续加载' : view.history?.complete ? '' : '部分历史未加载') : '已保存的历史，非实时内容';
   error.hidden = true;
   const fragment = document.createDocumentFragment();
   const questionFragment = document.createDocumentFragment();
@@ -2157,7 +2269,8 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     const row = element('article', 'turn');
     if (turn.status === 'interrupted' || turn.status === 'failed') row.append(element('div', 'turn-meta', turn.status === 'interrupted' ? '已中断' : '失败'));
     const turnItems = turn.items || [];
-    const liveTurn = live && turn.status === 'inProgress';
+    const controlTurn = live ? controlTurns.find(candidate => (candidate.viewKey || candidate.id) === (turn.viewKey || turn.id)) : null;
+    const liveTurn = Boolean(controlTurn && controlTurn.status === 'inProgress');
     const lastMessageIndex = liveTurn ? turnItems.findLastIndex(item => item?.type === 'agentMessage' || item?.type === 'userMessage') : -1;
     const liveReasoningIndex = liveTurn ? turnItems.findLastIndex((item, index) => index > lastMessageIndex && item?.type === 'reasoning' && Array.isArray(item.summary) && item.summary.some(text => typeof text === 'string' && text.trim())) : -1;
     const finalIndex = turn.status === 'completed' ? turnItems.findLastIndex(item => item?.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim() && (item.phase === 'final_answer' || !item.phase)) : -1;
@@ -2367,7 +2480,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
       }
       else if (item.type === 'error') content = item.message || '';
       const asyncQuestions = item.type === 'agentMessage' && Array.isArray(item.questions) ? item.questions : [];
-      const pendingAsync = asyncQuestions.length && live && turn === (view.turns || []).at(-1) && !turnItems.slice(itemIndex + 1).some(entry => entry.type === 'userMessage' || entry.questions?.length);
+      const pendingAsync = asyncQuestions.length && live && controlTurn === controlTurns.at(-1) && controlTurn?.items?.some(candidate => candidate.id === item.id) && !turnItems.slice(itemIndex + 1).some(entry => entry.type === 'userMessage' || entry.questions?.length);
       const skipKey = asyncQuestions.length === 1 && item.id ? JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id]) : null;
       if (skipKey && !pendingAsync) skippedAsyncQuestions.delete(skipKey);
       const duplicateQuestion = pendingAsync && asyncQuestions.length === 1 && content?.trim() === asyncQuestions[0].question.trim();

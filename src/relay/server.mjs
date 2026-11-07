@@ -147,8 +147,9 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     try {
       if (closed || req.headers.host !== base.host) return send(res, 403, { error: 'forbidden' });
       if (await serveAttachmentPreviewAsset(req, res)) return;
-      if (req.method === 'GET' && Object.hasOwn(assets, req.url)) {
-        const [file, type] = assets[req.url];
+      const assetPath = /^\/(?:desktop\.(?:css|js)|pair\.js|install-prompt\.js)\?v=[A-Za-z0-9._-]{1,80}$/.test(req.url || '') ? req.url.split('?')[0] : req.url;
+      if (req.method === 'GET' && Object.hasOwn(assets, assetPath)) {
+        const [file, type] = assets[assetPath];
         const content = await readFile(new URL(`../../public/${file}`, import.meta.url));
         res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
           'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; img-src 'self' blob:; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" });
@@ -297,6 +298,19 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       if (req.headers['x-codex-expected-device'] && req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
       if (!(req.method === 'GET' ? sameOriginRead(req) : sameOrigin(req))) return send(res, 403, { error: 'forbidden' });
       const requested = req.url || '';
+      const recordedHistory = /^\/api\/threads\/([0-9a-f-]{36})\/recorded-history(?:\?(.*))?$/i.exec(requested);
+      if (recordedHistory) {
+        if (req.method !== 'GET' || !uuid.test(recordedHistory[1])) return send(res, 404, { error: 'not-found' });
+        const params = new URLSearchParams(recordedHistory[2] || ''), cursor = params.get('cursor');
+        if ([...params.keys()].length > 1 || [...params.keys()].some(key => key !== 'cursor') || (cursor !== null && (cursor.length > 8192 || !cursor))) return send(res, 400, { error: 'invalid' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs), hardTimer = setTimeout(() => cancel(id), historyMaxDurationMs);
+        pending.set(id, { res, timer, hardTimer, streaming: false, historyChunks: true, recordedHistory: true, historyMaxBytes: 4 * 1024 * 1024, writing: false, hostId: phone.hostId, deviceId: phone.deviceId });
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'recorded-history', id, conversationId: recordedHistory[1], deviceId: phone.deviceId, ...(cursor ? { cursor } : {}) }));
+        return;
+      }
       if (['/api/chats/prepare', '/api/chats/submit'].includes(requested) && req.method === 'POST') {
         if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
         const reserved = await reservedBody(req, res, phone, 65536);
@@ -594,7 +608,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         const state = entry.historyTransfer;
         if (entry.historyWriting) return cancel(msg.id);
         if (frame.type === 'begin') {
-          if (state || typeof frame.transferId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(frame.transferId) || !Number.isSafeInteger(frame.generation) || frame.generation < 1 || frame.seq !== 1 || !Number.isSafeInteger(frame.size) || frame.size < 1 || frame.size > 32 * 1024 * 1024 || !Number.isSafeInteger(frame.chunkBytes) || frame.chunkBytes < 1 || frame.chunkBytes > 48 * 1024 || frame.count !== Math.ceil(frame.size / frame.chunkBytes) || !/^[0-9a-f]{64}$/.test(frame.hash || '')) return cancel(msg.id);
+          if (state || typeof frame.transferId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(frame.transferId) || !Number.isSafeInteger(frame.generation) || frame.generation < 1 || frame.seq !== 1 || !Number.isSafeInteger(frame.size) || frame.size < 1 || frame.size > (entry.historyMaxBytes || 32 * 1024 * 1024) || !Number.isSafeInteger(frame.chunkBytes) || frame.chunkBytes < 1 || frame.chunkBytes > 48 * 1024 || frame.count !== Math.ceil(frame.size / frame.chunkBytes) || !/^[0-9a-f]{64}$/.test(frame.hash || '')) return cancel(msg.id);
           entry.historyTransfer = { transferId: frame.transferId, generation: frame.generation, size: frame.size, chunkBytes: frame.chunkBytes, count: frame.count, index: 0, bytes: 0 };
         } else if (!state || frame.transferId !== state.transferId || frame.generation !== state.generation) return cancel(msg.id);
         else if (frame.type === 'chunk') {
@@ -686,6 +700,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
           else if (msg.status === 'start-unknown' && uuid.test(msg.threadId || '')) send(entry.res, 504, { error: 'start-unknown', threadId: msg.threadId });
           else send(entry.res, msg.status === 'invalid-project' ? 400 : 504, { error: msg.status === 'invalid-project' ? 'invalid-project' : 'outcome-unknown' });
         }
+        else if (entry.recordedHistory && !msg.ok && ['history-changed', 'history-item-too-large'].includes(msg.error)) send(entry.res, msg.error === 'history-changed' ? 409 : 413, { error: msg.error });
         else if (entry.writing) { const partial = entry.stop && msg.status === 'stopped-goal-pause-failed'; const status = msg.status === 'accepted' || partial ? 202 : msg.status === 'unavailable' ? 409 : 504; send(entry.res, status, status === 202 ? { status: partial ? 'stopped-goal-pause-failed' : 'accepted' } : { error: status === 409 ? 'unavailable' : 'outcome-unknown' }); }
         else { if (entry.uploadSent && !msg.ok) console.warn('upload-observation', 'desktop-rejected'); send(entry.res, msg.ok ? 200 : 503, msg.ok ? msg.data : { error: msg.error === 'busy' ? 'busy' : 'unavailable' }); }
       } else if (msg.type === 'end' && entry.streaming) { console.warn('connector ended stream'); cancel(msg.id); }

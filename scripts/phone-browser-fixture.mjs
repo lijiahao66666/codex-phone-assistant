@@ -2,7 +2,8 @@
 // temporary; the model is simulated, while app-server, IPC and relay are real.
 import { createServer, request as httpRequest } from 'node:http';
 import { createServer as reserveServer } from 'node:net';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, access } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,12 +17,21 @@ import { DesktopIpc } from '../src/desktop/ipc.mjs';
 import { listDesktopThreads, ThreadListChanges } from '../src/desktop/thread-list.mjs';
 import { SidebarStatus } from '../src/desktop/sidebar-status.mjs';
 import { readRolloutHistory } from '../src/desktop/rollout-history.mjs';
+import { createRecordedHistoryPager } from '../src/desktop/recorded-history-page.mjs';
+import { ImagePreview } from '../src/media/image-preview.mjs';
+import { validateImageFile } from '../src/media/image-validator.mjs';
 
 const binary = process.env.CODEX_PHONE_TEST_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
 if (!existsSync(binary)) throw new Error('Set CODEX_PHONE_TEST_BIN to an installed Codex CLI');
 const dir = await mkdtemp(join(tmpdir(), 'codex-phone-browser-'));
 const socketPath = join(dir, 'ipc.sock');
-const modelRequests = [];
+const modelRequests = [], waitingRequests = new Set();
+const sampleFiles = { image: join(dir, '验收像素.png'), text: join(dir, '验收说明.txt') };
+const uploadRoot = join(dir, 'uploads');
+const helperRoot = '/Applications/codex手机助手.app/Contents/Resources/runtime';
+const imageValidatorHelper = process.env.CODEX_PHONE_TEST_IMAGE_VALIDATOR || join(helperRoot, 'validate-image');
+const mediaHelper = process.env.CODEX_PHONE_TEST_MEDIA_HELPER || join(helperRoot, 'safe-media-open');
+let imagePreview;
 let runtime, relay, connector, proxy, closed = false;
 const model = createServer((req, res) => {
   req.on('error', () => {}); res.on('error', () => {});
@@ -29,10 +39,22 @@ const model = createServer((req, res) => {
   req.on('data', chunk => { body += chunk; });
   req.on('end', async () => {
     const value = JSON.parse(body), n = modelRequests.length + 1;
-    modelRequests.push({ number: n, model: value.model, effort: value.reasoning?.effort });
+    const lastUser = Array.isArray(value.input) ? value.input.filter(item => item?.role === 'user').at(-1) : null;
+    const userText = (Array.isArray(lastUser?.content) ? lastUser.content : []).map(item => item?.text || '').join('\n');
+    const waitForStop = userText.includes('验收停止');
+    modelRequests.push({ number: n, model: value.model, effort: value.reasoning?.effort, waitingForStop: waitForStop });
+    if (waitForStop) {
+      waitingRequests.add(n);
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: { id: `resp_${n}`, object: 'response', status: 'in_progress', output: [] } })}\n\n`);
+      const heartbeat = setInterval(() => { if (!res.destroyed) res.write(': awaiting isolated stop acceptance\n\n'); }, 1000);
+      const deadline = setTimeout(() => res.destroy(), 120000);
+      res.once('close', () => { clearInterval(heartbeat); clearTimeout(deadline); waitingRequests.delete(n); });
+      return;
+    }
     await delay(200);
     if (res.destroyed) return;
-    const item = { id: `msg_${n}`, type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: `隔离模型回复 ${n}：流程测试通过。`, annotations: [] }] };
+    const item = { id: `msg_${n}`, type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: `隔离模型回复 ${n}：流程测试通过。\n\n[验收说明.txt](${sampleFiles.text}) · [验收像素.png](${sampleFiles.image})`, annotations: [] }] };
     const response = { id: `resp_${n}`, object: 'response', status: 'completed', output: [item], usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } };
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     for (const [type, payload] of [
@@ -65,6 +87,7 @@ async function stop() {
     try { await runtime.close(); }
     catch { await runtime.owner.close({ force: true }); runtime.router.close(); runtime.modelJournal.close(); runtime.router.journal.close(); }
   }
+  imagePreview?.clear();
   await relay?.close(); model.closeAllConnections();
   if (model.listening) await new Promise(resolve => model.close(resolve));
   await rm(dir, { recursive: true, force: true });
@@ -72,6 +95,10 @@ async function stop() {
 }
 
 try {
+  await Promise.all([imageValidatorHelper, mediaHelper].map(path => access(path, constants.X_OK)));
+  await writeFile(sampleFiles.image, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
+  await writeFile(sampleFiles.text, '手机助手隔离验收文件\n第 2 行：文件和图片都只来自本次临时目录。\n');
+  imagePreview = await ImagePreview.create({ roots: [dir], helperPath: mediaHelper });
   await new Promise(resolve => model.listen(0, '127.0.0.1', resolve));
   await writeFile(join(dir, '.codex-global-state.json'), JSON.stringify({ 'local-projects': { project: { id: 'project', name: '手机助手隔离测试项目', rootPaths: [dir] } } }));
   const reserve = reserveServer(); await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
@@ -79,7 +106,7 @@ try {
   const base = `http://127.0.0.1:${relayPort}`, origin = `https://127.0.0.1:${relayPort}`;
   const headers = { origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };
   const post = (path, value, extra = {}) => fetch(base + path, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(value) });
-  relay = createPairRelay({ origin, database: join(dir, 'relay.sqlite'), requestTimeoutMs: 20000 });
+  relay = createPairRelay({ origin, database: join(dir, 'relay.sqlite'), requestTimeoutMs: 20000, imageUpload: true, imagePreview: true });
   await relay.listen(relayPort);
   const host = await (await post('/api/enroll', { name: '隔离 Mac（模拟模型）' })).json();
   const code = await (await post('/api/host/pair-code', {}, { authorization: `Bearer ${host.secret}` })).json();
@@ -103,12 +130,19 @@ try {
   await startRuntime();
   const live = await runtime.router.create({ projectId: 'project', text: '隔离实时聊天：用于验证模型切换和发送', requestId: randomUUID(), deviceId: paired.deviceId });
   await waitIdle(live.threadId);
+  await runtime.owner.startTurn(live.threadId, '隔离文件及图片预览验收', { attachments: [
+    { kind: 'image', path: sampleFiles.image }, { kind: 'file', name: '验收说明.txt', path: sampleFiles.text },
+  ] });
+  await waitIdle(live.threadId);
   connector = await createPairedDesktopConnector({ credentialPath: credential, allowInsecureForTests: true, retryMs: 100,
+    imageUpload: true, imagePreview, uploadRoot, filePreviewHelper: mediaHelper,
+    imageValidator: file => validateImageFile(file, { helperPath: imageValidatorHelper }),
     sidebarStatusForTests: new SidebarStatus({ createClient: () => new DesktopIpc({ socketPath }) }),
     threadListChangesForTests: new ThreadListChanges({ codexHome: dir }),
     ownerRouter: runtime.router, modelJournal: runtime.modelJournal, modelRequest: (method, params) => runtime.owner.request(method, params),
     listThreads: options => listDesktopThreads({ ...options, codexHome: dir }),
     readHistory: (id, options) => readRolloutHistory(id, { ...options, codexHome: dir }),
+    recordedHistoryPager: createRecordedHistoryPager({ codexHome: dir }),
     createSession: ({ conversationId }) => new DesktopSession({ conversationId, retryBaseMs: 100, retryMaxMs: 500, createClient: () => new DesktopIpc({ socketPath }) }),
   });
   connector.start();
@@ -119,7 +153,7 @@ try {
     if (![`127.0.0.1:${ownPort}`, `localhost:${ownPort}`].includes(req.headers.host)) { res.writeHead(403); res.end(); return; }
     if (req.url === '/__fixture/status') {
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      res.end(JSON.stringify({ historical: historical.threadId, live: live.threadId, modelRequests })); return;
+      res.end(JSON.stringify({ historical: historical.threadId, live: live.threadId, modelRequests, waitingRequests: [...waitingRequests], sampleFiles, uploadRoot })); return;
     }
     if (req.url === '/__fixture/create-local-chat' && req.method === 'POST') {
       void runtime.router.create({ projectId: 'project', text: '电脑侧新增任务通知验收', requestId: randomUUID(), deviceId: paired.deviceId }).then(result => {
@@ -137,6 +171,6 @@ try {
     req.pipe(forward); res.once('close', () => forward.destroy());
   });
   await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
-  console.log(JSON.stringify({ fixtureUrl: `http://127.0.0.1:${proxy.address().port}/`, localhostUrl: `http://localhost:${proxy.address().port}/`, historicalThread: historical.threadId, liveThread: live.threadId, temporaryData: dir, model: 'loopback simulation', stop: 'Ctrl-C or SIGTERM to this fixture process' }));
+  console.log(JSON.stringify({ fixtureUrl: `http://127.0.0.1:${proxy.address().port}/`, localhostUrl: `http://localhost:${proxy.address().port}/`, historicalThread: historical.threadId, liveThread: live.threadId, temporaryData: dir, sampleFiles, uploadRoot, imageUpload: true, imagePreview: true, stopTrigger: '验收停止', model: 'loopback simulation', stop: 'Ctrl-C or SIGTERM to this fixture process' }));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void stop().then(() => process.exit(0)); });
 } catch (error) { await stop(); throw error; }
