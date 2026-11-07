@@ -421,11 +421,18 @@ async function clearRecoveryAttempt(deviceId, threadId, state) {
   } catch { return false; }
 }
 async function finishAcceptedRecovery(id, deviceId, stream) {
-  const key = recoveryKey(deviceId, id), state = recoveries.get(key);
-  if (!stream || state?.finishing || state?.status !== 'awaiting-state' || state.liveStream !== stream || recoveryStream !== stream || stream.controller.signal.aborted || recoveryChecks.get(key)?.status !== 'ready') return;
+  const key = recoveryKey(deviceId, id), state = recoveries.get(key), check = recoveryChecks.get(key);
+  // connect() clears the check record when it takes over, so a missing record
+  // means there is nothing left to wait for; only a pending/failed check blocks.
+  if (!stream || state?.finishing || state?.status !== 'awaiting-state' || state.liveStream !== stream || recoveryStream !== stream || stream.controller.signal.aborted || (check && check.status !== 'ready')) return;
   state.finishing = true;
-  if (await clearRecoveryAttempt(deviceId, id, state)) { if (recoveries.get(key) === state) recoveries.delete(key); }
-  else { state.status = 'unknown'; state.message = '无法保存恢复状态，请重新检查'; }
+  const cleared = await clearRecoveryAttempt(deviceId, id, state);
+  if (recoveries.get(key) === state) {
+    // The session is already attached, so a failed record cleanup must not keep
+    // the recovery notice on screen; retry the cleanup once in the background.
+    recoveries.delete(key);
+    if (!cleared) void clearRecoveryAttempt(deviceId, id, state);
+  }
   if (selectedId === id && currentDeviceId === deviceId) updateComposer();
 }
 if (recoveryChannel) recoveryChannel.onmessage = event => {
