@@ -62,13 +62,13 @@ Intel Mac 当前未提供安装包。
 
 ## 手机端限制
 
-手机端是电脑版 Codex 的伴生界面，不能新建任务或项目，也不能选择目标模式、插件、Apps、MCP、模型、推理强度、cwd、Git 分支、worktree 或执行环境。目标信息目前只能查看。完整对照见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
+手机端是电脑版 Codex 的伴生界面。当前开发分支已接入项目选择、新聊天、无 owner 历史恢复、模型和推理强度；这些能力尚未完成公网与 iPhone 验收，既有 Release 不包含本轮改动。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入。目标信息目前只能查看。既有发布版本对照见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
 
 ## 托盘与退出
 
 - 关闭窗口会隐藏到菜单栏，后台服务和手机连接继续运行。
 - 从菜单栏图标选择“打开 codex手机助手”可恢复窗口。
-- 从菜单栏选择“退出 codex手机助手”会结束窗口和随包 Node 进程。
+- 从菜单栏选择“退出 codex手机助手”会在任务空闲时结束窗口和随包 Node 进程；任务运行中或写入结果未知时会保留进程并提示。
 
 ## 卸载
 
@@ -86,7 +86,7 @@ npm test
 npm run build:macos
 ```
 
-默认输出为 `build/codex手机助手.app`。构建结果不会自动签名或公证。
+默认输出为 `build/codex手机助手.app`。构建会执行本地 ad-hoc 签名和校验，不包含 Apple Developer ID 签名或公证。
 
 ## 故障排查
 

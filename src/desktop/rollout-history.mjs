@@ -7,31 +7,31 @@ import { desktopView } from './view.mjs';
 import { insidePath } from '../common/path-utils.mjs';
 
 // Rollout data is historical and must never authorize live control operations.
-export async function readRolloutHistory(threadId, { codexHome = join(homedir(), '.codex'), maxBytes = 16 * 1024 * 1024, parentThreadId = null } = {}) {
+export async function readRolloutHistory(threadId, { codexHome = join(homedir(), '.codex'), maxBytes = 16 * 1024 * 1024, parentThreadId = null, phoneThreadIds = [] } = {}) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) throw new TypeError('Invalid thread');
   if (parentThreadId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parentThreadId)) throw new TypeError('Invalid parent');
   try {
-    const history = await readRolloutFile(threadId, codexHome, maxBytes, parentThreadId);
+    const history = await readRolloutFile(threadId, codexHome, maxBytes, parentThreadId, phoneThreadIds);
     if (history) return history;
   } catch (error) {
     if (!['ENOENT', 'EACCES'].includes(error.code)) throw error;
   }
-  return readProjectedHistory(threadId, codexHome, parentThreadId);
+  return readProjectedHistory(threadId, codexHome, parentThreadId, phoneThreadIds);
 }
 
-function permittedRow(db, threadId, parentThreadId) {
+function permittedRow(db, threadId, parentThreadId, phoneThreadIds) {
   const row = db.prepare('SELECT rollout_path, title, name, source, thread_source, archived FROM threads WHERE id = ?').get(threadId);
   if (!row || row.archived !== 0) return null;
-  if (parentThreadId === null) return row.source === 'vscode' && ['user', 'agent_created_thread'].includes(row.thread_source) ? row : null;
+  if (parentThreadId === null) return row.source === 'vscode' && (['user', 'agent_created_thread'].includes(row.thread_source) || (row.thread_source === null && phoneThreadIds.includes(threadId))) ? row : null;
   if (row.thread_source !== 'subagent') return null;
   try { return JSON.parse(row.source)?.subagent?.thread_spawn?.parent_thread_id === parentThreadId ? row : null; }
   catch { return null; }
 }
 
-async function readRolloutFile(threadId, codexHome, maxBytes, parentThreadId) {
+async function readRolloutFile(threadId, codexHome, maxBytes, parentThreadId, phoneThreadIds) {
   const db = new DatabaseSync(join(codexHome, 'state_5.sqlite'), { readOnly: true });
   let row;
-  try { row = permittedRow(db, threadId, parentThreadId); }
+  try { row = permittedRow(db, threadId, parentThreadId, phoneThreadIds); }
   finally { db.close(); }
   if (!row || typeof row.rollout_path !== 'string') return null;
   const root = await realpath(join(codexHome, 'sessions'));
@@ -80,10 +80,10 @@ async function readRolloutFile(threadId, codexHome, maxBytes, parentThreadId) {
   } finally { await file.close(); }
 }
 
-function readProjectedHistory(threadId, codexHome, parentThreadId) {
+function readProjectedHistory(threadId, codexHome, parentThreadId, phoneThreadIds) {
   const state = new DatabaseSync(join(codexHome, 'state_5.sqlite'), { readOnly: true });
   let row;
-  try { row = permittedRow(state, threadId, parentThreadId); }
+  try { row = permittedRow(state, threadId, parentThreadId, phoneThreadIds); }
   finally { state.close(); }
   if (!row) return null;
   let db;
@@ -144,11 +144,33 @@ export function projectRolloutHistory(records, threadId, title = '') {
 
 function projectItem(item) {
   if (!item || typeof item.id !== 'string' || !item.id) return null;
+  const base = { id: item.id };
+  const status = ['inProgress', 'completed', 'failed', 'declined', 'interrupted'].includes(item.status) ? item.status : '';
   const textParts = value => Array.isArray(value) ? value.filter(part => (part?.type === 'text' || part?.type === 'Text') && typeof part.text === 'string').map(part => part.text).join('\n') : '';
   if (item.type === 'UserMessage' || item.type === 'AgentMessage') {
-    return { id: item.id, type: item.type === 'UserMessage' ? 'userMessage' : 'agentMessage', text: textParts(item.content) };
+    const phase = item.type === 'AgentMessage' && ['commentary', 'final_answer'].includes(item.phase) ? item.phase : null;
+    return { ...base, type: item.type === 'UserMessage' ? 'userMessage' : 'agentMessage', text: textParts(item.content), ...(phase ? { phase } : {}) };
   }
   if (item.type === 'Reasoning') return { id: item.id, type: 'reasoning', summary: Array.isArray(item.summary_text) ? item.summary_text.filter(text => typeof text === 'string') : [] };
   if (item.type === 'CommandExecution') return { id: item.id, type: 'commandExecution', command: typeof item.command === 'string' ? item.command : '', output: typeof item.aggregated_output === 'string' ? item.aggregated_output : '', status: typeof item.status === 'string' ? item.status : '' };
+  if (item.type === 'FileChange') {
+    const changes = item.changes && typeof item.changes === 'object' && !Array.isArray(item.changes)
+      ? Object.entries(item.changes).filter(([path, change]) => path && change && typeof change === 'object' && !Array.isArray(change))
+        .map(([path, change]) => ({ path, ...(typeof change.unified_diff === 'string' ? { diff: change.unified_diff } : {}) })) : [];
+    return { ...base, type: 'fileChange', status, changes };
+  }
+  if (item.type === 'McpToolCall') return { ...base, type: 'mcpToolCall', status, server: typeof item.server === 'string' ? item.server : '', tool: typeof item.tool === 'string' ? item.tool : '' };
+  if (item.type === 'SubAgentActivity') {
+    if (!['started', 'interacted', 'interrupted', 'completed'].includes(item.kind)) return null;
+    const agentThreadId = typeof item.agent_thread_id === 'string' && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(item.agent_thread_id) ? item.agent_thread_id : null;
+    return { ...base, type: 'subAgentActivity', kind: item.kind, agentPath: typeof item.agent_path === 'string' ? item.agent_path : '', ...(agentThreadId ? { agentThreadId } : {}) };
+  }
+  if (item.type === 'CollabAgentToolCall') {
+    const states = item.agents_states;
+    const agents = states && typeof states === 'object' && !Array.isArray(states)
+      ? Object.entries(states).filter(([id, state]) => id && state && typeof state === 'object' && !Array.isArray(state))
+        .map(([id, state]) => ({ id, status: ['inProgress', 'completed', 'failed', 'interrupted'].includes(state.status) ? state.status : '' })) : [];
+    return { ...base, type: 'collabAgentToolCall', tool: typeof item.tool === 'string' ? item.tool : '', status, agents };
+  }
   return null;
 }

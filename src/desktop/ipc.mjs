@@ -93,14 +93,14 @@ export class DesktopIpc extends EventEmitter {
     return response.result;
   }
 
-  async startTurn(conversationId, turnStart, { expectedOwnerId } = {}) {
+  async startTurn(conversationId, turnStart, { expectedOwnerId, beforeWrite } = {}) {
     if (!turnStart || typeof turnStart !== 'object' || Array.isArray(turnStart) ||
         !turnStart.request || typeof turnStart.request !== 'object' || Array.isArray(turnStart.request) ||
         !turnStart.context || typeof turnStart.context !== 'object' || Array.isArray(turnStart.context)) throw new TypeError('turnStart request and context required');
-    return this.#control('thread-follower-start-turn', conversationId, { turnStart: { request: turnStart.request, context: turnStart.context } }, 2, expectedOwnerId);
+    return this.#control('thread-follower-start-turn', conversationId, { turnStart: { request: turnStart.request, context: turnStart.context } }, 2, expectedOwnerId, beforeWrite);
   }
 
-  async steerTurn(conversationId, input, { cwd, clientUserMessageId = randomUUID(), expectedOwnerId } = {}) {
+  async steerTurn(conversationId, input, { cwd, clientUserMessageId = randomUUID(), expectedOwnerId, beforeWrite } = {}) {
     if (!Array.isArray(input) || input.length === 0 || input.some(item => item?.type === 'text' ? typeof item.text !== 'string' : item?.type !== 'localImage' || !absolutePath(item.path))) throw new TypeError('input must contain text or local images');
     if (!absolutePath(cwd)) throw new TypeError('absolute cwd required');
     if (typeof clientUserMessageId !== 'string' || !clientUserMessageId) throw new TypeError('invalid clientUserMessageId');
@@ -108,7 +108,7 @@ export class DesktopIpc extends EventEmitter {
     const imageAttachments = input.flatMap((item, index) => item.type === 'localImage' ? [{ id: `${clientUserMessageId}:${index}`, src: item.path, localPath: item.path }] : []);
     const restoreMessage = { id: clientUserMessageId, text, cwd, createdAt: Date.now(),
       context: { prompt: text, addedFiles: [], fileAttachments: [], ideContext: null, imageAttachments, workspaceRoots: [cwd] } };
-    return this.#control('thread-follower-steer-turn', conversationId, { input, restoreMessage, clientUserMessageId }, 1, expectedOwnerId);
+    return this.#control('thread-follower-steer-turn', conversationId, { input, restoreMessage, clientUserMessageId }, 1, expectedOwnerId, beforeWrite);
   }
 
   async interruptTurn(conversationId, expectedTurnId, { expectedOwnerId } = {}) {

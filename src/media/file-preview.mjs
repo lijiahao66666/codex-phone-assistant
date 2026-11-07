@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, sep } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { marked } from 'marked';
@@ -33,7 +33,18 @@ export async function readChangedFile(options) {
 
 export async function readLinkedFile(options) {
   const path = linkedFileReference(options);
-  return path ? readFileWithinRoots(path, options) : null;
+  if (!path) return null;
+  const exact = await readFileWithinRoots(path, options);
+  if (exact) return exact;
+  const withoutLine = path.replace(/:\d+(?::\d+)?$/, '');
+  if (withoutLine === path) return null;
+  try { await lstat(path); return null; }
+  catch (error) { if (error?.code !== 'ENOENT') return null; }
+  return readFileWithinRoots(withoutLine, options);
+}
+
+export function linkedPreviewMatches(reference, actualPath) {
+  return typeof reference === 'string' && (actualPath === reference || actualPath === reference.replace(/:\d+(?::\d+)?$/, ''));
 }
 
 export async function verifyPreviewIdentity(result) {

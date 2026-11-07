@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, sep } from 'node:path';
+import { userInputImagePath } from './user-input-media.mjs';
 
 const types = new Map([
   ['.png', 'image/png'], ['.jpg', 'image/jpeg'], ['.jpeg', 'image/jpeg'],
@@ -47,11 +48,14 @@ export function referencedMediaPaths(state) {
   }
   const paths = new Set();
   const add = value => { if (typeof value === 'string' && isAbsolute(value)) paths.add(value); };
-  for (const turn of turns) for (const item of turn.items ?? []) {
-    if (item?.type === 'imageView') add(item.path);
-    if (item?.type === 'imageGeneration') add(item.savedPath);
-    if (item?.type === 'userMessage' || item?.type === 'steeringUserMessage') for (const content of (item.type === 'steeringUserMessage' ? item.input : item.content) ?? []) {
-      if (content?.type === 'localImage') add(content.path);
+  for (const turn of turns) {
+    for (const content of Array.isArray(turn.params?.input) ? turn.params.input : []) add(userInputImagePath(content));
+    for (const item of turn.items ?? []) {
+      if (item?.type === 'imageView') add(item.path);
+      if (item?.type === 'imageGeneration') add(item.savedPath);
+      if (item?.type === 'userMessage' || item?.type === 'steeringUserMessage') for (const content of (item.type === 'steeringUserMessage' ? item.input : item.content) ?? []) {
+        add(userInputImagePath(content));
+      }
     }
   }
   return paths;

@@ -7,6 +7,7 @@
   },
   "scripts": {
     "test": "node --test",
+    "start:relay": "node src/relay/cli.mjs",
     "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -Force",
     "build:macos": "./macos/build.sh"
   },
@@ -15,7 +16,9 @@
     "immer": "10.1.1",
     "jsqr": "1.4.0",
     "marked": "18.1.3",
+    "pdfjs-dist": "6.4.299",
     "qrcode": "1.5.4",
+    "remodex": "4.0.0",
     "ws": "8.22.1"
   }
 }

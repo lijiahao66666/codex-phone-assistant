@@ -128,6 +128,8 @@ export class DesktopSession extends EventEmitter {
     const state = this.value;
     const expectedOwnerId = this.conversation.ownerId;
     if (typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw Object.assign(new Error('Session unavailable'), { code: 'unavailable' });
+    const client = this.client, revision = this.revision;
+    const beforeWrite = () => this.status === 'ready' && this.client === client && this.revision === revision && this.conversation.ownerId === expectedOwnerId && this.value?.id === this.conversationId;
     const cwd = state.cwd;
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw Object.assign(new Error('Invalid working directory'), { code: 'unsupported-state' });
     const history = state.turnHistory?.kind === 'canonical' ? state.turnHistory.history : null;
@@ -145,10 +147,10 @@ export class DesktopSession extends EventEmitter {
     }
     const activeIds = new Set(turns.filter(turn => turn?.status === 'inProgress').map(turn => turn.turnId).filter(id => typeof id === 'string' && id));
     if (state.threadRuntimeStatus?.type === 'idle' && activeIds.size === 0) {
-      return this.client.startTurn(this.conversationId, { request: { threadId: this.conversationId, input, clientUserMessageId: randomUUID() }, context: { inheritThreadSettings: true } }, { expectedOwnerId });
+      return client.startTurn(this.conversationId, { request: { threadId: this.conversationId, input, clientUserMessageId: randomUUID() }, context: { inheritThreadSettings: true } }, { expectedOwnerId, beforeWrite });
     }
     if (!idleOnly && state.threadRuntimeStatus?.type === 'active' && activeIds.size === 1) {
-      return this.client.steerTurn(this.conversationId, input, { cwd, expectedOwnerId });
+      return client.steerTurn(this.conversationId, input, { cwd, expectedOwnerId, beforeWrite });
     }
     throw Object.assign(new Error('Thread state unsupported'), { code: 'unsupported-state' });
   }
