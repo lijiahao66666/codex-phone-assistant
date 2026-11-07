@@ -56,11 +56,25 @@
       <form id="pair-form">
         <label for="code">配对码</label><input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
         <button id="scan" class="pair-secondary" type="button">扫描电脑二维码</button>
-        <section id="scanner" hidden><video id="camera" autoplay muted playsinline></video><canvas id="scan-canvas" hidden></canvas><button id="stop-scan" class="pair-secondary" type="button">关闭相机</button></section>
         <p id="pair-error" class="pair-error" role="alert" hidden></p>
         <button id="submit" class="pair-submit" type="submit">配对</button><button id="cancel-pair" class="pair-secondary" type="button" hidden>取消等待</button>
       </form>
       <p class="download-entry">还没有安装电脑端？<a href="/download/">下载电脑端</a></p>
+    </section>
+  </div>
+  <section id="scanner" class="scanner" role="dialog" aria-modal="true" aria-labelledby="scanner-title" aria-describedby="scan-status" hidden>
+    <video id="camera" autoplay muted playsinline></video><canvas id="scan-canvas" hidden></canvas>
+    <header class="scanner-header"><button id="stop-scan" class="scanner-close" type="button" aria-label="关闭扫码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button><h2 id="scanner-title">扫描二维码</h2></header>
+    <div class="scanner-guide" aria-hidden="true"></div>
+    <div class="scanner-footer"><p id="scan-status" role="status" aria-live="polite">将电脑端的配对二维码放入框内</p><button id="scan-manual" type="button">输入配对码</button></div>
+  </section>
+  <div id="pairing-conflict" class="pairing-conflict" hidden>
+    <button id="pairing-conflict-scrim" class="pair-scrim" type="button" aria-label="关闭提示"></button>
+    <section class="pair-dialog pairing-conflict-dialog" role="alertdialog" aria-modal="true" aria-labelledby="pairing-conflict-title">
+      <h2 id="pairing-conflict-title">手机配对已切换</h2>
+      <p id="pairing-conflict-message">此电脑已与另一台手机配对。点击“恢复本机”，可切回当前手机。</p>
+      <div class="pairing-conflict-actions"><button id="pairing-conflict-dismiss" class="pair-secondary" type="button">知道了</button><button id="pairing-conflict-restore" class="pair-submit" type="button">恢复本机</button></div>
+      <p id="pairing-conflict-error" class="pair-error" role="alert" hidden></p>
     </section>
   </div>
 </body>

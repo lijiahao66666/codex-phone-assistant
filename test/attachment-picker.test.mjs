@@ -128,11 +128,13 @@ test('a video at the 10 MB limit can be selected without uploading automatically
   assert.ok(requests.every(url => !/uploads|messages/.test(url)));
 });
 
+
 test('new chat uses the same mixed attachment picker and removable thumbnails before a thread exists', async () => {
   const { context, nodes, revoked, requests } = await setup();
   vm.runInContext("selectedId=null; newDraft={projectId:'project',attachments:[],pending:false,uncertain:false}; updateComposer()", context);
   nodes.get('#attachment-toggle').click();
   assert.equal(nodes.get('#attachment-file').clicks, 0);
+  assert.equal(nodes.get('#attachment-menu').hidden, false);
   nodes.get('#file-choose').click();
   assert.equal(nodes.get('#attachment-file').clicks, 1);
   const input = nodes.get('#attachment-file');

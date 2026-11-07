@@ -168,6 +168,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       } else connection.terminate();
     } });
     scheduler = connectionScheduler;
+    const deviceCleanups = new Map(), deviceTransitions = new Map(), deviceEpochs = new Map();
     const uploads = new Map(), staged = new Map(), revoked = new Set(), inflightUploads = new Map(), readRequests = new Map(), writeReplies = new Map(), pendingClaims = new Set(), sidebarStreams = new Map();
     const removeSidebarStream = id => { const stream = sidebarStreams.get(id); if (!stream) return; sidebarStreams.delete(id); clearTimeout(stream.timer); clearTimeout(stream.listTimer); sidebarStatus?.off('change', stream.notify); threadListChanges?.off('change', stream.listNotify); connectionScheduler.cancelStream(`sidebar:${id}`); connectionScheduler.cancelStream(`thread-list:${id}`); if (!sidebarStreams.size) threadListChanges?.stop(); };
     const addSidebarStream = (id, deviceId) => {
@@ -256,6 +257,18 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return connection.close(1007); }
       if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return connection.close(1007);
       if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'device-restored' && typeof msg.deviceId === 'string') {
+        const epoch = (deviceEpochs.get(msg.deviceId) || 0) + 1; deviceEpochs.set(msg.deviceId, epoch);
+        const transition = Promise.resolve(deviceCleanups.get(msg.deviceId)).then(() => { if (deviceEpochs.get(msg.deviceId) === epoch) revoked.delete(msg.deviceId); });
+        deviceTransitions.set(msg.deviceId, transition); await transition;
+        if (deviceTransitions.get(msg.deviceId) === transition) deviceTransitions.delete(msg.deviceId);
+        return;
+      }
+      if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { deviceEpochs.set(msg.deviceId, (deviceEpochs.get(msg.deviceId) || 0) + 1); revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void session.close().catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); const cleanup = Promise.resolve(deviceCleanups.get(msg.deviceId)).then(() => cleanupDevice(msg.deviceId)).catch(() => {}); deviceCleanups.set(msg.deviceId, cleanup); await cleanup; if (deviceCleanups.get(msg.deviceId) === cleanup) deviceCleanups.delete(msg.deviceId); return; }
+      const deviceEpoch = deviceEpochs.get(msg.deviceId);
+      if (typeof msg.deviceId === 'string') await deviceTransitions.get(msg.deviceId);
+      if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) return;
+      if (connection !== ws || connection.readyState !== WebSocket.OPEN) return;
       if (msg.type === 'recover-chat') {
         const request = { id: msg.id, deviceId: msg.deviceId, cancelled: false };
         writeReplies.set(msg.id, request);
@@ -353,7 +366,6 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         } finally { writeReplies.delete(msg.id); }
         return;
       }
-      if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void session.close().catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); await cleanupDevice(msg.deviceId); return; }
       if (typeof msg.id !== 'string' || msg.id.length > 100) return;
       if (msg.type === 'cancel-reply') { const request = writeReplies.get(msg.id); if (request) { request.cancelled = true; writeReplies.delete(msg.id); } connectionScheduler.cancelRequest(msg.id); return; }
       if (msg.type === 'history-page') {

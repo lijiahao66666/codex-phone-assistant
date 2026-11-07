@@ -8,6 +8,10 @@ loadEarlier.type = 'button'; loadEarlier.className = 'load-earlier'; loadEarlier
 history.after?.(loadEarlier);
 const turns = document.querySelector('#turns');
 const error = document.querySelector('#error');
+const pairingConflict = document.querySelector('#pairing-conflict');
+const pairingConflictDismiss = document.querySelector('#pairing-conflict-dismiss');
+const pairingConflictRestore = document.querySelector('#pairing-conflict-restore');
+const pairingConflictError = document.querySelector('#pairing-conflict-error');
 const sidebar = document.querySelector('#sidebar');
 const scrim = document.querySelector('#scrim');
 const composerForm = document.querySelector('#composer-form');
@@ -169,7 +173,12 @@ async function scopedFetch(url, options = {}) {
   const path = typeof url === 'string' ? url : '';
   if (!path.startsWith('/api/') || path.startsWith('/api/devices')) return fetch(url, options);
   if (!historyScope && window.pairingReady && path !== '/api/host-status') throw new Error('Device identity unavailable');
+  const scopeGeneration = historyScopeGeneration;
   const response = await fetch(url, { ...options, headers: { ...options.headers, ...(historyScope ? { 'x-codex-expected-device': historyScope.deviceId } : {}) } });
+  if (response.status === 401) {
+    const body = await response.clone().json().catch(() => null);
+    if (scopeGeneration === historyScopeGeneration && body?.error === 'device-replaced') showPairingConflict(body.activeDeviceId);
+  }
   if (response.status === 409 && historyScope) {
     const body = await response.clone().json().catch(() => null);
     if (body?.error === 'device-changed') deviceChanged();
@@ -788,7 +797,11 @@ function clearImageDrafts() {
   renderImageDraft();
 }
 function closeAttachmentMenu() { attachmentMenu.hidden = true; attachmentToggle.setAttribute('aria-expanded', 'false'); }
-attachmentToggle.addEventListener('click', () => { if (attachmentToggle.disabled) return; attachmentMenu.hidden = !attachmentMenu.hidden; attachmentToggle.setAttribute('aria-expanded', String(!attachmentMenu.hidden)); });
+attachmentToggle.addEventListener('click', () => {
+  if (attachmentToggle.disabled) return;
+  attachmentMenu.hidden = !attachmentMenu.hidden;
+  attachmentToggle.setAttribute('aria-expanded', String(!attachmentMenu.hidden));
+});
 document.addEventListener?.('click', event => { if (!attachmentControl.contains(event.target)) closeAttachmentMenu(); });
 document.addEventListener?.('keydown', event => { if (event.key === 'Escape' && !attachmentMenu.hidden) { closeAttachmentMenu(); attachmentToggle.focus(); } });
 imageChoose.addEventListener('click', () => { closeAttachmentMenu(); if (imageUploadAvailable && (selectedId || newDraft) && connected) imageFile.click(); });
@@ -1740,7 +1753,8 @@ let visibleStatusTimer;
 let lastVisibleStatusKey = '';
 let pendingStatusRefreshes = 0;
 let pageSuspended = false;
-function pauseBackgroundPolling() {
+function pauseBackgroundPolling({ includePairing = true } = {}) {
+  if (includePairing) { clearTimeout(pairingStatusTimer); pairingStatusTimer = undefined; ++pairingStatusGeneration; }
   clearTimeout(listRetryTimer); listRetryTimer = undefined;
   clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined;
   clearTimeout(hostStatusTimer); hostStatusTimer = undefined;
@@ -1772,13 +1786,72 @@ function refreshChangedThreadList() {
 let hostStatusTimer;
 let pairingAvailable = !window.pairingReady;
 let hostStatusGeneration = 0;
+let pairingStatusTimer;
+let pairingStatusGeneration = 0;
+let replacedActiveDeviceId = null;
+let pairingWasReplaced = false, pairingRestorePending = false, notifiedActiveDeviceId;
+function closePairingConflict() { pairingConflict.hidden = true; pairingConflictError.hidden = true; pairingConflictError.textContent = ''; }
+function showPairingConflict(activeDeviceId) {
+  if (!pairingConflict) return;
+  if (!pairingWasReplaced) { showUnpaired(); pairingWasReplaced = true; }
+  replacedActiveDeviceId = typeof activeDeviceId === 'string' ? activeDeviceId : null;
+  if (notifiedActiveDeviceId !== replacedActiveDeviceId) {
+    notifiedActiveDeviceId = replacedActiveDeviceId;
+    pairingConflict.hidden = false; pairingConflictError.hidden = true;
+    pairingConflictRestore.disabled = pairingRestorePending;
+    pairingConflictRestore.focus?.();
+  }
+  const control = document.querySelector('#unpaired-control');
+  if (control) control.textContent = '配对已切换 · 恢复本机';
+  status('配对已切换', 'error');
+}
+window.showPairingRecovery = () => { if (!pairingWasReplaced) return false; pairingConflict.hidden = false; pairingConflictRestore.focus?.(); return true; };
+pairingConflictDismiss?.addEventListener('click', closePairingConflict);
+document.querySelector('#pairing-conflict-scrim')?.addEventListener('click', closePairingConflict);
+pairingConflictRestore?.addEventListener('click', async () => {
+  if (!pairingWasReplaced || pairingRestorePending) return;
+  pairingRestorePending = true; clearTimeout(pairingStatusTimer); ++pairingStatusGeneration;
+  pairingConflictRestore.disabled = true; pairingConflictError.hidden = true;
+  try {
+    const response = await fetch('/api/pairing/restore', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedActiveDeviceId: replacedActiveDeviceId }) });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      if (body?.error === 'pairing-changed') { throw new Error('配对状态刚刚有变化，请再点一次恢复本机。'); }
+      if (response.status === 401) { pairingWasReplaced = false; closePairingConflict(); showUnpaired(); return; }
+      throw new Error('恢复失败，请稍后再试。');
+    }
+    pairingConflictRestore.disabled = false; closePairingConflict(); replacedActiveDeviceId = null; pairingWasReplaced = false; notifiedActiveDeviceId = undefined; await checkPairingStatus();
+  } catch (error) { pairingConflictError.textContent = error.message || '恢复失败，请稍后再试。'; pairingConflictError.hidden = false; }
+  finally { pairingRestorePending = false; pairingConflictRestore.disabled = false; if (pairingWasReplaced || pairingAvailable) void refreshPairingStatus(); }
+});
+async function refreshPairingStatus() {
+  clearTimeout(pairingStatusTimer); pairingStatusTimer = undefined;
+  if (pageSuspended || document.hidden === true || pairingRestorePending) return;
+  const generation = ++pairingStatusGeneration;
+  try {
+    const response = await fetch('/api/pairing/status', { credentials: 'same-origin', cache: 'no-store' });
+    if (generation !== pairingStatusGeneration || pageSuspended || document.hidden === true || response.status === 404) return;
+    if (response.status === 401 || response.status === 403) { closePairingConflict(); pairingWasReplaced = false; notifiedActiveDeviceId = undefined; showUnpaired(); return; }
+    if (!response.ok) throw new Error('pairing status unavailable');
+    const result = await response.json();
+    if (generation !== pairingStatusGeneration || pageSuspended || document.hidden === true) return;
+    if (result.state === 'replaced') showPairingConflict(result.activeDeviceId);
+    else if (result.state === 'active' && pairingWasReplaced) { closePairingConflict(); pairingWasReplaced = false; notifiedActiveDeviceId = undefined; await checkPairingStatus(); return; }
+  } catch { /* Host status polling remains the source of connection errors. */ }
+  if (!pageSuspended && document.hidden !== true && generation === pairingStatusGeneration) { clearTimeout(pairingStatusTimer); pairingStatusTimer = setTimeout(refreshPairingStatus, 4000); pairingStatusTimer?.unref?.(); }
+}
 async function refreshHostStatus() {
   if (document.hidden === true || pageSuspended) return;
   const generation = ++hostStatusGeneration;
   clearTimeout(hostStatusTimer);
   try {
-    const response = await fetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store' });
-    if (response.status === 401 || response.status === 403) { if (generation === hostStatusGeneration) showUnpaired(); return; }
+    const response = await scopedFetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store' });
+    if (generation !== hostStatusGeneration) return;
+    if (response.status === 401 || response.status === 403) {
+      const body = await response.clone().json().catch(() => null);
+      if (body?.error === 'device-replaced') { showPairingConflict(body.activeDeviceId); return; }
+      if (generation === hostStatusGeneration) showUnpaired(); return;
+    }
     if (!response.ok) throw new Error('offline');
     const result = await response.json();
     if (typeof result.online !== 'boolean') return;
@@ -2724,7 +2797,8 @@ async function connect(id, attempt = 0, preserveView = false) {
 }
 function showUnpaired() {
   pairingAvailable = false;
-  stopSidebarStatuses(); pauseBackgroundPolling(); ++listRequestGeneration; ++hostStatusGeneration;
+  resetHistoryScope(true);
+  stopSidebarStatuses(); pauseBackgroundPolling({ includePairing: false }); ++listRequestGeneration; ++hostStatusGeneration;
   clearTimeout(reconnectTimer); active?.abort(); active = undefined; selectedId = null;
   clearRecentViews(); clearConversation(); homeErrorSource = null; error.hidden = true; error.textContent = '';
   deviceMenu.hidden = true;
@@ -2740,6 +2814,7 @@ async function startPairedHome() {
   await loadDevices();
   if (!pairingAvailable || !historyScope) return;
   connectSidebarStatuses(); void loadThreads(); void loadCapabilities(); void loadModels(); void refreshHostStatus();
+  if (pairingConflict) void refreshPairingStatus();
 }
 async function checkPairingStatus(pending) {
   if (pageSuspended || document.hidden === true) return;
@@ -2749,11 +2824,14 @@ async function checkPairingStatus(pending) {
     if (pending) result = await pending;
     else {
       const response = await fetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store' });
-      result = response.ok ? 'paired' : response.status === 401 || response.status === 403 ? 'unpaired' : 'unavailable';
+      const detail = response.status === 401 ? await response.json().catch(() => null) : null;
+      if (detail?.error === 'device-replaced') window.pairingConflictState = detail;
+      result = response.ok ? 'paired' : detail?.error === 'device-replaced' ? 'replaced' : response.status === 401 || response.status === 403 ? 'unpaired' : 'unavailable';
     }
   } catch { result = 'unavailable'; }
   if (pageSuspended || document.hidden === true || generation !== hostStatusGeneration) return;
   if (result === 'paired') startPairedHome();
+  else if (result === 'replaced') { showPairingConflict(window.pairingConflictState?.activeDeviceId); void refreshPairingStatus(); }
   else if (result === 'unpaired') showUnpaired();
   else {
     connection.hidden = false;
@@ -2767,6 +2845,7 @@ async function checkPairingStatus(pending) {
 if (window.pairingReady) { status('连接中', 'connecting'); showConversationLoading(); void checkPairingStatus(window.pairingReady); }
 else startPairedHome();
 document.addEventListener?.('visibilitychange', () => {
+  if (document.hidden !== true && !pageSuspended && (pairingAvailable || pairingWasReplaced)) void refreshPairingStatus();
   if (document.hidden === true) pauseBackgroundPolling();
   else if (!pageSuspended && pairingAvailable) { void loadThreads(); void refreshHostStatus(); }
   else if (!pageSuspended && window.pairingReady) void checkPairingStatus();
@@ -2775,6 +2854,7 @@ window.addEventListener('pagehide', () => { cancelPendingRender(); pageSuspended
 window.addEventListener('pageshow', event => {
   if (!event.persisted) return;
   pageSuspended = false;
+  if (pairingConflict) void refreshPairingStatus();
   if (!pairingAvailable) { if (window.pairingReady) void checkPairingStatus(); return; }
   if (!selectedId) connectSidebarStatuses();
   void loadDevices();

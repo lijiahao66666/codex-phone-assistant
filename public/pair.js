@@ -8,6 +8,7 @@ const errorMessage = document.querySelector('#pair-error');
 const scanButton = document.querySelector('#scan');
 const stopButton = document.querySelector('#stop-scan');
 const scanner = document.querySelector('#scanner');
+const scanStatus = document.querySelector('#scan-status');
 const video = document.querySelector('#camera');
 const canvas = document.querySelector('#scan-canvas');
 const cancelPair = document.querySelector('#cancel-pair');
@@ -25,6 +26,10 @@ let selectedQrToken = scanned && tokenPattern.test(scanned) ? scanned : null;
 window.pairingReady = (async () => {
   try {
     const response = await fetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store' });
+    if (response.status === 401) {
+      const result = await response.json().catch(() => null);
+      if (result?.error === 'device-replaced') { window.pairingConflictState = result; return 'replaced'; }
+    }
     return response.ok ? 'paired' : response.status === 401 || response.status === 403 ? 'unpaired' : 'unavailable';
   } catch { return 'unavailable'; }
 })();
@@ -32,6 +37,7 @@ window.pairingReady = (async () => {
 function showError(message) {
   errorMessage.textContent = message;
   errorMessage.hidden = !message;
+  if (!scanner.hidden && message) scanStatus.textContent = message;
 }
 codeInput.addEventListener('input', () => { selectedQrToken = null; showError(''); });
 
@@ -63,14 +69,18 @@ scanButton.addEventListener('click', async () => {
   const generation = scanGeneration;
   scanButton.disabled = true;
   showError('');
+  codeInput.blur();
+  scanner.hidden = false;
+  scanStatus.textContent = '正在打开相机…';
+  stopButton.focus();
   try {
     const camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
     if (generation !== scanGeneration) { camera.getTracks().forEach(track => track.stop()); return; }
     stream = camera;
     video.srcObject = camera;
-    scanner.hidden = false;
     await video.play();
     if (generation !== scanGeneration) return;
+    scanStatus.textContent = '将电脑端的配对二维码放入框内';
     const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context) throw new Error('camera unavailable');
     scanTimer = setTimeout(() => { stopScan(); showError('扫码超时，请重试或输入配对码'); }, 60000);
@@ -97,11 +107,13 @@ scanButton.addEventListener('click', async () => {
     showError(error?.name === 'NotAllowedError' ? '相机权限未开启，请在浏览器设置中允许，或输入配对码' : '无法打开相机，请重试或输入配对码');
   }
 });
-stopButton.addEventListener('click', stopScan);
+stopButton.addEventListener('click', () => { stopScan(); scanButton.focus(); });
+document.querySelector('#scan-manual').addEventListener('click', () => { stopScan(); codeInput.focus(); });
+window.addEventListener('keydown', event => { if (event.key === 'Escape' && !scanner.hidden) { stopScan(); scanButton.focus(); } });
 let pairGeneration = 0;
 let pageActive = true;
 cancelPair.addEventListener('click', () => { pairGeneration++; cancelPair.hidden = true; submitButton.disabled = false; showError('已取消等待'); });
-function openPairing() { overlay.hidden = false; showError(''); }
+function openPairing() { if (window.showPairingRecovery?.()) return; overlay.hidden = false; showError(''); }
 function closePairing() { stopScan(); pairGeneration++; overlay.hidden = true; cancelPair.hidden = true; submitButton.disabled = false; selectedQrToken = null; }
 unpairedControl.addEventListener('click', openPairing);
 pairAnother.addEventListener('click', () => { document.querySelector('#devices').open = false; openPairing(); });
