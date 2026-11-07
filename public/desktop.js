@@ -1686,24 +1686,33 @@ async function loadDevices() {
 }
 const liveTaskStatus = new Map();
 let sidebarEvents, sidebarWatchdog, sidebarEventGeneration = 0, sidebarStatusSnapshot = null;
+function taskStatusIsActive(state) {
+  return ['active', 'inProgress', 'running', 'busy', 'processing'].includes(state);
+}
 function setTaskIndicator(marker, state) {
   if (!marker) return;
-  marker.hidden = state !== 'active';
-  const unread = marker.nextElementSibling;
-  if (unread?.classList.contains('task-unread')) unread.hidden = !marker.hidden;
+  const active = taskStatusIsActive(state);
+  marker.hidden = !active;
+  marker.dataset.status = active ? 'active' : 'idle';
   marker.className = 'task-active';
-  marker.title = '进行中';
-  marker.setAttribute('aria-label', marker.title);
+  marker.title = active ? '进行中' : '';
+  marker.setAttribute('aria-label', active ? '进行中' : '');
 }
 function applySidebarStatuses() {
   for (const task of projectList.querySelectorAll?.('.task') || []) {
     const marker = task.querySelector?.('.task-active');
-    if (marker) marker.hidden = !(liveTaskStatus.get(task.dataset.id) === 'active' || sidebarStatusSnapshot?.get(task.dataset.id) === 'active');
+    const observed = sidebarStatusSnapshot?.get(task.dataset.id) ?? task.dataset.status;
+    setTaskIndicator(marker, liveTaskStatus.get(task.dataset.id) === 'active' ? 'active' : observed);
   }
 }
 function acceptSidebarStatuses(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 4 || Object.entries(value).some(([id, state]) => !uuid.test(id) || !['active', 'idle', 'unknown'].includes(state))) return;
-  sidebarStatusSnapshot = new Map(Object.entries(value)); applySidebarStatuses();
+  sidebarStatusSnapshot = new Map(Object.entries(value));
+  for (const task of projectList.querySelectorAll?.('.task') || []) {
+    const state = sidebarStatusSnapshot.get(task.dataset.id);
+    if (state) task.dataset.status = state;
+  }
+  applySidebarStatuses();
 }
 function stopSidebarStatuses() { ++sidebarEventGeneration; clearTimeout(sidebarWatchdog); sidebarEvents?.close(); sidebarEvents = undefined; sidebarStatusSnapshot = typeof EventSource === 'undefined' ? null : new Map(); applySidebarStatuses(); }
 function connectSidebarStatuses({ allowSelected = false } = {}) {
@@ -1752,11 +1761,11 @@ function chevronIcon() {
 function updateLiveTaskStatus(id, status) {
   if (!id) return;
   clearStatusHandover(id);
-  if (status === 'active') liveTaskStatus.set(id, status); else liveTaskStatus.delete(id);
+  if (taskStatusIsActive(status)) liveTaskStatus.set(id, 'active'); else liveTaskStatus.delete(id);
   for (const task of projectList.querySelectorAll('.task')) {
     if (task.dataset.id !== id) continue;
     const marker = task.querySelector?.('.task-active');
-    if (marker) { marker.hidden = !(status === 'active' || sidebarStatusSnapshot?.get(id) === 'active'); marker.className = 'task-active'; marker.title = '进行中'; marker.setAttribute('aria-label', '进行中'); }
+    setTaskIndicator(marker, taskStatusIsActive(status) || taskStatusIsActive(sidebarStatusSnapshot?.get(id)) ? 'active' : 'idle');
   }
 }
 function renderTask(task) {
@@ -1764,10 +1773,11 @@ function renderTask(task) {
   const button = element('button', 'task', '');
   button.type = 'button';
   button.dataset.id = task.id;
+  button.dataset.status = task.status?.type || task.status || 'unknown';
   button.setAttribute('aria-current', String(task.id === selectedId));
   button.append(element('span', 'task-title', task.title || '未命名任务'));
   const indicator = element('span', 'task-active', ''); indicator.title = '进行中'; indicator.setAttribute('aria-label', '进行中');
-  const observedStatus = sidebarStatusSnapshot ? sidebarStatusSnapshot.get(task.id) : (task.status?.type || task.status);
+  const observedStatus = sidebarStatusSnapshot?.get(task.id) ?? button.dataset.status;
   button.append(indicator);
   if (task.unread === true && task.id !== selectedId) { const dot = element('span', 'task-unread', ''); dot.title = '未读'; dot.setAttribute('aria-label', '未读'); button.append(dot); }
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : observedStatus);
