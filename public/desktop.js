@@ -2927,10 +2927,29 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     else if (Number.isFinite(oldScrollTop)) conversation.scrollTop = oldScrollTop;
     if (historyScrollThread !== selectedId) { historyScrollThread = selectedId; previousHistoryScrollTop = conversation.scrollTop; }
   }
+  reconcileOutgoing(view);
   updateHistoryControl();
   updateScrollButton();
   renderSummary(view, fileTargets);
   status(live ? '已连接' : '仅查看历史', live ? 'ready' : 'error');
+}
+// A dispatched placeholder must not survive once the same text shows up as a
+// real user turn, otherwise it lingers under the conversation as a duplicate.
+function reconcileOutgoing(view) {
+  const key = outgoingScopeKey(view.id), entries = outgoingMessages.get(key);
+  if (!entries?.length) return;
+  const delivered = new Set();
+  for (const turn of Array.isArray(view.turns) ? view.turns : []) {
+    for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+      if (item?.type === 'userMessage' && typeof item.text === 'string') delivered.add(item.text);
+    }
+  }
+  if (!delivered.size) return;
+  const remaining = entries.filter(entry => !(entry.messageDispatched && delivered.has(entry.text)));
+  if (remaining.length === entries.length) return;
+  if (remaining.length) outgoingMessages.set(key, remaining); else outgoingMessages.delete(key);
+  renderOutgoingMessages();
+  updateComposer();
 }
 let summaryFilesExpanded = false, summaryAgentsExpanded = false;
 function renderSummary(view, fileTargets = new Map()) {

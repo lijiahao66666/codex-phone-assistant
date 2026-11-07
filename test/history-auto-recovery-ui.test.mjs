@@ -128,3 +128,11 @@ test('thread list sends visible ids as a POST body so the relay can resolve runn
   assert.equal(call.options.headers['content-type'],'application/json');
   assert.deepEqual(JSON.parse(call.options.body).visibleThreads,[id]);
 });
+
+test('a dispatched placeholder is dropped once the same text arrives as a real turn',async()=>{
+  const f=await fixture();
+  f.run("connected=true;outgoingMessages.set(outgoingScopeKey(selectedId),[{localId:'local-1',scopeKey:outgoingScopeKey(selectedId),scopeGeneration:historyScopeGeneration,threadId:selectedId,text:'你好',images:[],state:'unknown',messageDispatched:true}])");
+  assert.equal(f.run('hasPendingOutgoing(selectedId)'),true);
+  f.run("streamView={id:selectedId,title:'t',runtimeStatus:'idle',turns:[{id:'turn',status:'completed',items:[{id:'m',type:'userMessage',text:'你好'}]}],requests:[],history:{complete:true}};showState(streamView)");
+  assert.equal(f.run('(outgoingMessages.get(outgoingScopeKey(selectedId))||[]).length'),0);
+});
