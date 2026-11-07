@@ -61,12 +61,12 @@ test('selecting plan mode keeps the menu open through pending and confirmed stat
   nodes.get('#attachment-toggle').click();
   const pending = nodes.get('#mode-choose').listeners.click();
   assert.equal(nodes.get('#attachment-menu').hidden, false);
-  assert.equal(nodes.get('#mode-choose').textContent, '正在切换模式');
+  assert.equal(nodes.get('#mode-choose').textContent, '计划');
   assert.equal(nodes.get('#mode-choose').disabled, true);
   confirm({ ok: true }); await pending;
   assert.equal(nodes.get('#attachment-menu').hidden, false);
   vm.runInContext("liveMode='plan'; modeChanges.delete(selectedId); updateComposer()", context);
-  assert.equal(nodes.get('#mode-choose').textContent, '计划模式 ✓');
+  assert.equal(nodes.get('#mode-choose').textContent, '计划');assert.equal(nodes.get('#mode-choose').dataset.active, 'true');
   assert.equal(nodes.get('#attachment-menu').hidden, false);
   assert.equal(requests.filter(url => url.endsWith('/mode')).length, 1);
   nodes.get('#attachment-toggle').click();

@@ -107,6 +107,7 @@ function createPicker(select, { className, title, placeholder, direction = 'up',
 const modelPicker = createPicker(modelControl, { className: 'picker-model', title: '选择模型', placeholder: '模型' });
 const effortPicker = createPicker(effortControl, { className: 'picker-effort', title: '选择推理强度', placeholder: '强度', align: 'right' });
 modelControls.append?.(modelPicker.trigger, effortPicker.trigger, modelPicker.panel, effortPicker.panel);
+modelControls.insertBefore?.(modeChoose, modelPicker.trigger);
 const projectPicker = createPicker(currentProject, { className: 'picker-project', title: '选择项目目录', placeholder: '项目', direction: 'down' });
 currentProject.after?.(projectPicker.trigger);
 projectPicker.trigger.after?.(projectPicker.panel);
@@ -1070,7 +1071,8 @@ function updateComposer() {
   const modeChange = selectedId && modeChanges.get(selectedId);
   const pendingMode = selectedId && pendingModeChanges.get(selectedId);
   modeChoose.hidden = !modeAvailable;
-  modeChoose.textContent = modeChange && !modeChange.message.includes('未知') ? '正在切换模式' : (pendingMode || liveMode) === 'plan' ? '计划模式 ✓' : '计划模式';
+  modeChoose.textContent = '计划';
+  modeChoose.dataset.active = String((pendingMode || liveMode) === 'plan');
   modeChoose.disabled = messageInput.disabled || Boolean(modeChange) || Boolean(selectedId && modelChanges.has(selectedId)) || hasPendingOutgoing(selectedId);
   modeStatus.textContent = (modeChange?.message.includes('未知') ? modeChange.message : '') || (selectedId && modelChanges.get(selectedId)?.message) || (selectedId && modeNotices.get(selectedId)) || (pendingMode ? '将在当前回合结束后切换' : '');
   const modelChange = selectedId && modelChanges.get(selectedId);
