@@ -252,3 +252,20 @@ body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-
 .composer-inner:has(.model-controls:not([hidden])){column-gap:2px;padding-bottom:2px}
 .picker-trigger{padding:0 3px}
 .picker-model{padding-right:1px}
+
+/* Panels open up-right from the trigger instead of up-left. */
+.picker-panel.picker-up{left:auto;right:0}
+
+/* Voice moves next to the plus so the model trigger sits directly beside send. */
+.composer-inner:has(.model-controls:not([hidden])){
+  grid-template-columns:auto 34px minmax(0,1fr) 34px;
+  grid-template-rows:auto 34px;
+  column-gap:2px;
+  padding-bottom:0;
+}
+.composer-inner:has(.model-controls:not([hidden])) .attachment-control{grid-column:1;grid-row:2}
+.composer-inner:has(.model-controls:not([hidden])) #voice-input{grid-column:2;grid-row:2}
+.composer-inner:has(.model-controls:not([hidden])) .model-controls{grid-column:3;grid-row:2;justify-self:stretch;width:100%;justify-content:flex-end}
+.composer-inner:has(.model-controls:not([hidden])) #stop-turn,
+.composer-inner:has(.model-controls:not([hidden])) #send-message{grid-column:4;grid-row:2}
+.composer-inner:has(.model-controls:not([hidden])) textarea{min-height:34px;padding:2px 4px 2px}
