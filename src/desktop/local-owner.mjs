@@ -11,7 +11,7 @@ export class LocalOwner extends EventEmitter {
     super();
     if (options?.coordinateWriteForTests !== undefined && (options.allowInsecureForTests !== true || typeof options.coordinateWriteForTests !== 'function')) throw new TypeError('Test write coordinator requires explicit test mode');
     if (options?.rawBridgeForTests !== undefined && (options.allowInsecureForTests !== true || typeof options.rawBridgeForTests !== 'function')) throw new TypeError('Test raw bridge requires explicit test mode');
-    this.options = options; this.state = 'idle'; this.generation = 0; this.threads = new Set(); this.pendingWrites = 0; this.writeGeneration = 0; this.uncertainWrites = false;
+    this.options = options; this.state = 'idle'; this.generation = 0; this.threads = new Set(); this.queuedThreads = new Set(); this.pendingWrites = 0; this.writeGeneration = 0; this.uncertainWrites = false;
   }
   async start() {
     if (this.state !== 'idle') throw new Error('already started');
@@ -28,7 +28,9 @@ export class LocalOwner extends EventEmitter {
     try {
       await client.initialize();
       if (generation !== this.generation) throw new Error('cancelled');
-      this.identityNet = identityNet();
+      this.identityNet = identityNet({ onQueuedFollowUpsChanged: (threadId, queued) => {
+        if (queued) this.queuedThreads.add(threadId); else this.queuedThreads.delete(threadId);
+      } });
       if (this.options.rawBridgeForTests) this.rawBridge = this.options.rawBridgeForTests(client);
       const owner = createDesktopIpcLiveOwner({ socketPath: this.options.socketPath, netModule: this.identityNet,
         startRouterWhenMissing: this.options.startRouterWhenMissing === true,
@@ -116,7 +118,8 @@ export class LocalOwner extends EventEmitter {
     return { threadId };
   }
   runningThreads() {
-    return [...this.threads].filter(id => {
+    return [...new Set([...this.threads, ...this.queuedThreads])].filter(id => {
+      if (this.queuedThreads.has(id)) return true;
       if (!this.owner?.isThreadOwned(id)) return false;
       const snapshot = this.owner._debugSnapshot(id);
       // Missing or unrecognized state is uncertain, so it blocks normal shutdown.

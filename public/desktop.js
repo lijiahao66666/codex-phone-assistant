@@ -23,6 +23,7 @@ const attachmentMenu = document.querySelector('#attachment-menu');
 const imageFile = document.querySelector('#image-file');
 const fileChoose = document.querySelector('#file-choose');
 const modeChoose = document.querySelector('#mode-choose');
+const currentProject = document.querySelector('#current-project');
 const modeStatus = document.querySelector('#mode-status');
 const modelControl = document.createElement('select');
 const modelControls = document.createElement('div');
@@ -90,6 +91,7 @@ async function loadModels() {
   if (generation === modelDeviceGeneration) updateModelControl();
 }
 function updateModelControl() {
+  if (newDraft) { modelControls.hidden = false; renderNewModels(); return; }
   modelControl.replaceChildren();
   const matching = modelCatalog.find(entry => entry.model === liveModel?.model);
   if (!matching) { const option = document.createElement('option'); option.value = ''; option.textContent = liveModel?.model || '模型'; modelControl.append?.(option); }
@@ -119,12 +121,13 @@ async function requestModelChange(model, effort) {
   finally { clearTimeout(timer); if (selectedId === id) updateComposer(); }
 }
 modelControl.addEventListener('change', () => {
+  if (newDraft) return selectNewModel();
   const model = modelControl.value, selected = modelCatalog.find(entry => entry.model === model);
   if (!selected) return updateModelControl();
   const effort = selected.supportedReasoningEfforts.includes(liveModel?.effort) ? liveModel.effort : selected.defaultReasoningEffort;
   return requestModelChange(model, effort);
 });
-effortControl.addEventListener('change', () => requestModelChange(liveModel?.model, effortControl.value));
+effortControl.addEventListener('change', () => newDraft ? selectNewEffort() : requestModelChange(liveModel?.model, effortControl.value));
 const fileInput = document.querySelector('#attachment-file');
 const imageDraft = document.querySelector('#image-draft');
 const sendButton = document.querySelector('#send-message');
@@ -204,6 +207,7 @@ let selectedTitle = '';
 let newDraft = null;
 let savedNewDraft = null;
 let availableProjects = [];
+const threadProjectNames = new Map();
 let currentDeviceId = null;
 const recoveryControl = document.querySelector('#recovery-control');
 const recoverChat = document.querySelector('#recover-chat');
@@ -270,6 +274,11 @@ if (recoveryChannel) recoveryChannel.onmessage = event => {
   recoveries.delete(key);
   if (selectedId === threadId && currentDeviceId === deviceId) updateComposer();
 };
+function canDraftInHistory() {
+  if (!selectedId || newDraft || recoverableHistoryId !== selectedId || !currentDeviceId || !historyScope) return false;
+  const state = recoveryState(currentDeviceId, selectedId);
+  return Boolean(state && ['unavailable', 'clear'].includes(state.status) && !submissions.get(selectedId)?.uncertain);
+}
 function recoveryBlocksWrite() {
   if (!selectedId) return false;
   if (!currentDeviceId || recoveryChecks.get(recoveryKey(currentDeviceId, selectedId))?.status !== 'ready') return true;
@@ -287,13 +296,14 @@ function guardRecoveryControl(button, isPending) {
 function updateRecoveryControl() {
   const key = recoveryKey(currentDeviceId, selectedId), state = recoveryState(currentDeviceId, selectedId), check = recoveryChecks.get(key);
   const checkNotice = check?.status === 'failed' || check?.status === 'locked' || (connected && check?.status === 'checking');
-  const visible = Boolean(selectedId && currentDeviceId && !newDraft && ((recoverableHistoryId === selectedId && !connected) || checkNotice || (state && !['unavailable', 'clear'].includes(state.status))));
+  const visible = Boolean(selectedId && currentDeviceId && !newDraft && (checkNotice || (state && !['unavailable', 'clear'].includes(state.status))));
   recoveryControl.hidden = !visible;
+  recoverChat.hidden = !['failed', 'locked'].includes(check?.status) && state?.status !== 'unknown';
   if (!visible) return;
   const checkingAttempt = state?.checking === true || state?.cancelling === true;
   cancelRecovery.hidden = state?.status !== 'unknown' || !state.requestId;
   cancelRecovery.disabled = checkingAttempt;
-  recoverChat.textContent = check?.status === 'failed' || state?.status === 'unknown' ? '重新检查' : '继续聊天';
+  recoverChat.textContent = '重新检查';
   recoverChat.disabled = checkingAttempt || (state?.status === 'unknown' && !state.requestId) || (state?.status !== 'unknown' && check?.status !== 'failed' && (check?.status !== 'ready' || Boolean(state && !['unavailable', 'clear'].includes(state.status))));
   recoveryStatus.textContent = check?.status === 'failed' ? '无法确认任务状态' : check?.status === 'locked' ? '恢复结果未知，请在电脑上查看任务' : check?.status !== 'ready' ? '正在核对任务状态' : state?.message || '';
 }
@@ -367,8 +377,9 @@ async function checkRecoveryStatus(id, deviceId, stream) {
 }
 const newProjectBar = document.querySelector('#new-project-bar');
 const newProject = document.querySelector('#new-project');
-const newModel = document.querySelector('#new-model');
-const newEffort = document.querySelector('#new-effort');
+const newModel = modelControl;
+const newEffort = effortControl;
+for (const selector of ['#new-model', '#new-effort']) { const old = document.querySelector(selector); if (old) { old.hidden = true; old.disabled = true; } }
 const newChat = document.querySelector('#new-chat');
 let newModels = [];
 function renderNewModels() {
@@ -393,27 +404,31 @@ async function loadNewModels(draft, deviceId) {
   } catch { if (newDraft !== draft || currentDeviceId !== deviceId) return; newModels = []; }
   renderNewModels();
 }
-newModel.addEventListener('change', () => {
-  if (!newDraft || newDraft.pending || newDraft.uncertain) return;
+function selectNewModel() {
+  if (!newDraft || newDraft.pending || newDraft.uncertain || newDraft.prepared) return;
   const model = newModels.find(item => item.model === newModel.value);
   newDraft.model = model?.model || null;
   newDraft.effort = model && model.supportedReasoningEfforts.includes(newDraft.effort) ? newDraft.effort : (model?.supportedReasoningEfforts.includes(model.defaultReasoningEffort) ? model.defaultReasoningEffort : null);
   renderNewModels();
-});
-newEffort.addEventListener('change', () => {
+}
+function selectNewEffort() {
   const model = newModels.find(item => item.model === newDraft?.model);
-  if (newDraft && !newDraft.pending && !newDraft.uncertain && model) newDraft.effort = model.supportedReasoningEfforts.includes(newEffort.value) ? newEffort.value : null;
-});
+  if (newDraft && !newDraft.pending && !newDraft.uncertain && !newDraft.prepared && model) newDraft.effort = model.supportedReasoningEfforts.includes(newEffort.value) ? newEffort.value : null;
+}
 function projectStorageKey() { return currentDeviceId ? `codex-last-project:${currentDeviceId}` : null; }
 function rememberedProject() { try { return localStorage.getItem(projectStorageKey()); } catch { return null; } }
 function saveProject(id) { try { if (projectStorageKey()) localStorage.setItem(projectStorageKey(), id); } catch {} }
 function updateNewProjectOptions() {
   const options = availableProjects.map(project => { const option = element('option', '', project.name || '未命名项目'); option.value = project.id; return option; });
   newProject.replaceChildren(...options);
+  currentProject.replaceChildren(...options.map(option => option.cloneNode(true)));
+  currentProject.hidden = !availableProjects.length || (!selectedId && !newDraft);
+  currentProject.disabled = !newDraft || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
   if (!newDraft) return;
   if (!newDraft.pending && !newDraft.prepared && !newDraft.uncertain && !availableProjects.some(project => project.id === newDraft.projectId)) newDraft.projectId = availableProjects[0]?.id || '';
   newProject.value = newDraft.projectId;
   newProject.disabled = newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
+  currentProject.value = newDraft.projectId;
 }
 function openNewChat(projectId) {
   if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; }
@@ -423,12 +438,14 @@ function openNewChat(projectId) {
   const defaultId = availableProjects.some(project => project.id === projectId) ? projectId : (saved?.projectId || rememberedProject());
   newDraft = { projectId: availableProjects.some(project => project.id === defaultId) ? defaultId : (availableProjects[0]?.id || ''), text: saved?.text || '', attachments: saved?.attachments || [], model: saved?.model ?? null, effort: saved?.effort ?? null, pending: false, uncertain: false };
   selectedId = null; selectedTitle = ''; clearTimeout(reconnectTimer); active?.abort(); active = undefined;
-  clearConversation(); title.textContent = '新聊天'; messageInput.value = newDraft.text; newProjectBar.hidden = false;
+  clearConversation(); title.textContent = '新聊天'; messageInput.value = newDraft.text; newProjectBar.hidden = true;
   newModels = []; renderNewModels(); void loadNewModels(newDraft, currentDeviceId);
   updateNewProjectOptions(); renderImageDraft(); showSidebar(false); status('连接中', 'connecting'); void refreshHostStatus(); updateComposer();
 }
 newChat.addEventListener('click', () => openNewChat());
-newProject.addEventListener('change', () => { if (newDraft && availableProjects.some(project => project.id === newProject.value)) { newDraft.projectId = newProject.value; saveProject(newDraft.projectId); updateComposer(); } });
+function selectDraftProject(value) { if (newDraft && availableProjects.some(project => project.id === value)) { newDraft.projectId = value; saveProject(value); newProject.value = value; currentProject.value = value; updateComposer(); } }
+newProject.addEventListener('change', () => selectDraftProject(newProject.value));
+currentProject.addEventListener('change', () => selectDraftProject(currentProject.value));
 const inputDrafts = new Map();
 const skippedAsyncQuestions = new Set();
 const approvalDrafts = new Map();
@@ -919,7 +936,7 @@ function updateComposer() {
     messageInput.style.height = 'auto';
     messageInput.style.height = `${Math.min(messageInput.scrollHeight, Math.min(300, (window.innerHeight || 844) * 0.35))}px`;
   }
-  messageInput.disabled = newDraft ? !connected || !newDraft.projectId || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared) : !selectedId || !connected || recoveryBlocksWrite();
+  messageInput.disabled = newDraft ? !connected || !newDraft.projectId || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared) : !selectedId || ((!connected || recoveryBlocksWrite()) && !canDraftInHistory());
   imageChoose.hidden = true;
   imageChoose.disabled = !imageUploadAvailable || messageInput.disabled || Boolean(state?.pending || state?.uncertain);
   fileChoose.hidden = !imageUploadAvailable;
@@ -957,9 +974,9 @@ function updateComposer() {
   stopButton.setAttribute('aria-label', stopping ? '正在停止' : '停止任务');
   stopStatus.textContent = stop?.error ? stop.message : '';
   // Recovery/model confirmations can clear a write gate without a new live message.
-  if (selectedId && connected && !newDraft) { const id = selectedId; void Promise.resolve().then(() => runOutgoingQueue(id)); }
+  if (selectedId && (connected || canDraftInHistory()) && !newDraft) { const id = selectedId; void Promise.resolve().then(() => runOutgoingQueue(id)); }
 }
-recoverChat.addEventListener('click', async () => {
+async function recoverSelectedChat() {
   const id = selectedId, deviceId = currentDeviceId;
   if (!id || !deviceId || newDraft) return;
   const key = recoveryKey(deviceId, id), previous = recoveryState(deviceId, id);
@@ -1009,7 +1026,8 @@ recoverChat.addEventListener('click', async () => {
     clearTimeout(timer);
     if (selectedId === id && currentDeviceId === deviceId) updateRecoveryControl();
   }
-});
+}
+recoverChat.addEventListener('click', recoverSelectedChat);
 stopButton.addEventListener('click', async () => {
   flushPendingRender();
   const id = selectedId, turnId = activeTurnId;
@@ -1130,9 +1148,24 @@ function syncOutgoingWithView(view) {
 }
 async function runOutgoingQueue(threadId) {
   const key = outgoingScopeKey(threadId);
-  if (outgoingWorkers.has(key) || outgoingBarriers.has(key) || outgoingWriteBlocked(threadId)) return outgoingWorkers.get(key);
+  if (outgoingWorkers.has(key) || outgoingBarriers.has(key)) return outgoingWorkers.get(key);
   const entry = (outgoingMessages.get(key) || [])[0];
   if (!entry || entry.state !== 'queued' || !outgoingScopeMatches(entry)) return;
+  if (outgoingWriteBlocked(threadId)) {
+    const check = recoveryChecks.get(recoveryKey(currentDeviceId, threadId));
+    if (entry.recoveryRequested && !entry.recoveryStarted && canDraftInHistory() && check?.status === 'ready') {
+      entry.recoveryStarted = true;
+      const work = recoverSelectedChat(); outgoingWorkers.set(key, work);
+      try { await work; }
+      finally {
+        outgoingWorkers.delete(key);
+        const recovery = recoveries.get(recoveryKey(currentDeviceId, threadId));
+        if (outgoingScopeMatches(entry) && (!recovery || recovery.status === 'unavailable')) { entry.state = 'failed'; entry.error = recovery?.message || '暂时无法连接，请恢复草稿后重试'; }
+        if (outgoingScopeMatches(entry)) { renderOutgoingMessages(); updateComposer(); }
+      }
+    }
+    return;
+  }
   const work = sendOutgoing(entry);
   outgoingWorkers.set(key, work);
   try { await work; } finally { outgoingWorkers.delete(key); if (selectedId === threadId) { renderOutgoingMessages(); updateComposer(); } void runOutgoingQueue(threadId); }
@@ -1365,11 +1398,11 @@ composerForm.addEventListener('submit', async event => {
     return;
   }
   const id = selectedId, text = messageInput.value, images = imageDrafts.get(id) || [];
-  if (!id || outgoingWriteBlocked(id) || (!text.trim() && !images.length) || (images.length && !imageUploadAvailable)) return;
+  if (!id || (outgoingWriteBlocked(id) && !canDraftInHistory()) || (!text.trim() && !images.length) || (images.length && !imageUploadAvailable)) return;
   const all = [...outgoingMessages.values()].flat();
   if (all.length >= 16 || all.reduce((bytes, entry) => bytes + entry.images.reduce((n, image) => n + image.file.size, 0), 0) + images.reduce((bytes, image) => bytes + image.file.size, 0) > 80 * 1024 * 1024) { sendStatus.textContent = '待发送消息过多，请先处理聊天中的消息'; return; }
   stopVoice(); voiceStatus.textContent = '';
-  const scopeKey = outgoingScopeKey(id), entry = { localId: `local-${++nextOutgoingId}`, scopeKey, scopeGeneration: historyScopeGeneration, threadId: id, text, images, state: 'queued', messageDispatched: false };
+  const scopeKey = outgoingScopeKey(id), entry = { localId: `local-${++nextOutgoingId}`, scopeKey, scopeGeneration: historyScopeGeneration, threadId: id, text, images, state: 'queued', messageDispatched: false, recoveryRequested: canDraftInHistory() };
   outgoingMessages.set(scopeKey, [...(outgoingMessages.get(scopeKey) || []), entry]);
   drafts.delete(id); imageDrafts.delete(id); messageInput.value = ''; imageFile.value = ''; fileInput.value = '';
   followLatest = true; renderImageDraft(); updateComposer(); renderOutgoingMessages();
@@ -1738,7 +1771,7 @@ function renderTask(task) {
   button.append(indicator);
   if (task.unread === true && task.id !== selectedId) { const dot = element('span', 'task-unread', ''); dot.title = '未读'; dot.setAttribute('aria-label', '未读'); button.append(dot); }
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : observedStatus);
-  button.addEventListener('click', () => { if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) beginStatusHandover(previous); } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); void connect(task.id); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) beginStatusHandover(previous); } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); void connect(task.id); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
@@ -1940,6 +1973,9 @@ async function loadThreads() {
     if (!Array.isArray(data.projects) || !Array.isArray(data.recent)) throw new Error('任务列表数据不可用');
     clearHomeError('list');
     availableProjects = data.projects.filter(project => project && typeof project.id === 'string' && project.id && typeof project.name === 'string');
+    threadProjectNames.clear();
+    for (const project of data.projects) for (const task of Array.isArray(project?.threads) ? project.threads : []) if (uuid.test(task?.id)) threadProjectNames.set(task.id, project.id);
+    for (const task of data.recent) if (uuid.test(task?.id) && typeof task.projectId === 'string') threadProjectNames.set(task.id, task.projectId);
     updateNewProjectOptions();
     const fragment = document.createDocumentFragment();
     for (const project of data.projects) {
@@ -2002,7 +2038,8 @@ function validateRecordedPage(page, id) {
 }
 function recordedHistoryAvailable() {
   const liveComplete = streamView && (streamView.history?.complete === true || (loadedHistory?.complete === true && !loadedHistory.stale));
-  return Boolean(selectedId && !liveComplete && !recordedHistory?.olderComplete);
+  const indexedCandidate = !streamView || recordedHistory || ['history-paginated', 'items-paginated', 'mixed-history', 'on-demand', 'recorded-history'].includes(streamView.history?.reason);
+  return Boolean(selectedId && indexedCandidate && !liveComplete && !recordedHistory?.olderComplete);
 }
 async function loadRecordedPage() {
   const id = selectedId;
@@ -2166,7 +2203,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   if (selectedId && stops.has(selectedId) && stops.get(selectedId).turnId !== activeTurnId && !stops.get(selectedId).pending && !stops.get(selectedId).goalPauseFailed && (activeTurnId || !stops.get(selectedId).error)) stops.delete(selectedId);
   selectedTitle = view.title || selectedTitle || '未命名任务';
   title.textContent = selectedTitle;
-  history.textContent = live ? (loadedHistory?.gap ? '历史可能存在缺口，请刷新' : historyIsStale() ? '历史已变化，刷新后可继续加载' : view.history?.complete ? '' : '部分历史未加载') : '已保存的历史，非实时内容';
+  history.textContent = live ? (loadedHistory?.gap ? '历史可能存在缺口，请刷新' : historyIsStale() ? '历史已变化，刷新后可继续加载' : historyCanLoad ? '部分历史未加载' : '') : '已保存的历史，非实时内容';
   error.hidden = true;
   const fragment = document.createDocumentFragment();
   const questionFragment = document.createDocumentFragment();
@@ -2857,7 +2894,7 @@ async function connect(id, attempt = 0, preserveView = false) {
   }).catch(() => {});
   resetWatchdog();
   try {
-    const response = await fetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1' } });
+    const response = await fetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1', 'x-codex-staged-preview': '1' } });
     if (current.signal.aborted || active !== current) return;
     if (response.status === 401 || response.status === 403) { const message = await responseError(response, '配对状态不可用'); if (active !== current || current.signal.aborted) return; clearRecentViews(); current.abort(); fail(message); return; }
     if (!response.ok || !response.body) throw new Error(await responseError(response, `连接失败 (${response.status})`));

@@ -57,7 +57,7 @@ test('live state keeps loaded old items but exclusively supplies controls, pendi
 
 test('exhausted IPC history continues with indexed history without changing its control source',async()=>{
   const f=await fixture(()=>response(page([turn('older',[item(1)])])));
-  f.run(`connected=true;streamView={id:selectedId,runtimeStatus:'idle',turns:[{id:'latest',status:'completed',items:[{id:'recent',type:'userMessage',text:'recent'}]}],requests:[],history:{historicalHash:'hash',keyField:'id',cursor:null,complete:false}};loadedHistory={hash:'hash',turns:[],nextBefore:null,complete:false};showState(streamView)`);
+  f.run(`connected=true;streamView={id:selectedId,runtimeStatus:'idle',turns:[{id:'latest',status:'completed',items:[{id:'recent',type:'userMessage',text:'recent'}]}],requests:[],history:{historicalHash:'hash',keyField:'id',cursor:null,complete:false,reason:'history-paginated'}};loadedHistory={hash:'hash',turns:[],nextBefore:null,complete:false};showState(streamView)`);
   f.run('loadedHistory.complete=true;showState(streamView)');assert.equal(f.run('historyCanLoad'),false);
   f.run('loadedHistory.complete=false;showState(streamView)');assert.equal(f.run('historyCanLoad'),true);await f.load();
   assert.equal(f.requests.filter(r=>r.url.includes('/history-page?')).length,0);assert.equal(f.requests.filter(r=>r.url.includes('/recorded-history')).length,1);

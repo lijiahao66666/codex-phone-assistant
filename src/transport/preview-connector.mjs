@@ -172,8 +172,9 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     if (stopped) return;
     ws = new WebSocket(target, { headers: { authorization: `Bearer ${secret}` }, handshakeTimeout: 10000, maxPayload: 1024 * 1024 });
     const connection = ws;
-    const connectionScheduler = createWebSocketSendScheduler({ socket: connection, maxMessageBytes: 15 * 1024 * 1024, maxStreamMessageBytes: 8 * 1024 * 1024, maxControlBytes: 16 * 1024 * 1024, reservedControlBytes: 65536, reservedControls: 8, ...(schedulerLimitForTests ? { maxStreams: schedulerLimitForTests } : {}), onError: ({ code, key }) => {
+    const connectionScheduler = createWebSocketSendScheduler({ socket: connection, maxMessageBytes: 15 * 1024 * 1024, maxStreamMessageBytes: 8 * 1024 * 1024, maxControlBytes: 16 * 1024 * 1024, reservedControlBytes: 65536, reservedControls: 8, ...(schedulerLimitForTests ? { maxStreams: schedulerLimitForTests } : {}), onError: ({ code, key, error }) => {
       if ((code === 'message-too-large' || code === 'factory-failed') && key && streams.has(key)) {
+        console.warn('stream-observation', JSON.stringify({ stage: 'projection', code, cause: error?.name || null }));
         const session = streams.get(key); streams.delete(key); clearImageTimer(key); void session.close().catch(() => {});
         send({ type: 'stream-error', id: key, code: code === 'message-too-large' ? 'state-too-large' : 'state-invalid' }, connection, { deviceId: session.uploadDeviceId, cancellable: true });
       } else connection.terminate();
@@ -691,7 +692,10 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       } catch { answer(false); } return; }
       const m = /^\/api\/threads\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/events$/i.exec(msg.path || '');
       if (!m || streams.has(msg.id) || streams.size >= 16) return send({ type: 'end', id: msg.id }, connection);
-      const session = createSession({ conversationId: m[1], hostId: 'local' }); session.uploadDeviceId = msg.deviceId; session.historyWindow = msg.historyWindow === true; streams.set(msg.id, session);
+      // Version 3 clients understand keyed history windows; never stream their
+      // entire loaded desktop history when a request omits the optional flag.
+      const historyWindow = msg.historyWindow === true || msg.viewDelta === 3;
+      const session = createSession({ conversationId: m[1], hostId: 'local' }); session.uploadDeviceId = msg.deviceId; session.historyWindow = historyWindow; streams.set(msg.id, session);
       if (sidebarStatus && msg.sidebarStatus === true && !revoked.has(msg.deviceId)) addSidebarStream(msg.id, msg.deviceId);
       let historyGeneration = 0, historyLoading = null, pendingHistory = null, previousView = null, viewSeq = 0, lastIssued = [], flowGeneration = 0, flowPaused = false, changedSinceReset = true, skipReset = false;
       let latest = null, lastHistory = null, pendingStatus = false, pendingReset = null, pendingPreview = msg.stagedPreview === true;
@@ -711,7 +715,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       });
       const project = (value, issued = lastIssued) => {
         const view = session.projectFull(value, issued);
-        if (!msg.historyWindow) return view;
+        if (!historyWindow) return view;
         try { return makeWindow(view); }
         catch (error) { if (error.message !== 'unstable turn keys') throw error; return view; }
       };
@@ -729,7 +733,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             else if (latest?.status === 'ready') {
               const conversation = project(latest.value);
               const resetSize = Buffer.byteLength(JSON.stringify(conversation));
-              if (msg.historyWindow && resetSize > 8 * 1024 * 1024) {
+              if (historyWindow && resetSize > 8 * 1024 * 1024) {
                 previousView = null; changedSinceReset = false; flowPaused = false; pendingStatus = false; awaitingReset = generation;
                 return JSON.stringify({ type: 'flow-reset', id: msg.id, generation, event: 'status', data: { status: 'unavailable' }, chunkReset: true });
               }
@@ -758,13 +762,13 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           if (!msg.viewDelta) return JSON.stringify({ type: 'event', id: msg.id, event: 'state', data: { revision: latest.revision, conversation } });
           const update = viewUpdate(previousView, conversation, ++viewSeq, msg.viewDelta === 3 ? 3 : msg.viewDelta === 2 ? 2 : 1);
           const encoded = JSON.stringify({ type: 'event', id: msg.id, event: update.event, data: { ...update.data, revision: latest.revision } });
-          if (msg.historyWindow && Buffer.byteLength(encoded) > 8 * 1024 * 1024) {
+          if (historyWindow && Buffer.byteLength(encoded) > 8 * 1024 * 1024) {
             const seq = viewSeq, epoch = ++chunkEpoch; sendingChunks = true;
             void chunker.send({ event: 'state', data: { seq, revision: latest.revision, conversation } }, seq).then(() => {
               if (epoch !== chunkEpoch || streams.get(msg.id) !== session || connection !== ws) return;
               previousView = { seq, conversation }; sendingChunks = false;
               if (chunkDirty) { chunkDirty = false; schedule(); }
-            }).catch(() => { if (epoch !== chunkEpoch) return; sendingChunks = false; if (streams.get(msg.id) === session) { streams.delete(msg.id); void session.close(); send({ type: 'stream-error', id: msg.id, code: 'state-too-large' }, connection, { deviceId: msg.deviceId, cancellable: true }); } });
+            }).catch(error => { if (epoch !== chunkEpoch) return; sendingChunks = false; if (streams.get(msg.id) === session) { const code = error instanceof RangeError && error.message === 'state too large' ? 'state-too-large' : 'state-invalid'; console.warn('stream-observation', JSON.stringify({ stage: 'chunk-transfer', code, cause: error?.name || null })); streams.delete(msg.id); void session.close(); send({ type: 'stream-error', id: msg.id, code }, connection, { deviceId: msg.deviceId, cancellable: true }); } });
             return null;
           }
           previousView = { seq: viewSeq, conversation };
