@@ -2,7 +2,7 @@ import { WebSocket } from 'ws';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DesktopSession } from '../desktop/session.mjs';
 import { desktopView } from '../desktop/view.mjs';
-import { listDesktopThreads } from '../desktop/thread-list.mjs';
+import { listDesktopThreads, ThreadListChanges } from '../desktop/thread-list.mjs';
 import { readRolloutHistory } from '../desktop/rollout-history.mjs';
 import { UploadStore } from '../media/upload-store.mjs';
 import { ChunkUploads } from '../media/chunk-upload.mjs';
@@ -16,6 +16,8 @@ import { StatusPriorities } from '../desktop/status-priorities.mjs';
 import { createWebSocketSendScheduler } from './ws-send-scheduler.mjs';
 import { makeWindow, makePage } from '../desktop/history-pagination.mjs';
 import { BoundedSnapshotStream } from './bounded-snapshot-stream.mjs';
+import { payloadDigest } from '../media/payload-digest.mjs';
+import { createModelService } from '../desktop/model-service.mjs';
 
 export function viewUpdate(previous, conversation, seq, version = 1) {
   const snapshot = { event: 'state', data: { seq, conversation } };
@@ -117,14 +119,23 @@ export async function populateThreadStatuses({ sidebarStatus, statusPriorities, 
 }
 
 // Only one authenticated relay is configured; no arbitrary local HTTP proxying.
-export function createPreviewConnector({ url, secret, hostId, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
+export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
   const target = new URL(url);
   if ((target.protocol !== 'wss:' && !(allowInsecureForTests && target.protocol === 'ws:' && target.hostname === '127.0.0.1')) || target.pathname !== '/connector' || target.search || target.hash || target.username || target.password) throw new Error('WSS connector URL required');
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1) throw new Error('Invalid heartbeat timeout');
-  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
+  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
   const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(); let ws, scheduler, timer, stopped = false;
+  const models = modelRequest ? createModelService({ request: modelRequest, writes, journal: modelJournal, hostId, ...(allowInsecureForTests ? {} : { createObserver: id => createSession({ conversationId: id, hostId: 'local' }) }), sessionFor: (deviceId, id) => [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === deviceId) }) : null;
+  const recoveryLocked = id => {
+    try { return ownerRouter ? ownerRouter.isRecoveryLocked(id) !== false : false; }
+    catch { return true; }
+  };
+  const phoneOptions = options => typeof ownerRouter?.journal?.listThreadIds === 'function' ? { ...options, phoneThreadIds: ownerRouter.journal.listThreadIds(hostId) } : options;
+  const readAuthorizedHistory = (id, options) => readHistory(id, phoneOptions(options));
+  const listAuthorizedThreads = options => listThreads(phoneOptions(options));
   const sidebarStatus = allowInsecureForTests ? (sidebarStatusForTests || null) : new SidebarStatus();
+  const threadListChanges = allowInsecureForTests ? (threadListChangesForTests || null) : new ThreadListChanges();
   const statusPriorities = new StatusPriorities();
   function clearImageTimer(id) { clearTimeout(imageTimers.get(id)); imageTimers.delete(id); }
   function closeStreams() { for (const id of imageTimers.keys()) clearImageTimer(id); for (const session of streams.values()) { session.chunkStop?.(); void session.close().catch(() => {}); } streams.clear(); }
@@ -158,7 +169,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
     } });
     scheduler = connectionScheduler;
     const uploads = new Map(), staged = new Map(), revoked = new Set(), inflightUploads = new Map(), readRequests = new Map(), writeReplies = new Map(), pendingClaims = new Set(), sidebarStreams = new Map();
-    const removeSidebarStream = id => { const stream = sidebarStreams.get(id); if (!stream) return; sidebarStreams.delete(id); clearTimeout(stream.timer); sidebarStatus?.off('change', stream.notify); connectionScheduler.cancelStream(`sidebar:${id}`); };
+    const removeSidebarStream = id => { const stream = sidebarStreams.get(id); if (!stream) return; sidebarStreams.delete(id); clearTimeout(stream.timer); clearTimeout(stream.listTimer); sidebarStatus?.off('change', stream.notify); threadListChanges?.off('change', stream.listNotify); connectionScheduler.cancelStream(`sidebar:${id}`); connectionScheduler.cancelStream(`thread-list:${id}`); if (!sidebarStreams.size) threadListChanges?.stop(); };
     const addSidebarStream = (id, deviceId) => {
       const stream = { deviceId, timer: null, notify: null };
       stream.notify = () => {
@@ -169,7 +180,16 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
           stream.timer = setTimeout(stream.notify, 50); stream.timer.unref?.();
         }
       };
+      stream.listNotify = data => {
+        if (connection !== ws || sidebarStreams.get(id) !== stream || revoked.has(deviceId)) return;
+        clearTimeout(stream.listTimer); stream.listTimer = null;
+        stream.listVersion = data?.version ?? stream.listVersion;
+        if (!connectionScheduler.markStream(`thread-list:${id}`, () => sidebarStreams.get(id) === stream ? JSON.stringify({ type: 'event', id, event: 'thread-list-changed', data: { version: stream.listVersion } }) : null)) {
+          stream.listTimer = setTimeout(() => stream.listNotify(), 50); stream.listTimer.unref?.();
+        }
+      };
       sidebarStreams.set(id, stream); sidebarStatus.on('change', stream.notify); stream.notify();
+      threadListChanges?.on('change', stream.listNotify); threadListChanges?.start();
     };
     function beginClaims() {
       let finish;
@@ -236,6 +256,103 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return connection.close(1007); }
       if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return connection.close(1007);
       if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'recover-chat') {
+        const request = { id: msg.id, deviceId: msg.deviceId, cancelled: false };
+        writeReplies.set(msg.id, request);
+        const cancelled = () => request.cancelled || revoked.has(msg.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN;
+        let locked = false, dispatched = false, registered = false;
+        try {
+          if (!ownerRouter || cancelled() || !/^[0-9a-f-]{36}$/i.test(msg.requestId || '')) throw new Error('unavailable');
+          const attempt = ownerRouter.journal.beginRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId);
+          if (!attempt.inserted) {
+            if (!cancelled()) send({ type: 'response', id: msg.id, status: attempt.status === 'accepted' ? 'accepted' : ['rejected', 'cancelled'].includes(attempt.status) ? 'unavailable' : 'unknown' }, connection, { request, cancellable: true });
+            return;
+          }
+          registered = true;
+          const session = [...streams.values()].find(s => s.conversationId === msg.conversationId && s.uploadDeviceId === msg.deviceId);
+          if (!session || writes.has(msg.conversationId)) throw new Error('unavailable');
+          writes.add(msg.conversationId); locked = true;
+          const history = await readAuthorizedHistory(msg.conversationId);
+          if (cancelled() || ![...streams.values()].includes(session) || history?.id !== msg.conversationId) throw new Error('unavailable');
+          dispatched = true;
+          await ownerRouter.route(msg.conversationId, { isCancelled: cancelled, deviceId: msg.deviceId, requestId: msg.requestId });
+          if (!ownerRouter.journal.finishRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId, 'accepted') && ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId) !== 'accepted') throw new Error('recovery outcome unknown');
+          if (!cancelled()) send({ type: 'response', id: msg.id, status: 'accepted' }, connection, { request, cancellable: true });
+        } catch (error) {
+          let noRecoveryWrite = false;
+          if (dispatched && ['owner-unknown', 'unavailable'].includes(error?.code)) {
+            try { noRecoveryWrite = ownerRouter.isRecoveryLocked(msg.conversationId) === false; } catch {}
+          }
+          if (registered && (!dispatched || noRecoveryWrite)) {
+            try {
+              if (!ownerRouter.journal.finishRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId, 'rejected') && ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId) !== 'rejected') throw new Error('unknown');
+            } catch { noRecoveryWrite = false; dispatched = true; }
+          }
+          if (!cancelled()) send({ type: 'response', id: msg.id, status: !dispatched || noRecoveryWrite ? 'unavailable' : 'unknown' }, connection, { request, cancellable: true });
+        } finally { if (locked) writes.delete(msg.conversationId); writeReplies.delete(msg.id); }
+        return;
+      }
+      if (msg.type === 'cancel-unseen-recovery') {
+        const answer = beginWrite(msg);
+        try {
+          if (answer.cancelled() || !ownerRouter || ownerRouter.isRecoveryLocked(msg.conversationId) !== false || ![...streams.values()].some(s => s.conversationId === msg.conversationId && s.uploadDeviceId === msg.deviceId)) return answer('unavailable');
+          answer(ownerRouter.journal.cancelUnseenRecovery(hostId, msg.deviceId, msg.conversationId, msg.requestId) ? 'accepted' : 'unavailable');
+        } catch { answer('unknown'); }
+        return;
+      }
+      if (msg.type === 'prepare-chat' || msg.type === 'submit-chat') {
+        const request = { id: msg.id, deviceId: msg.deviceId, cancelled: false }, claimed = [];
+        let dispatched = false, finishClaims;
+        writeReplies.set(msg.id, request);
+        const cancelled = () => request.cancelled || revoked.has(msg.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN;
+        try {
+          if (!ownerRouter || cancelled()) throw new Error('unavailable');
+          let result;
+          if (msg.type === 'prepare-chat') result = await ownerRouter.prepare({ ...msg, isCancelled: cancelled });
+          else {
+            const record = ownerRouter.journal.get(hostId, msg.deviceId, msg.requestId);
+            if (!record || record.phase !== 'prepared' || !Array.isArray(msg.attachmentIds)) throw new Error('unavailable');
+            const ctx = await getUploads(), scope = { hostId, deviceId: msg.deviceId, threadId: record.threadId };
+            if (cancelled()) throw new Error('unavailable');
+            finishClaims = beginClaims();
+            for (const id of msg.attachmentIds) {
+              const saved = staged.get(id);
+              if (!saved || saved.creationId !== msg.requestId || saved.deviceId !== msg.deviceId || saved.threadId !== record.threadId) throw new Error('unavailable');
+              const file = ctx.store.claim({ ...scope, id });
+              if (!file) throw new Error('unavailable');
+              claimed.push({ ctx, scope: { ...scope, id }, file }); staged.delete(id);
+            }
+            if (yieldAfterClaimsForTests) await yieldAfterClaimsForTests();
+            const digest = await payloadDigest(msg.text, claimed.map(entry => entry.file), { model: msg.model ?? null, effort: msg.effort ?? null });
+            if (cancelled()) throw new Error('unavailable');
+            finishClaims(); finishClaims = undefined;
+            result = await ownerRouter.submitPrepared({ ...msg, attachments: claimed.map(entry => entry.file), digest, isCancelled: cancelled, onDispatch: () => { dispatched = true; } });
+          }
+          if (!cancelled()) send({ type: 'response', id: msg.id, status: 'accepted', threadId: result.threadId }, connection, { request, cancellable: true });
+        } catch (error) {
+          if (!dispatched) for (const entry of claimed) await entry.ctx.store.discardRejected(entry.scope).catch(() => {});
+          if (!cancelled()) send({ type: 'response', id: msg.id, status: error.code === 'start-unknown' ? 'start-unknown' : error.code === 'invalid-project' ? 'invalid-project' : 'outcome-unknown', ...(error.threadId ? { threadId: error.threadId } : {}) }, connection, { request, cancellable: true });
+        } finally { finishClaims?.(); writeReplies.delete(msg.id); }
+        return;
+      }
+      if (msg.type === 'creation-status') {
+        const answer = beginRead(msg);
+        try { if (!ownerRouter) throw new Error('unavailable'); answer(true, ownerRouter.creationStatus(msg.deviceId, msg.requestId)); } catch { answer(false); }
+        return;
+      }
+      if (msg.type === 'create-chat') {
+        const request = { id: msg.id, deviceId: msg.deviceId, cancelled: false };
+        writeReplies.set(msg.id, request);
+        const cancelled = () => request.cancelled || revoked.has(msg.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN;
+        try {
+          if (!ownerRouter || cancelled()) throw new Error('unavailable');
+          const result = await ownerRouter.create({ projectId: msg.projectId, text: msg.text, requestId: msg.requestId, deviceId: msg.deviceId, model: msg.model, effort: msg.effort, isCancelled: cancelled });
+          if (!cancelled()) send({ type: 'response', id: msg.id, status: 'accepted', threadId: result.threadId }, connection, { request, cancellable: true });
+        } catch (error) {
+          if (!cancelled()) send({ type: 'response', id: msg.id, status: error.code === 'start-unknown' ? 'start-unknown' : error.code === 'invalid-project' ? 'invalid-project' : 'outcome-unknown', ...(error.threadId ? { threadId: error.threadId } : {}) }, connection, { request, cancellable: true });
+        } finally { writeReplies.delete(msg.id); }
+        return;
+      }
       if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void session.close().catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); await cleanupDevice(msg.deviceId); return; }
       if (typeof msg.id !== 'string' || msg.id.length > 100) return;
       if (msg.type === 'cancel-reply') { const request = writeReplies.get(msg.id); if (request) { request.cancelled = true; writeReplies.delete(msg.id); } connectionScheduler.cancelRequest(msg.id); return; }
@@ -292,7 +409,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
         };
         if (!referenced()) return answer(false);
         try {
-          const history = await readHistory(msg.agentThreadId, { parentThreadId: msg.conversationId });
+          const history = await readAuthorizedHistory(msg.agentThreadId, { parentThreadId: msg.conversationId });
           if (!history || history.id !== msg.agentThreadId || session.status !== 'ready' || !referenced() || ![...streams.values()].includes(session) || revoked.has(msg.deviceId)) throw new Error('unavailable');
           return answer(true, history);
         } catch { return answer(false); }
@@ -348,6 +465,15 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
         const answer = (ok, data) => { if (!operation?.cancelled && !revoked.has(msg.deviceId)) send({ type: 'response', id: msg.id, ok, data }, connection, { critical: true, deviceId: msg.deviceId, cancellable: true }); };
         const scope = { hostId, deviceId: msg.deviceId, threadId: msg.conversationId };
         if (![scope.hostId, scope.deviceId, scope.threadId].every(v => typeof v === 'string' && /^[0-9a-f-]{36}$/i.test(v)) || revoked.has(scope.deviceId)) return answer(false);
+        if (msg.creationId) {
+          const record = ownerRouter?.journal?.get(hostId, msg.deviceId, msg.creationId);
+          if (!record || record.phase !== 'prepared' || record.threadId !== scope.threadId) return answer(false);
+          scope.creationId = msg.creationId;
+        }
+        if (msg.action !== 'start') {
+          const saved = uploads.get(msg.uploadId) || staged.get(msg.uploadId);
+          if (!saved || saved.creationId !== scope.creationId) return answer(false);
+        }
         operation = { scope, uploadId: msg.uploadId, cancelled: false };
         inflightUploads.set(msg.id, operation);
         try {
@@ -366,13 +492,25 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
       if (msg.type === 'history-chunk-ack') { readRequests.get(msg.id)?.chunkAck?.(msg); return; }
       if (msg.type === 'chunk-reset-ready') { streams.get(msg.id)?.chunkResetReady?.(msg); return; }
       if (msg.type === 'cancel') { removeSidebarStream(msg.id); const request = readRequests.get(msg.id); if (request) { request.cancelled = true; request.chunkStop?.(); readRequests.delete(msg.id); } connectionScheduler.cancelRequest(msg.id); connectionScheduler.cancelStream(msg.id); clearImageTimer(msg.id); const session = streams.get(msg.id); session?.chunkStop?.(); streams.delete(msg.id); if (session) await session.close(); return; }
+      if (msg.type === 'model-cancel') {
+        const answer = beginWrite(msg), id = msg.conversationId;
+        if (!models || !modelJournal || typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || typeof msg.operationId !== 'string' || !/^[0-9a-f-]{36}$/i.test(msg.operationId) || revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === id && s.uploadDeviceId === msg.deviceId)) return answer('unavailable');
+        try { return answer(models.cancelPrepared(id, msg.operationId) ? 'accepted' : 'unavailable'); } catch { return answer('unavailable'); }
+      }
+      if (msg.type === 'model') {
+        const answer = beginWrite(msg), id = msg.conversationId;
+        if (!models || !modelJournal || typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || recoveryLocked(id)) return answer('unavailable');
+        const result = await models.change({ deviceId: msg.deviceId, threadId: id, model: msg.model, effort: msg.effort ?? null });
+        answer(result.status === 'accepted' || result.status === 'confirmed' ? 'accepted' : result.status === 'unknown' ? 'unknown' : 'unavailable');
+        return;
+      }
       if (msg.type === 'mode') {
         const id = msg.conversationId;
         const answer = beginWrite(msg);
         if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || !['default', 'plan'].includes(msg.mode)) return answer('unavailable');
         const session = [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === msg.deviceId);
         const ownerId = session?.conversation?.ownerId, revision = session?.revision;
-        if (!session || typeof ownerId !== 'string' || !Number.isSafeInteger(revision) || writes.has(id)) return answer('unavailable');
+        if (!session || typeof ownerId !== 'string' || !Number.isSafeInteger(revision) || writes.has(id) || models?.isLocked(id) || recoveryLocked(id)) return answer('unavailable');
         const previous = modeRevisions.get(id);
         if ((previous && previous.ownerId === ownerId &&
             ((previous.session.deref() === session && previous.revision >= revision) || session.value?.latestCollaborationMode?.mode !== previous.target)) ||
@@ -430,7 +568,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
         if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) || typeof msg.text !== 'string' || !Array.isArray(attachmentIds) || attachmentIds.length > 4 || new Set(attachmentIds).size !== attachmentIds.length || attachmentIds.some(value => typeof value !== 'string' || !/^[0-9a-f-]{36}$/i.test(value)) || (!msg.text.trim() && !attachmentIds.length) || Buffer.byteLength(msg.text) > 32768) return answer('unavailable');
         const session = [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === msg.deviceId);
         const ownerId = session?.conversation?.ownerId, revision = session?.revision;
-        if (!session || typeof ownerId !== 'string' || !Number.isSafeInteger(revision) || writes.has(id)) return answer('unavailable');
+        if (!session || typeof ownerId !== 'string' || !Number.isSafeInteger(revision) || writes.has(id) || models?.isLocked(id) || recoveryLocked(id)) return answer('unavailable');
         const previous = sentRevisions.get(id);
         if (previous && previous.ownerId === ownerId && previous.revision >= revision) return answer('unavailable');
         if (!previous && sentRevisions.size >= 1024) return answer('unavailable');
@@ -465,12 +603,41 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
         return;
       }
       if (msg.type !== 'request') return;
+      if (msg.path === '/api/models') { const answer = beginRead(msg); try { if (!models) return answer(false); answer(true, { models: await models.list() }); } catch { answer(false); } return; }
+      const modelStatus = /^\/api\/threads\/([0-9a-f-]{36})\/model-status$/i.exec(msg.path || '');
+      if (modelStatus) {
+        const answer = beginRead(msg);
+        try {
+          if (!models || revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === modelStatus[1] && s.uploadDeviceId === msg.deviceId)) return answer(false);
+          const preparedOperationId = models.prepared(modelStatus[1]);
+          answer(true, { locked: models.isLocked(modelStatus[1]), ...(preparedOperationId ? { preparedOperationId } : {}) });
+        } catch { answer(false); }
+        return;
+      }
+      const recoveryAttempt = /^\/api\/threads\/([0-9a-f-]{36})\/recovery-attempt\/([0-9a-f-]{36})$/i.exec(msg.path || '');
+      if (recoveryAttempt) {
+        const answer = beginRead(msg);
+        try {
+          if (!ownerRouter || revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === recoveryAttempt[1] && s.uploadDeviceId === msg.deviceId)) return answer(false);
+          answer(true, { status: ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, recoveryAttempt[1], recoveryAttempt[2]), locked: ownerRouter.isRecoveryLocked(recoveryAttempt[1]) });
+        } catch { answer(false); }
+        return;
+      }
+      const recoveryStatus = /^\/api\/threads\/([0-9a-f-]{36})\/recovery-status$/i.exec(msg.path || '');
+      if (recoveryStatus) {
+        const answer = beginRead(msg);
+        try {
+          if (!ownerRouter || revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === recoveryStatus[1] && s.uploadDeviceId === msg.deviceId)) return answer(false);
+          answer(true, { locked: ownerRouter.isRecoveryLocked(recoveryStatus[1]) });
+        } catch { answer(false); }
+        return;
+      }
       if (msg.path === '/api/sidebar/events') {
         if (!sidebarStatus || revoked.has(msg.deviceId) || sidebarStreams.has(msg.id) || sidebarStreams.size >= 32) return send({ type: 'end', id: msg.id }, connection);
         addSidebarStream(msg.id, msg.deviceId); return;
       }
       if (msg.path === '/api/threads') { const answer = beginRead(msg); try {
-        const { statusCandidates, ...data } = await listAllThreads(listThreads);
+        const { statusCandidates, ...data } = await listAllThreads(listAuthorizedThreads);
         if (answer.cancelled()) return;
         if (sidebarStatus) {
           await populateThreadStatuses({ sidebarStatus, statusPriorities, deviceId: msg.deviceId, visibleThreads: msg.visibleThreads, handoverThread: msg.handoverThread, data, statusCandidates, streams });
@@ -574,6 +741,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
       };
       session.on('state', event => {
         if (!streams.has(msg.id)) return;
+        if (event.status === 'ready') models?.observe({ deviceId: msg.deviceId, threadId: m[1], session });
         const wasUnavailable = latest?.status === 'unavailable';
         if (event.status !== 'ready' && wasUnavailable && historyLoading) return;
         clearImageTimer(msg.id);
@@ -582,7 +750,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
           latest = { status: 'unavailable' };
           if (!wasUnavailable) { changedSinceReset = true; pendingStatus = true; pendingHistory = null; lastHistory = null; schedule(); }
           lastIssued = [];
-          const reading = Promise.resolve().then(() => readHistory(m[1])).then(conversation => {
+          const reading = Promise.resolve().then(() => readAuthorizedHistory(m[1])).then(conversation => {
             if (conversation && conversation.id === m[1] && streams.get(msg.id) === session && generation === historyGeneration && session.status !== 'ready') {
               if (lastHistory && JSON.stringify(lastHistory) === JSON.stringify(conversation)) return;
               changedSinceReset = true;
@@ -620,7 +788,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
     });
     ws.on('close', () => { for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }); if (!stopped) timer = setTimeout(connect, retryMs); });
   }
-  return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async close() { stopped = true; clearTimeout(timer); closeStreams(); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
+  return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async close() { stopped = true; clearTimeout(timer); closeStreams(); await models?.close(); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

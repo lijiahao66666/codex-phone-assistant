@@ -5,8 +5,8 @@ import { gzipSync } from 'node:zlib';
 // user-supplied paths are never resolved into the filesystem.
 const assets = new Map([
   ['/attachment-preview.mjs', new URL('../../public/attachment-preview.mjs', import.meta.url)],
-  ['/pdf-parser.mjs?v=6.4.299', new URL('../../node_modules/pdfjs-dist/legacy/build/pdf.min.mjs', import.meta.url)],
-  ['/pdf-worker.mjs?v=6.4.299', new URL('../../node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs', import.meta.url)],
+  ['/pdf-parser.mjs?v=6.4.299', new URL('../../public/pdf-parser.mjs', import.meta.url)],
+  ['/pdf-worker.mjs?v=6.4.299', new URL('../../public/pdf-worker.mjs', import.meta.url)],
 ]);
 
 export async function serveAttachmentPreviewAsset(req, res) {

@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var window: NSWindow!
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
+    private var terminationRequested = false
+    private var terminationTimeout: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 620),
@@ -84,20 +86,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             let data = handle.availableData
             guard !data.isEmpty else { return }
             DispatchQueue.main.async {
-                guard let self = self, self.output.count < 4096 else { return }
-                self.output.append(data)
-                guard let raw = String(data: self.output, encoding: .utf8), raw.contains("\n"),
-                      let line = raw.split(separator: "\n").first,
-                      line.hasPrefix("PANEL_URL="),
-                      let url = URL(string: String(line.dropFirst("PANEL_URL=".count))),
-                      url.scheme == "http", url.host == "127.0.0.1", url.port != nil else { return }
-                handle.readabilityHandler = nil
-                self.panelPort = url.port
-                self.webView.load(URLRequest(url: url))
+                self?.consumeRuntimeOutput(data)
             }
         }
-        child.terminationHandler = { [weak self] _ in DispatchQueue.main.async { self?.showError() } }
+        child.terminationHandler = { [weak self] _ in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.terminationTimeout?.cancel()
+                if self.terminationRequested { NSApp.reply(toApplicationShouldTerminate: true) }
+                else { self.showError() }
+            }
+        }
         do { try child.run(); process = child } catch { showError() }
+    }
+
+    private func consumeRuntimeOutput(_ data: Data) {
+        output.append(data)
+        while let newline = output.firstIndex(of: 10) {
+            let line = String(data: output[..<newline], encoding: .utf8) ?? ""
+            output.removeSubrange(...newline)
+            if line == "STOP_BLOCKED", terminationRequested {
+                cancelTermination(message: "任务仍在运行或等待确认，请处理完成后再退出。")
+            } else if panelPort == nil, line.hasPrefix("PANEL_URL="),
+                      let url = URL(string: String(line.dropFirst("PANEL_URL=".count))),
+                      url.scheme == "http", url.host == "127.0.0.1", let port = url.port {
+                panelPort = port
+                webView.load(URLRequest(url: url))
+            }
+        }
+        if output.count > 65536 { output.removeAll(keepingCapacity: true) }
+    }
+
+    private func cancelTermination(message: String) {
+        guard terminationRequested else { return }
+        terminationRequested = false
+        terminationTimeout?.cancel()
+        terminationTimeout = nil
+        NSApp.reply(toApplicationShouldTerminate: false)
+        showWindow()
+        let alert = NSAlert()
+        alert.messageText = "暂时无法退出"
+        alert.informativeText = message
+        alert.addButton(withTitle: "知道了")
+        alert.beginSheetModal(for: window)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -111,8 +143,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let child = process, child.isRunning else { return .terminateNow }
+        if terminationRequested { return .terminateLater }
+        terminationRequested = true
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.cancelTermination(message: "助手尚未完成退出，请稍后再试。")
+        }
+        terminationTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeout)
+        child.terminate()
+        return .terminateLater
+    }
     func applicationWillTerminate(_ notification: Notification) {
-        if let child = process, child.isRunning { child.terminate(); child.waitUntilExit() }
+        terminationTimeout?.cancel()
     }
 }
 

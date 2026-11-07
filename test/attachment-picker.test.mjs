@@ -21,7 +21,7 @@ async function setup({ modeResponse } = {}) {
   const context = vm.createContext({ document, fetch: async url => { requests.push(url); if (url.endsWith('/mode') && modeResponse) return modeResponse; return { ok: true, json: async () => ({ projects: [], recent: [] }) }; }, AbortController, TextDecoder, URL: { createObjectURL: file => `blob:${file.name}`, revokeObjectURL: url => revoked.push(url) }, setTimeout() { return 1; }, clearTimeout() {}, sessionStorage: { removeItem() {} }, window: { addEventListener() {} } });
   vm.runInContext(await readFile(new URL('../public/desktop.js', import.meta.url), 'utf8'), context);
   nodes.get('#attachment-menu').hidden = true;
-  vm.runInContext("selectedId='11111111-1111-1111-1111-111111111111'; connected=true; imageUploadAvailable=true; updateComposer()", context);
+  vm.runInContext("selectedId='11111111-1111-1111-1111-111111111111'; connected=true; imageUploadAvailable=true; currentDeviceId='device'; recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'}); recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'}); updateComposer()", context);
   return { context, nodes, revoked, requests };
 }
 
@@ -126,4 +126,22 @@ test('a video at the 10 MB limit can be selected without uploading automatically
   assert.equal(vm.runInContext('imageDrafts.get(selectedId)[0].file.size', context), 10 * 1024 * 1024);
   assert.equal(vm.runInContext('imageDrafts.get(selectedId)[0].kind', context), 'file');
   assert.ok(requests.every(url => !/uploads|messages/.test(url)));
+});
+
+test('new chat uses the same mixed attachment picker and removable thumbnails before a thread exists', async () => {
+  const { context, nodes, revoked, requests } = await setup();
+  vm.runInContext("selectedId=null; newDraft={projectId:'project',attachments:[],pending:false,uncertain:false}; updateComposer()", context);
+  nodes.get('#attachment-toggle').click();
+  assert.equal(nodes.get('#attachment-file').clicks, 0);
+  nodes.get('#file-choose').click();
+  assert.equal(nodes.get('#attachment-file').clicks, 1);
+  const input = nodes.get('#attachment-file');
+  input.files = [{ name: 'photo.png', type: 'image/png', size: 200 }, { name: 'notes.txt', type: 'text/plain', size: 32 }];
+  input.listeners.change();
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(newDraft.attachments.map(entry=>entry.kind))',context)), ['image','file']);
+  assert.equal(nodes.get('#image-draft').children[0].children[0].tagName,'IMG');
+  nodes.get('#image-draft').children[0].children[1].click();
+  assert.equal(vm.runInContext('newDraft.attachments.length',context),1);
+  assert.deepEqual(revoked,['blob:photo.png']);
+  assert.ok(requests.every(url=>!/uploads|messages|chats/.test(url)));
 });

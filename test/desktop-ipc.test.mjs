@@ -347,6 +347,30 @@ test('mode change rejects stale settings when state changes during owner discove
   } finally { await session.close(); await f.close(); }
 });
 
+for (const runtime of ['idle', 'active']) {
+  test(`message rejects stale ${runtime} state changed during owner discovery`, async () => {
+    let discoveries = 0, writes = 0;
+    const state = type => ({ id: 'thread', cwd: '/tmp', threadRuntimeStatus: { type }, turns: type === 'active' ? [{ turnId: 'turn', status: 'inProgress' }] : [] });
+    const broadcast = (revision, type) => frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'owner', params: { conversationId: 'thread', hostId: 'local', change: { type: 'snapshot', revision, conversationState: state(type) } } });
+    const f = await fixture((socket, msg) => {
+      if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'test-client' } }));
+      else if (msg.method === 'thread-owner-discovery') {
+        discoveries++;
+        const response = frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: {} });
+        socket.write(discoveries === 2 ? Buffer.concat([broadcast(2, runtime === 'idle' ? 'active' : 'idle'), response]) : response);
+      } else if (msg.method === 'thread-stream-following-changed' && msg.params.following) socket.write(broadcast(1, runtime));
+      else if (msg.method === 'thread-follower-start-turn' || msg.method === 'thread-follower-steer-turn') writes++;
+    });
+    const session = new DesktopSession({ conversationId: 'thread', createClient: () => new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 }) });
+    try {
+      const ready = new Promise(resolve => session.on('state', event => { if (event.status === 'ready') resolve(); }));
+      session.start(); await ready;
+      await assert.rejects(session.sendText('test'), { code: 'unavailable' });
+      assert.equal(writes, 0);
+    } finally { await session.close(); await f.close(); }
+  });
+}
+
 test('control reports owner errors and does not retry timed-out writes', async () => {
   let writes = 0;
   const f = await fixture((socket, msg) => {

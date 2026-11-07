@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
-import { createPairRelay } from '../snapshots/relay-2026-11-06/pair-relay.mjs';
+import { createPairRelay } from '../src/relay/server.mjs';
 
 test('upload pipeline is advertised only by its current host and resets on reconnect', async () => {
   const reserve = createServer(); await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));

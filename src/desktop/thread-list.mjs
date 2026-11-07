@@ -1,9 +1,67 @@
 import { DatabaseSync } from 'node:sqlite';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathKey, sameOrInside } from '../common/path-utils.mjs';
+
+// Check the index version, not the complete list. Keep the same read-only
+// connection: SQLite data_version is only comparable on one connection.
+export class ThreadListChanges extends EventEmitter {
+  constructor({ codexHome = join(homedir(), '.codex'), intervalMs = 500 } = {}) {
+    super();
+    this.codexHome = codexHome; this.intervalMs = intervalMs; this.version = 0;
+    this.generation = 0;
+  }
+  start() {
+    if (this.timer) return;
+    const generation = ++this.generation;
+    const poll = async () => {
+      if (this.polling || generation !== this.generation) return;
+      this.polling = true;
+      try {
+        const databasePath = join(this.codexHome, 'state_5.sqlite');
+        const info = await stat(databasePath);
+        if (generation !== this.generation) return;
+        const identity = `${info.dev}:${info.ino}`;
+        let changed = false;
+        if (!this.database || identity !== this.databaseIdentity) {
+          changed = this.databaseIdentity !== undefined;
+          this.database?.close();
+          this.database = new DatabaseSync(databasePath, { readOnly: true });
+          this.databaseIdentity = identity; this.databaseVersion = undefined;
+        }
+        const version = this.database.prepare('PRAGMA data_version').get().data_version;
+        if (this.databaseVersion !== undefined && version !== this.databaseVersion) changed = true;
+        this.databaseVersion = version;
+        this.dirty ||= changed;
+        const statePath = join(this.codexHome, '.codex-global-state.json');
+        const stateInfo = await stat(statePath);
+        if (generation !== this.generation) return;
+        const stamp = `${stateInfo.ino}:${stateInfo.mtimeMs}:${stateInfo.size}`;
+        if (stamp !== this.stateStamp) {
+          const state = JSON.parse(await readFile(statePath, 'utf8'));
+          if (generation !== this.generation) return;
+          const ui = state['electron-persisted-atom-state'] || {};
+          const signature = JSON.stringify([state['local-projects'], state['thread-project-assignments'], state['project-order'],
+            state['projectless-thread-ids'], state['electron-thread-read-state-v1'], ui['local-document-identity'],
+            Object.entries(ui).filter(([key]) => key.startsWith('sidebar-project-expanded-v1-codex:'))]);
+          if (this.stateSignature !== undefined && signature !== this.stateSignature) this.dirty = true;
+          this.stateSignature = signature; this.stateStamp = stamp;
+        }
+        if (this.dirty) { this.dirty = false; this.emit('change', { version: ++this.version }); }
+      } catch { /* Missing/replaced files and incomplete JSON are retried on the next tick. */ }
+      finally { this.polling = false; }
+    };
+    this.timer = setInterval(() => { void poll(); }, this.intervalMs);
+    this.timer.unref?.(); void poll();
+  }
+  stop() {
+    ++this.generation; clearInterval(this.timer); this.timer = null;
+    this.database?.close(); this.database = null;
+  }
+}
 
 function unreadLocalThreads(state) {
   const identity = state['electron-persisted-atom-state']?.['local-document-identity'];
@@ -17,7 +75,7 @@ function unreadLocalThreads(state) {
 }
 
 // This reads desktop-owned indexes; neither file is modified or opened for writing.
-export async function listDesktopThreads({ codexHome = join(homedir(), '.codex'), limit = 200, before = null, includeRecency = false } = {}) {
+export async function listDesktopThreads({ codexHome = join(homedir(), '.codex'), limit = 200, before = null, includeRecency = false, phoneThreadIds = [] } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new TypeError('invalid limit');
   if (before !== null && (!before || !Number.isSafeInteger(before.recency) || typeof before.id !== 'string')) throw new TypeError('invalid cursor');
   const state = JSON.parse(await readFile(join(codexHome, '.codex-global-state.json'), 'utf8'));
@@ -26,10 +84,10 @@ export async function listDesktopThreads({ codexHome = join(homedir(), '.codex')
   try {
     const hasAttachedParent = db.prepare('PRAGMA table_info(threads)').all().some(column => column.name === 'attached_thread_parent_id');
     rows = db.prepare(`SELECT id, title, name, cwd, recency_at_ms AS recency FROM threads
-      WHERE archived = 0 AND source = 'vscode' AND thread_source IN ('user', 'agent_created_thread')
+      WHERE archived = 0 AND source = 'vscode' AND (thread_source IN ('user', 'agent_created_thread') OR (thread_source IS NULL AND id IN (SELECT value FROM json_each(?))))
         ${hasAttachedParent ? 'AND attached_thread_parent_id IS NULL' : ''}
         AND preview <> '' AND (? IS NULL OR recency_at_ms < ? OR (recency_at_ms = ? AND id < ?))
-      ORDER BY recency_at_ms DESC, id DESC LIMIT ?`).all(before?.recency ?? null, before?.recency ?? null,
+      ORDER BY recency_at_ms DESC, id DESC LIMIT ?`).all(JSON.stringify(phoneThreadIds), before?.recency ?? null, before?.recency ?? null,
         before?.recency ?? null, before?.id ?? null, limit + 1);
   } finally { db.close(); }
   const more = rows.length > limit;

@@ -28,7 +28,7 @@ async function fixture(handler) {
   }});
   vm.runInContext(await readFile(new URL('../public/desktop.js',import.meta.url),'utf8'),context);
   await tick();
-  vm.runInContext(`selectedId='${thread}';connected=true;imageUploadAvailable=true;historyScope={hostId:'host',deviceId:'device'};`,context);
+  vm.runInContext(`selectedId='${thread}';connected=true;currentDeviceId='device';recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});imageUploadAvailable=true;historyScope={hostId:'host',deviceId:'device'};`,context);
   return {context,nodes,requests,revoked,run:code=>vm.runInContext(code,context),submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
 }
 function flattened(node){return [node,...node.children.flatMap(flattened)];}

@@ -27,7 +27,7 @@ test('failed attachment can be restored to the composer and only resends after a
   const run=code=>vm.runInContext(code,context);
   const submit=()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}});
   const flattened=node=>[node,...node.children.flatMap(flattened)];
-  run("selectedId='11111111-1111-4111-8111-111111111111'; connected=true; imageUploadAvailable=true; const retainedFile=Object.assign(new Blob(['test']),{name:'test.txt'}); imageDrafts.set(selectedId,[{kind:'file',file:retainedFile,previewPromise:Promise.resolve()}]); messageInput.value='original message';");
+  run("selectedId='11111111-1111-4111-8111-111111111111'; connected=true; currentDeviceId='device'; recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'}); imageUploadAvailable=true; const retainedFile=Object.assign(new Blob(['test']),{name:'test.txt'}); imageDrafts.set(selectedId,[{kind:'file',file:retainedFile,previewPromise:Promise.resolve()}]); messageInput.value='original message';");
   await submit();
   const bubbleText=flattened(run('outgoingList')).map(node=>node.textContent||'').join('\n');
   assert.match(bubbleText,/传输 1\/1 · 503 · unavailable · \d+秒/);
