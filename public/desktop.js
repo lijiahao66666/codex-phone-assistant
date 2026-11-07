@@ -122,7 +122,7 @@ const cancelModelPrepared = document.createElement('button');
 cancelModelPrepared.type = 'button';
 cancelModelPrepared.className = 'unlock-send';
 cancelModelPrepared.hidden = true;
-document.querySelector('.composer')?.append?.(cancelModelPrepared);
+document.querySelector('.send-feedback')?.append?.(cancelModelPrepared);
 let modelCatalog = [], liveModel = null, modelDeviceGeneration = 0, modelWriteGeneration = 0;
 async function modelRequestWithTimeout(url, options = {}) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);

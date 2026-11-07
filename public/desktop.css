@@ -208,3 +208,8 @@ button.file-change-path::after,.file-change-path:not(button)::after,.summary-fil
 .load-earlier[hidden]{display:none}
 /* Stop iOS double-tap zoom on the composer and pickers. */
 body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-option{touch-action:manipulation}
+/* No status text below the composer, and feedback never changes its height. */
+.composer>.send-status,.composer>.voice-status,.composer>.send-feedback>.send-status{display:none!important}
+.composer>.send-feedback{position:absolute;left:0;right:0;bottom:100%;width:auto;max-width:none;margin:0;padding:4px 16px;display:flex;justify-content:center;gap:10px;flex-wrap:wrap;pointer-events:none}
+.composer>.send-feedback>button{pointer-events:auto;border:1px solid #e0e5e2;border-radius:999px;background:#fff;padding:5px 12px;box-shadow:0 2px 8px #00000012}
+.composer>.send-feedback>button[hidden]{display:none}
