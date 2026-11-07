@@ -467,17 +467,45 @@ function updateRecoveryControl() {
   recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理' : pendingAttempt ? '正在连接任务…' : '';
 }
 // Entering a recoverable history thread attaches to it on its own, without
-// waiting for the user to send a message first.
+// waiting for the user to send a message first. An accepted recovery that never
+// turns live is retried a few times instead of spinning forever.
+const historyRecoveryAttempts = new Map();
 function scheduleHistoryRecovery(id, deviceId) {
   if (!id || !deviceId) return;
+  const used = historyRecoveryAttempts.get(id) || 0;
+  if (used > 4) return;
+  historyRecoveryAttempts.set(id, used + 1);
   const key = recoveryKey(deviceId, id);
   let tries = 0;
-  const tick = () => {
+  const tick = async () => {
     if (selectedId !== id || recoverableHistoryId !== id || connected || newDraft) return;
     if (recoveryChecks.get(key)?.status === 'checking' && tries++ < 100) { setTimeout(tick, 100); return; }
+    const state = recoveryState(deviceId, id);
+    if (state?.status === 'unknown' && !state.requestId) Object.assign(state, { status: 'clear', message: '' });
+    if (state?.status === 'unknown' && state.requestId) {
+      // A stored attempt from an earlier session must not pin the composer to
+      // "正在连接任务" forever when the desktop no longer knows about it.
+      const attempt = (state.retries = (state.retries || 0) + 1);
+      if (attempt <= 1) { void checkRecoveryAttempt(id, deviceId, state); return; }
+      await clearRecoveryAttempt(deviceId, id, state);
+      Object.assign(state, { status: 'clear', requestId: null, message: '' });
+    }
+    if (state?.status === 'awaiting-state') {
+      const attempt = (state.retries = (state.retries || 0) + 1);
+      if (attempt > 2) {
+        await clearRecoveryAttempt(deviceId, id, state);
+        Object.assign(state, { status: 'unavailable', requestId: null, message: '' });
+        if (selectedId === id) updateComposer();
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 700 * attempt));
+      if (selectedId !== id || connected) return;
+      await clearRecoveryAttempt(deviceId, id, state);
+      Object.assign(state, { status: 'clear', requestId: null, message: '' });
+    }
     void recoverSelectedChat();
   };
-  setTimeout(tick, 0);
+  setTimeout(() => { void tick(); }, 0);
 }
 async function checkRecoveryAttempt(id, deviceId, state) {
   if (state.checking || state.cancelling || !state.requestId) return;
