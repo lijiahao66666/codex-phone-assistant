@@ -18,14 +18,14 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.0) 下载最新安装包：
+从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.1) 下载最新安装包：
 
 | 平台 | 安装包 | 说明 |
 | --- | --- | --- |
-| Windows | [安装器](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-windows-x64-setup.exe) · [便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-windows-x64.zip) | Windows 10/11 x64 |
-| macOS | [Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-macos-arm64.dmg) | macOS 12+，Apple 芯片 |
+| Windows | [安装器](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64-setup.exe) · [便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64.zip) | Windows 10/11 x64，支持高 DPI |
+| macOS | [Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-macos-arm64.dmg) | macOS 12+，Apple 芯片 |
 
-校验文件：[SHA256SUMS.txt](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/SHA256SUMS.txt)
+校验文件：[SHA256SUMS.txt](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/SHA256SUMS.txt)
 
 安装步骤：
 
@@ -140,6 +140,7 @@ Windows 版已完成以下真实验证：
 
 - 52 项自动化测试全部通过
 - Windows 命名管道握手、项目与任务读取
+- Windows 150% 缩放下的 Per-Monitor V2 清晰渲染
 - H5 配对、历史、发送与停止
 - 关闭到托盘、再次启动唤回
 - 安装、卸载和重新安装

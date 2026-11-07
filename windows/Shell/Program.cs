@@ -10,6 +10,7 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
         using var guard = new Mutex(true, @"Local\codex-phone-assistant", out var created);
         using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\codex-phone-assistant-show");
@@ -32,6 +33,8 @@ internal sealed class PhoneForm : Form
 
     public PhoneForm(EventWaitHandle showEvent)
     {
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         Text = "codex手机助手";
         Width = 500;
         Height = 660;

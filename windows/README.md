@@ -6,11 +6,11 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.0) 下载：
+从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.1) 下载：
 
-- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-windows-x64-setup.exe)
-- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-windows-x64.zip)
-- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/SHA256SUMS.txt)
+- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64-setup.exe)
+- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64.zip)
+- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/SHA256SUMS.txt)
 
 ## 系统要求
 
@@ -93,4 +93,4 @@ npm run build:windows
 
 ## 验证状态
 
-Windows 11 x64 已完成命名管道、项目与任务读取、H5 配对、历史、发送、停止、托盘唤回以及安装/卸载测试。
+Windows 11 x64 已完成命名管道、项目与任务读取、H5 配对、历史、发送、停止、托盘唤回以及安装/卸载测试。150% 系统缩放下窗口按 Per-Monitor V2 原生渲染，避免整窗位图放大造成的模糊。
