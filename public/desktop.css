@@ -287,3 +287,12 @@ body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-
 .composer-inner:has(textarea:not(:placeholder-shown)) #voice-input,
 .composer-inner:has(textarea:not(:placeholder-shown)) #stop-turn,
 .composer-inner:has(textarea:not(:placeholder-shown)) #send-message{align-self:end;margin-bottom:10px}
+
+/* Thread actions sit behind the topbar ⋯ button. */
+.task-actions{font-size:18px;line-height:1}
+.task-menu{position:absolute;z-index:5;top:52px;right:12px;min-width:136px;padding:4px;display:grid;gap:2px;border:1px solid #e2e6e3;border-radius:10px;background:#fff;box-shadow:0 8px 24px #0000001a}
+.task-menu[hidden]{display:none}
+.task-menu button{height:38px;padding:0 12px;border:0;border-radius:7px;background:transparent;text-align:left;font:inherit;color:#252826;cursor:pointer}
+.task-menu button:hover{background:#f2f4f2}
+.task-menu button.danger{color:#b33c36}
+.task-menu button:disabled{opacity:.5}

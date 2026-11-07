@@ -416,6 +416,27 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         peer.send(JSON.stringify({ type: 'cancel-unseen-recovery', id, deviceId: phone.deviceId, conversationId: cancelUnseen[1], requestId: reserved.data.requestId }));
         return;
       }
+      // Archive and delete are list-level thread operations, not turn writes:
+      // they go straight to the owner's app-server instead of a live session.
+      const threadAction = /^\/api\/threads\/([0-9a-f-]{36})\/(archive|delete)$/i.exec(requested);
+      if (threadAction) {
+        if (!uuid.test(threadAction[1])) return send(res, 404, { error: 'not-found' });
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 256);
+        if (res.writableEnded || res.destroyed) return;
+        const data = reserved?.data;
+        if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'thread-action', id, deviceId: phone.deviceId, conversationId: threadAction[1], action: threadAction[2].toLowerCase() }));
+        return;
+      }
       const recovery = /^\/api\/threads\/([0-9a-f-]{36})\/recover$/i.exec(requested);
       if (recovery) {
         if (!uuid.test(recovery[1])) return send(res, 404, { error: 'not-found' });

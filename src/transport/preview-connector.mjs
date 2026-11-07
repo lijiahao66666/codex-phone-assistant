@@ -572,6 +572,24 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         finally { writes.delete(id); }
         return;
       }
+      if (msg.type === 'thread-action') {
+        const id = msg.conversationId, action = msg.action;
+        const answer = beginWrite(msg);
+        if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || !['archive', 'delete'].includes(action)) return answer('unavailable');
+        const owner = ownerRouter?.localOwner;
+        if (!owner || writes.has(id)) return answer('unavailable');
+        writes.add(id);
+        try {
+          // Release this bridge's writer first: a thread the assistant still
+          // holds open looks stuck to the desktop app, so its own archive or
+          // delete of a phone-created task never settles.
+          await owner.request('thread/unsubscribe', { threadId: id }).catch(() => {});
+          await owner.request(`thread/${action}`, { threadId: id });
+          answer('accepted');
+        } catch (error) { answer(['unavailable', 'unsupported-state'].includes(error?.code) ? 'unavailable' : 'unknown'); }
+        finally { writes.delete(id); }
+        return;
+      }
       if (msg.type === 'stop') {
         const id = msg.conversationId;
         const answer = beginWrite(msg);

@@ -11,14 +11,14 @@
   <link rel="icon" type="image/png" href="/app-icon-20261104.png">
   <link rel="apple-touch-icon" href="/app-icon-20261104.png">
   <title>Codex 手机助手</title>
-  <link rel="stylesheet" href="/desktop.css?v=20261107-stable18">
+  <link rel="stylesheet" href="/desktop.css?v=20261107-stable19">
   <link rel="stylesheet" href="/download/home-entry.css?v=20261106-2">
   <script defer src="/markdown-parser.js"></script>
   <script defer src="/html-sanitizer.js"></script>
   <script defer src="/install-prompt.js?v=20261107-stable1"></script>
   <script defer src="/jsQR.js"></script>
   <script defer src="/pair.js?v=20261107-stable1"></script>
-  <script defer src="/desktop.js?v=20261107-stable18"></script>
+  <script defer src="/desktop.js?v=20261107-stable19"></script>
   <script defer src="/download/home-entry.js?v=20261106-2"></script>
 </head>
 <body>
@@ -36,7 +36,8 @@
       <button id="new-chat" class="new-chat" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新聊天</button><div class="side-label">项目</div><nav id="project-list" class="project-list" aria-label="项目和任务"><p class="list-status">加载中...</p></nav>
     </aside>
     <main class="main">
-      <header class="topbar"><button id="open-sidebar" class="icon-button open-sidebar" type="button" aria-label="打开侧栏" title="打开侧栏">☰</button><h1 id="title">尚未选择任务</h1><button id="toggle-summary" class="icon-button summary-toggle" type="button" aria-label="打开任务摘要" aria-expanded="false" title="任务摘要">☷</button></header>
+      <header class="topbar"><button id="open-sidebar" class="icon-button open-sidebar" type="button" aria-label="打开侧栏" title="打开侧栏">☰</button><h1 id="title">尚未选择任务</h1><button id="task-actions" class="icon-button task-actions" type="button" aria-label="任务操作" aria-haspopup="menu" aria-expanded="false" title="任务操作" hidden>⋯</button><button id="toggle-summary" class="icon-button summary-toggle" type="button" aria-label="打开任务摘要" aria-expanded="false" title="任务摘要">☷</button></header>
+      <div id="task-menu" class="task-menu" role="menu" hidden><button id="archive-thread" type="button" role="menuitem">归档任务</button><button id="delete-thread" class="danger" type="button" role="menuitem">删除任务</button></div>
       <div class="device-bar"><details id="devices" class="devices" hidden><summary id="device-current">电脑</summary><div class="device-menu"><div class="device-menu-header"><strong>已配对电脑</strong></div><div id="device-list" class="device-list"></div><button id="pair-another" class="device-add" type="button">配对其他电脑</button></div></details><button id="unpaired-control" class="unpaired-control" type="button" hidden>未配对 · 去配对</button><select id="current-project" class="current-project" aria-label="当前项目" hidden disabled></select><span id="connection" class="connection" role="status">未连接</span></div>
       <div id="new-project-bar" class="new-project-bar" hidden><label for="new-project">项目</label><select id="new-project" aria-label="选择项目"></select><select id="new-model" aria-label="选择模型"><option value="">自动</option></select><select id="new-effort" aria-label="选择推理强度" disabled><option value="">自动</option></select></div>
       <section class="conversation" aria-live="polite">
