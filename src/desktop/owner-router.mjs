@@ -8,7 +8,7 @@ function unavailable(code, cause) {
 
 // The adapters must distinguish an explicit missing owner from an unavailable bus.
 export class OwnerRouter {
-  constructor({ discover, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 10000, recoveryPollMs = 100, competeUnknown = false }) {
+  constructor({ discover, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 5000, recoveryPollMs = 300, competeUnknown = false }) {
     if (typeof discover !== 'function' || !localOwner || typeof projects !== 'function') throw new TypeError('Missing owner adapters');
     this.competeUnknown = competeUnknown;
     this.discover = discover;

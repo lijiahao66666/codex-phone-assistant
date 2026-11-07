@@ -424,7 +424,9 @@ async function finishAcceptedRecovery(id, deviceId, stream) {
   const key = recoveryKey(deviceId, id), state = recoveries.get(key), check = recoveryChecks.get(key);
   // connect() clears the check record when it takes over, so a missing record
   // means there is nothing left to wait for; only a pending/failed check blocks.
-  if (!stream || state?.finishing || state?.status !== 'awaiting-state' || state.liveStream !== stream || recoveryStream !== stream || stream.controller.signal.aborted || (check && check.status !== 'ready')) return;
+  // The stream identity is deliberately not compared: a reconnect replaces the
+  // stream, and pinning to the old one left recovery stuck on "正在连接任务".
+  if (!stream || state?.finishing || state?.status !== 'awaiting-state' || stream.controller.signal.aborted || (check && check.status !== 'ready')) return;
   state.finishing = true;
   const cleared = await clearRecoveryAttempt(deviceId, id, state);
   if (recoveries.get(key) === state) {
@@ -473,46 +475,59 @@ function updateRecoveryControl() {
   if (!visible) return;
   recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理' : pendingAttempt ? '正在连接任务…' : '';
 }
-// Entering a recoverable history thread attaches to it on its own, without
-// waiting for the user to send a message first. An accepted recovery that never
-// turns live is retried a few times instead of spinning forever.
+// Entering a recoverable history thread attaches to it once the user settles on
+// it. Firing on every tap flooded the desktop app-server (rapid switching used
+// to pile up one resume per task), so this waits, keeps only the latest target,
+// and gives up as soon as the selection moves on.
 const historyRecoveryAttempts = new Map();
+let historyRecoveryTimer = null, historyRecoverySeq = 0;
 function scheduleHistoryRecovery(id, deviceId) {
   if (!id || !deviceId) return;
-  const used = historyRecoveryAttempts.get(id) || 0;
-  if (used > 4) return;
-  historyRecoveryAttempts.set(id, used + 1);
-  const key = recoveryKey(deviceId, id);
-  let tries = 0;
-  const tick = async () => {
-    if (selectedId !== id || recoverableHistoryId !== id || connected || newDraft) return;
-    if (recoveryChecks.get(key)?.status === 'checking' && tries++ < 100) { setTimeout(tick, 100); return; }
-    const state = recoveryState(deviceId, id);
-    if (state?.status === 'unknown' && !state.requestId) Object.assign(state, { status: 'clear', message: '' });
-    if (state?.status === 'unknown' && state.requestId) {
-      // A stored attempt from an earlier session must not pin the composer to
-      // "正在连接任务" forever when the desktop no longer knows about it.
-      const attempt = (state.retries = (state.retries || 0) + 1);
-      if (attempt <= 1) { void checkRecoveryAttempt(id, deviceId, state); return; }
-      await clearRecoveryAttempt(deviceId, id, state);
-      Object.assign(state, { status: 'clear', requestId: null, message: '' });
+  if ((historyRecoveryAttempts.get(id) || 0) > 4) {
+    // Give up quietly instead of leaving "正在连接任务" on screen forever.
+    const stuck = recoveryState(deviceId, id);
+    if (stuck?.status === 'awaiting-state') {
+      Object.assign(stuck, { status: 'unavailable', message: '' });
+      if (selectedId === id) updateComposer();
     }
-    if (state?.status === 'awaiting-state') {
-      const attempt = (state.retries = (state.retries || 0) + 1);
-      if (attempt > 2) {
-        await clearRecoveryAttempt(deviceId, id, state);
-        Object.assign(state, { status: 'unavailable', requestId: null, message: '' });
-        if (selectedId === id) updateComposer();
-        return;
-      }
-      await new Promise(resolve => setTimeout(resolve, 700 * attempt));
-      if (selectedId !== id || connected) return;
+    return;
+  }
+  clearTimeout(historyRecoveryTimer);
+  const seq = ++historyRecoverySeq;
+  historyRecoveryTimer = setTimeout(() => {
+    historyRecoveryTimer = null;
+    if (seq !== historyRecoverySeq || selectedId !== id || recoverableHistoryId !== id || connected || newDraft) return;
+    historyRecoveryAttempts.set(id, (historyRecoveryAttempts.get(id) || 0) + 1);
+    void runHistoryRecovery(id, deviceId);
+  }, 900);
+  historyRecoveryTimer?.unref?.();
+}
+async function runHistoryRecovery(id, deviceId) {
+  const state = recoveryState(deviceId, id);
+  if (state?.status === 'unknown' && !state.requestId) Object.assign(state, { status: 'clear', message: '' });
+  if (state?.status === 'unknown' && state.requestId) {
+    // A stored attempt from an earlier session must not pin the composer to
+    // "正在连接任务" forever when the desktop no longer knows about it.
+    const attempt = (state.retries = (state.retries || 0) + 1);
+    if (attempt <= 1) { void checkRecoveryAttempt(id, deviceId, state); return; }
+    await clearRecoveryAttempt(deviceId, id, state);
+    Object.assign(state, { status: 'clear', requestId: null, message: '' });
+  }
+  if (state?.status === 'awaiting-state') {
+    const attempt = (state.retries = (state.retries || 0) + 1);
+    if (attempt > 2) {
       await clearRecoveryAttempt(deviceId, id, state);
-      Object.assign(state, { status: 'clear', requestId: null, message: '' });
+      Object.assign(state, { status: 'unavailable', requestId: null, message: '' });
+      if (selectedId === id) updateComposer();
+      return;
     }
-    void recoverSelectedChat();
-  };
-  setTimeout(() => { void tick(); }, 0);
+    await new Promise(resolve => setTimeout(resolve, 700 * attempt));
+    if (selectedId !== id || connected) return;
+    await clearRecoveryAttempt(deviceId, id, state);
+    Object.assign(state, { status: 'clear', requestId: null, message: '' });
+  }
+  if (selectedId !== id || recoverableHistoryId !== id || connected || newDraft) return;
+  void recoverSelectedChat();
 }
 async function checkRecoveryAttempt(id, deviceId, state) {
   if (state.checking || state.cancelling || !state.requestId) return;
@@ -1246,6 +1261,7 @@ function updateComposer() {
   // Recovery/model confirmations can clear a write gate without a new live message.
   if (selectedId && (connected || canDraftInHistory()) && !newDraft) { const id = selectedId; void Promise.resolve().then(() => runOutgoingQueue(id)); }
 }
+const activeRecoveryAborts = new Map();
 async function recoverSelectedChat() {
   const id = selectedId, deviceId = currentDeviceId;
   if (!id || !deviceId || newDraft) return;
@@ -1275,7 +1291,9 @@ async function recoverSelectedChat() {
     if (selectedId === id && currentDeviceId === deviceId) updateComposer();
     return;
   }
+  activeRecoveryAborts.get(key)?.abort();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30000);
+  activeRecoveryAborts.set(key, controller);
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recover`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: state.requestId }) });
@@ -1291,9 +1309,12 @@ async function recoverSelectedChat() {
       state.status = 'unknown'; state.message = '恢复结果未知，请在电脑上查看任务';
     }
   } catch {
-    if (recoveries.get(key) === state) { state.status = 'unknown'; state.message = '恢复结果未知，请在电脑上查看任务'; }
+    // A superseded controller means the user moved to another task; the newer
+    // attempt owns the state from here.
+    if (activeRecoveryAborts.get(key) === controller && recoveries.get(key) === state) { state.status = 'unknown'; state.message = '恢复结果未知，请在电脑上查看任务'; }
   } finally {
     clearTimeout(timer);
+    if (activeRecoveryAborts.get(key) === controller) activeRecoveryAborts.delete(key);
     if (selectedId === id && currentDeviceId === deviceId) updateRecoveryControl();
   }
 }
@@ -2055,7 +2076,7 @@ function renderTask(task) {
   button.append(indicator);
   if (task.unread === true && task.id !== selectedId) { const dot = element('span', 'task-unread', ''); dot.title = '未读'; dot.setAttribute('aria-label', '未读'); button.append(dot); }
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : observedStatus);
-  button.addEventListener('click', () => { if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) beginStatusHandover(previous); } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); void connect(task.id); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); void connect(task.id); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
@@ -2134,6 +2155,8 @@ function visibleStatusIds() {
   return [...new Set(ids)].slice(0, 4);
 }
 let listRequestGeneration = 0;
+// Back off when the desktop peer is down so a dead bridge is not hammered.
+let listFailureStreak = 0;
 let listChangeTimer;
 function refreshChangedThreadList() {
   clearTimeout(listChangeTimer);
@@ -2260,6 +2283,7 @@ async function loadThreads() {
     if (generation !== listRequestGeneration) return;
     if (!Array.isArray(data.projects) || !Array.isArray(data.recent)) throw new Error('任务列表数据不可用');
     clearHomeError('list');
+    listFailureStreak = 0;
     availableProjects = data.projects.filter(project => project && typeof project.id === 'string' && project.id && typeof project.name === 'string');
     threadProjectNames.clear();
     for (const project of data.projects) for (const task of Array.isArray(project?.threads) ? project.threads : []) if (uuid.test(task?.id)) threadProjectNames.set(task.id, project.id);
@@ -2282,7 +2306,7 @@ async function loadThreads() {
       lastVisibleStatusKey = visibleKey;
       pendingStatusRefreshes = visibleKey ? 2 : 0;
     }
-    const nextDelay = pendingStatusRefreshes ? (pendingStatusRefreshes-- === 2 ? 1000 : 2000) : 10000;
+    const nextDelay = pendingStatusRefreshes ? (pendingStatusRefreshes-- === 2 ? 1500 : 3000) : 20000;
     listRetryTimer = setTimeout(() => { listRetryTimer = undefined; void loadThreads(); }, nextDelay);
     listRetryTimer?.unref?.();
   } catch (e) {
@@ -2291,7 +2315,9 @@ async function loadThreads() {
     projectList.replaceChildren(element('p', 'list-status list-error', message));
     if (!(e instanceof TypeError)) showHomeError('list', message);
     if (retry) {
-      listRetryTimer = setTimeout(() => { listRetryTimer = undefined; void loadThreads(); }, 5000);
+      listFailureStreak = Math.min(listFailureStreak + 1, 4);
+      const retryDelay = Math.min(30000, 3000 * (2 ** (listFailureStreak - 1)));
+      listRetryTimer = setTimeout(() => { listRetryTimer = undefined; void loadThreads(); }, retryDelay);
       listRetryTimer?.unref?.();
     }
   }

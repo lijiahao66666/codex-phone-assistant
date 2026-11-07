@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DesktopSession } from '../desktop/session.mjs';
+import { trace } from '../desktop/diagnostics.mjs';
 import { desktopView } from '../desktop/view.mjs';
 import { listDesktopThreads, ThreadListChanges } from '../desktop/thread-list.mjs';
 import { readRolloutHistory } from '../desktop/rollout-history.mjs';
@@ -284,6 +285,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (msg.type === 'recover-chat') {
         const request = { id: msg.id, deviceId: msg.deviceId, cancelled: false };
         writeReplies.set(msg.id, request);
+        trace('recover', 'request', { thread: msg.conversationId, requestId: msg.requestId });
         const cancelled = () => request.cancelled || revoked.has(msg.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN;
         let locked = false, dispatched = false, registered = false;
         try {
@@ -301,9 +303,11 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           if (cancelled() || ![...streams.values()].includes(session) || history?.id !== msg.conversationId) throw new Error('unavailable');
           dispatched = true;
           await ownerRouter.route(msg.conversationId, { isCancelled: cancelled, deviceId: msg.deviceId, requestId: msg.requestId });
+          trace('recover', 'accepted', { thread: msg.conversationId });
           if (!ownerRouter.journal.finishRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId, 'accepted') && ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId) !== 'accepted') throw new Error('recovery outcome unknown');
           if (!cancelled()) send({ type: 'response', id: msg.id, status: 'accepted' }, connection, { request, cancellable: true });
         } catch (error) {
+          trace('recover', 'failed', { thread: msg.conversationId, code: error?.code || null, message: String(error?.message || error).slice(0, 160), dispatched });
           let noRecoveryWrite = false;
           if (dispatched && ['owner-unknown', 'unavailable'].includes(error?.code)) {
             try { noRecoveryWrite = ownerRouter.isRecoveryLocked(msg.conversationId) === false; } catch {}

@@ -7,6 +7,7 @@ import { matchApproval } from './approval-guard.mjs';
 import { matchUserInput } from './user-input-guard.mjs';
 import { desktopView } from './view.mjs';
 import { formatQuestionReply } from './async-question-guard.mjs';
+import { trace } from './diagnostics.mjs';
 
 // A session never serves cached conversation data while disconnected or resyncing.
 export class DesktopSession extends EventEmitter {
@@ -185,11 +186,15 @@ export class DesktopSession extends EventEmitter {
       await client.subscribe(this.conversationId, (change, source) => {
         if (generation !== this.generation) return;
         const result = this.conversation.accept(source?.ownerId, change);
-        if (result.status !== 'ready') return this.#retry(result.reason);
+        if (result.status !== 'ready') {
+          trace('session', 'sync-not-ready', { thread: this.conversationId, status: result.status, reason: result.reason, owner: source?.ownerId || null });
+          return this.#retry(result.reason);
+        }
         clearTimeout(this.snapshotTimer);
         this.snapshotTimer = null;
         this.attempt = 0;
         this.status = 'ready';
+        trace('session', 'ready', { thread: this.conversationId, owner: source?.ownerId || null });
         this.emit('state', result);
       }, this.hostId);
       if (generation !== this.generation) await client.close();
@@ -200,6 +205,7 @@ export class DesktopSession extends EventEmitter {
 
   #retry(reason) {
     if (this.status === 'closed') return;
+    trace('session', 'retry', { thread: this.conversationId, reason, attempt: this.attempt });
     ++this.generation;
     clearTimeout(this.snapshotTimer);
     this.snapshotTimer = null;
