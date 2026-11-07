@@ -31,6 +31,16 @@ test('browser compresses every file type only when smaller and preserves raw fal
   }
   const random = new Blob([randomBytes(131072)]);
   assert.equal((await encode(random)).body, random);
+  // Once the first chunk of a file proves unhelpful to compress, later chunks
+  // may bypass compression without changing their bytes or content type.
+  const compressible = new Blob([bytes], { type: 'application/pdf' });
+  vm.runInContext('CompressionStream = class { constructor() { throw new Error("must not run"); } }', ctx);
+  const skipped = await encode(compressible, undefined, false);
+  assert.equal(skipped.body, compressible);
+  assert.equal(skipped.compressionRatio, 1);
+  assert.equal(skipped.headers['content-encoding'], undefined);
+  assert.deepEqual(Buffer.from(await skipped.body.arrayBuffer()), bytes);
+  vm.runInContext('CompressionStream = undefined', ctx);
   vm.runInContext('uploadCompression=null', ctx);
   assert.equal((await encode(new Blob([bytes]))).headers['content-encoding'], undefined);
   vm.runInContext("uploadCompression='gzip'; CompressionStream=undefined", ctx);
@@ -38,7 +48,7 @@ test('browser compresses every file type only when smaller and preserves raw fal
   await assert.rejects(encode(random, AbortSignal.abort()), /cancelled/);
 });
 
-test('real HTTP and connector accept mixed compressed/raw chunks byte for byte and reject corrupt/bomb/unknown encoding', { timeout: 15000 }, async () => {
+test('real HTTP and connector accept mixed compressed/raw chunks byte for byte and reject corrupt/bomb/unknown encoding', { timeout: 60000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'phone-compression-'));
   const reserve = createServer(); await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
   const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
@@ -57,29 +67,37 @@ test('real HTTP and connector accept mixed compressed/raw chunks byte for byte a
     const capabilities = await (await fetch(base + '/api/capabilities', { headers: { cookie, 'sec-fetch-site': 'same-origin' } })).json();
     assert.equal(capabilities.uploadCompression, 'gzip');
     store = await UploadStore.create({ root });
-    receiver = new ChunkUploads(store, { maxChunk: 131072, validator: async () => {} });
+    receiver = new ChunkUploads(store, { maxChunk: 524288, pipelineWindow: 2, validator: async () => {} });
     connector = createPreviewConnector({ url: `ws://127.0.0.1:${port}/connector`, hostId: host.hostId, secret: host.secret, imageUpload: true, allowInsecureForTests: true,
       createUploadContext: async () => ({ store, receiver }),
       createSession: () => Object.assign(new EventEmitter(), { async close() {} }) });
     connector.start();
     for (let i = 0; i < 50; i++) {
-      const status = await fetch(base + '/api/host-status', { headers: { cookie, 'sec-fetch-site': 'same-origin' } });
-      if ((await status.json()).online) break;
+      const status = await fetch(base + '/api/capabilities', { headers: { cookie, 'sec-fetch-site': 'same-origin' } });
+      const data = await status.json();
+      if (data.imageChunkBytes === 524288 && data.uploadConcurrency === 2) break;
       await delay(10);
     }
+    const negotiated = await (await fetch(base + '/api/capabilities', { headers: { cookie, 'sec-fetch-site': 'same-origin' } })).json();
+    assert.equal(negotiated.imageChunkBytes, 524288);
+    assert.equal(negotiated.uploadConcurrency, 2);
     const thread = '11111111-1111-4111-8111-111111111111';
-    const first = Buffer.alloc(131072, 97), second = randomBytes(131072), data = Buffer.concat([first, second]);
+    const first = Buffer.alloc(131072, 97), second = randomBytes(524288), third = Buffer.alloc(524288, 98), fourth = randomBytes(131072);
+    const data = Buffer.concat([first, second, third, fourth]);
     for (const kind of ['file', 'image']) {
       const started = await post(`/api/threads/${thread}/uploads`, { name: kind === 'image' ? 'test.png' : 'report.pdf', size: data.length, kind }, { cookie });
       assert.equal(started.status, 200);
       const upload = (await started.json()).uploadId;
       const put = (seq, bytes, encoding) => fetch(`${base}/api/threads/${thread}/uploads/${upload}/chunks/${seq}`, { method: 'PUT', headers: { cookie, origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/octet-stream', ...(encoding ? { 'content-encoding': encoding } : {}) }, body: bytes });
       assert.equal((await put(0, gzipSync(first).subarray(0, 12), 'gzip')).status, 400);
-      assert.equal((await put(0, gzipSync(Buffer.alloc(131073)), 'gzip')).status, 413);
+      assert.equal((await put(0, gzipSync(Buffer.alloc(524289)), 'gzip')).status, 413);
       assert.equal((await put(0, first, 'br')).status, 415);
-      assert.equal((await put(0, Buffer.alloc(131073), 'gzip')).status, 400);
+      assert.equal((await put(0, Buffer.alloc(524288), 'gzip')).status, 400);
       assert.equal((await put(0, gzipSync(first), 'gzip')).status, 200);
-      assert.equal((await put(1, second)).status, 200);
+      const later = put(2, gzipSync(third), 'gzip');
+      const earlier = put(1, second);
+      assert.deepEqual((await Promise.all([earlier, later])).map(response => response.status), [200, 200]);
+      assert.equal((await put(3, fourth)).status, 200);
       const finished = await post(`/api/threads/${thread}/uploads/${upload}/finish`, undefined, { cookie });
       assert.equal(finished.status, 200);
       const attachment = (await finished.json()).attachmentId;

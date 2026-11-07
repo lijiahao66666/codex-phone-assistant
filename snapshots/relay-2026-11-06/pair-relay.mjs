@@ -290,7 +290,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         phonePresence.set(phone.deviceId, now());
         return send(res, 200, { online: Boolean(peer && peer.readyState === WebSocket.OPEN) });
       }
-      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: 131072, uploadCompression: 'gzip' });
+      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: peers.get(phone.hostId)?.uploadPipeline ? 524288 : 131072, uploadCompression: 'gzip', uploadConcurrency: peers.get(phone.hostId)?.uploadPipeline ? 2 : 1 });
       const agentHistory = /^\/api\/threads\/([0-9a-f-]{36})\/agents\/([0-9a-f-]{36})\/history$/i.exec(requested);
       if (agentHistory) {
         if (req.method !== 'GET' || !uuid.test(agentHistory[1]) || !uuid.test(agentHistory[2])) return send(res, 404, { error: 'not-found' });
@@ -355,10 +355,10 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         } else if (upload[2] && upload[3]?.startsWith('chunks/') && req.method === 'PUT' && req.headers['content-type'] === 'application/octet-stream') {
           const encoding = req.headers['content-encoding'];
           if (encoding !== undefined && encoding !== 'identity' && encoding !== 'gzip') return send(res, 415, { error: 'unsupported-encoding' });
-          let chunk = await bytesBody(req, 131072);
+          let chunk = await bytesBody(req, 524288);
           if (!chunk?.length) return send(res, 400, { error: 'invalid' });
           if (encoding === 'gzip') {
-            try { chunk = await decompressUploadChunk(chunk, { maxOutputLength: 131072 }); }
+            try { chunk = await decompressUploadChunk(chunk, { maxOutputLength: 524288 }); }
             catch (error) { return send(res, error.code === 'ERR_BUFFER_TOO_LARGE' ? 413 : 400, { error: 'invalid-compressed-chunk' }); }
             if (!chunk.length) return send(res, 400, { error: 'invalid' });
           }
@@ -448,7 +448,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     ws.on('message', raw => {
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return ws.close(1007); }
       if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return ws.close(1007);
-      if (msg.type === 'capabilities') { streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; return; }
+      if (msg.type === 'capabilities') { streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; return; }
       const entry = pending.get(msg.id); if (!entry || entry.hostId !== hostId) return;
       if (entry.historyChunks && msg.type === 'history-chunk' && msg.frame) {
         const frame = msg.frame;

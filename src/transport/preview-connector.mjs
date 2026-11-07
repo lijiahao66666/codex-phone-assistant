@@ -212,7 +212,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
         const info = await lstat(uploadRoot);
         if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) throw new Error('Invalid upload root');
         const store = await UploadStore.create({ root: uploadRoot });
-        return { store, receiver: new ChunkUploads(store, { maxChunk: 128 * 1024,
+        return { store, receiver: new ChunkUploads(store, { maxChunk: 512 * 1024, pipelineWindow: 2,
           helperPath: fileURLToPath(new URL('../../validate-image', import.meta.url)), ...(imageValidator ? { validator: imageValidator } : {}) }) };
         })();
         uploadContext = pending;
@@ -235,7 +235,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
     ws.on('message', async raw => {
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return connection.close(1007); }
       if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return connection.close(1007);
-      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2 }, connection); return; }
+      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
       if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void session.close().catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); await cleanupDevice(msg.deviceId); return; }
       if (typeof msg.id !== 'string' || msg.id.length > 100) return;
       if (msg.type === 'cancel-reply') { const request = writeReplies.get(msg.id); if (request) { request.cancelled = true; writeReplies.delete(msg.id); } connectionScheduler.cancelRequest(msg.id); return; }
@@ -355,7 +355,7 @@ export function createPreviewConnector({ url, secret, hostId, imageUpload = fals
           for (const [id, savedScope] of staged) if (!ctx.store.resolve({ id, ...savedScope })) staged.delete(id);
           if (operation.cancelled || connection !== ws || connection.readyState !== WebSocket.OPEN || revoked.has(scope.deviceId)) return;
           if (msg.action === 'start') { const uploadId = ctx.receiver.start({ ...scope, name: msg.name, size: msg.size, kind: msg.kind ?? 'image' }); operation.uploadId = uploadId; operation.retain = true; uploads.set(uploadId, scope); return answer(true, { uploadId }); }
-          if (msg.action === 'chunk') { if (typeof msg.data !== 'string' || msg.data.length > 180000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(msg.data)) throw new Error('Invalid chunk'); await ctx.receiver.chunk(msg.uploadId, scope, msg.seq, Buffer.from(msg.data, 'base64')); if (operation.cancelled) { uploads.delete(msg.uploadId); await ctx.receiver.cancel(msg.uploadId, scope).catch(() => {}); return; } return answer(true, { ok: true }); }
+          if (msg.action === 'chunk') { if (typeof msg.data !== 'string' || msg.data.length > 699052 || !/^[A-Za-z0-9+/]*={0,2}$/.test(msg.data)) throw new Error('Invalid chunk'); await ctx.receiver.chunk(msg.uploadId, scope, msg.seq, Buffer.from(msg.data, 'base64')); if (operation.cancelled) { uploads.delete(msg.uploadId); await ctx.receiver.cancel(msg.uploadId, scope).catch(() => {}); return; } return answer(true, { ok: true }); }
           if (msg.action === 'finish') { const result = await ctx.receiver.finish(msg.uploadId, scope); uploads.delete(msg.uploadId); if (operation.cancelled || revoked.has(scope.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN) { await ctx.store.remove({ id: result.id, ...scope }); return; } operation.attachmentId = result.id; operation.retain = true; staged.set(result.id, scope); return answer(true, { attachmentId: result.id }); }
           if (msg.action === 'delete') { if (uploads.has(msg.uploadId)) { await ctx.receiver.cancel(msg.uploadId, scope); uploads.delete(msg.uploadId); return answer(true, { ok: true }); } const removed = await ctx.store.remove({ id: msg.uploadId, ...scope }); if (removed) staged.delete(msg.uploadId); return answer(removed, { ok: removed }); }
         } catch { if (!operation.cancelled) return answer(false); }

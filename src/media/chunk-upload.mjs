@@ -1,6 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
-import { once } from 'node:events';
 import { open, lstat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { validateImageFile } from './image-validator.mjs';
@@ -19,23 +18,34 @@ async function digestFile(file) {
 export class ChunkUploads {
   #entries = new Map();
   #pending = new Set();
-  constructor(store, { maxBytes = 20 * 1024 * 1024, maxChunk = 256 * 1024, maxUploads = 8, timeoutMs = 30000, maxDurationMs = 120000, helperPath, validator = file => validateImageFile(file, { helperPath }) } = {}) {
+  constructor(store, { maxBytes = 20 * 1024 * 1024, maxChunk = 256 * 1024, maxUploads = 8, pipelineWindow = 1, timeoutMs = 30000, maxDurationMs = 120000, helperPath, validator = file => validateImageFile(file, { helperPath }) } = {}) {
     if (!store || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || !Number.isSafeInteger(maxChunk) || maxChunk < 1 ||
         !Number.isSafeInteger(maxUploads) || maxUploads < 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
-        !Number.isSafeInteger(maxDurationMs) || maxDurationMs < 1) throw new TypeError('Invalid upload limits');
+        !Number.isSafeInteger(maxDurationMs) || maxDurationMs < 1 || !Number.isSafeInteger(pipelineWindow) || pipelineWindow < 1 || pipelineWindow > 2) throw new TypeError('Invalid upload limits');
     if (typeof validator !== 'function') throw new TypeError('Invalid image validator');
-    Object.assign(this, { store, maxBytes, maxChunk, maxUploads, timeoutMs, maxDurationMs, validator });
+    Object.assign(this, { store, maxBytes, maxChunk, maxUploads, pipelineWindow, timeoutMs, maxDurationMs, validator });
   }
   start({ hostId, deviceId, threadId, name, size, kind = 'image' }) {
     if (![hostId, deviceId, threadId, name].every(v => typeof v === 'string' && v.length > 0) ||
         !['image', 'file'].includes(kind) || !Number.isSafeInteger(size) || size < 1 || size > this.maxBytes || this.#entries.size >= this.maxUploads) throw new Error('Invalid upload');
     const id = randomUUID(), stream = new PassThrough({ highWaterMark: this.maxChunk });
     stream.on('error', () => {});
-    const entry = { id, hostId, deviceId, threadId, kind, size, bytes: 0, seq: 0, stream, busy: false };
-    entry.done = this.store.put({ hostId, deviceId, threadId, name, kind, chunks: stream });
+    const entry = { id, hostId, deviceId, threadId, kind, size, bytes: 0, receivedBytes: 0, seq: 0, stream, busy: false, queue: new Map(), written: 0, writeWaiters: [] };
+    const chunks = (async function* () {
+      for await (const bytes of stream) {
+        yield bytes;
+        // UploadStore resumes the iterator only after its awaited file write.
+        entry.written += bytes.length;
+        for (const waiter of entry.writeWaiters.splice(0)) {
+          if (waiter.end <= entry.written) waiter.resolve();
+          else entry.writeWaiters.push(waiter);
+        }
+      }
+    })();
+    entry.done = this.store.put({ hostId, deviceId, threadId, name, kind, chunks });
     this.#pending.add(entry.done);
     void entry.done.finally(() => this.#pending.delete(entry.done)).catch(() => {});
-    entry.done.catch(() => {});
+    entry.done.catch(error => this.#cancel(entry, error));
     this.#entries.set(id, entry);
     this.#progress(entry);
     // Progress renews the idle timer, but cannot keep a transfer alive indefinitely.
@@ -53,30 +63,47 @@ export class ChunkUploads {
     if (!e || e.hostId !== scope.hostId || e.deviceId !== scope.deviceId || e.threadId !== scope.threadId) throw new Error('Upload unavailable');
     return e;
   }
-  #cancel(e) {
+  #cancel(e, error = new Error('Upload cancelled')) {
     if (!this.#entries.delete(e.id)) return;
     e.cancelled = true;
     this.#clearTimers(e);
-    e.stream.destroy(new Error('Upload cancelled'));
+    for (const item of e.queue.values()) item.reject(error);
+    e.queue.clear();
+    for (const waiter of e.writeWaiters.splice(0)) waiter.reject(error);
+    e.stream.destroy(error);
   }
   async chunk(id, scope, seq, bytes) {
     const e = this.#get(id, scope);
-    if (e.busy || seq !== e.seq || !Buffer.isBuffer(bytes) || !bytes.length || bytes.length > this.maxChunk || e.bytes + bytes.length > e.size) {
+    if (e.finishing || !Number.isSafeInteger(seq) || seq < e.seq || seq >= e.seq + this.pipelineWindow || e.queue.has(seq) || !Buffer.isBuffer(bytes) || !bytes.length || bytes.length > this.maxChunk || e.receivedBytes + bytes.length > e.size) {
       this.#cancel(e); throw new Error('Invalid upload chunk');
     }
+    e.receivedBytes += bytes.length;
+    const accepted = new Promise((resolve, reject) => e.queue.set(seq, { bytes, resolve, reject }));
+    void this.#drain(e);
+    return accepted;
+  }
+  async #drain(e) {
+    if (e.busy || e.cancelled) return;
     e.busy = true;
     try {
-      e.seq++; e.bytes += bytes.length;
-      if (!e.stream.write(bytes)) await once(e.stream, 'drain');
-      if (e.cancelled || this.#entries.get(id) !== e) throw new Error('Upload cancelled');
-      this.#progress(e);
-    } catch (error) { this.#cancel(e); throw error; }
+      while (!e.cancelled && e.queue.has(e.seq)) {
+        const item = e.queue.get(e.seq);
+        const written = new Promise((resolve, reject) => e.writeWaiters.push({ end: e.bytes + item.bytes.length, resolve, reject }));
+        try { e.stream.write(item.bytes); }
+        catch (error) { this.#cancel(e, error); }
+        await written;
+        if (e.cancelled || this.#entries.get(e.id) !== e) throw new Error('Upload cancelled');
+        e.bytes += item.bytes.length; e.queue.delete(e.seq); e.seq++;
+        this.#progress(e);
+        item.resolve();
+      }
+    } catch (error) { this.#cancel(e, error); }
     finally { e.busy = false; }
   }
   async finish(id, scope) {
     const e = this.#get(id, scope);
     if (e.finishing) throw new Error('Upload already finishing');
-    if (e.busy || e.bytes !== e.size) { this.#cancel(e); throw new Error('Incomplete upload'); }
+    if (e.busy || e.queue.size || e.bytes !== e.size) { this.#cancel(e); throw new Error('Incomplete upload'); }
     e.finishing = true;
     e.stream.end();
     let saved;

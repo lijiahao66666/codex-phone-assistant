@@ -75,11 +75,11 @@ async function scopedFetch(url, options = {}) {
   return response;
 }
 function resetHistoryScope(clearStored = false) {
-  historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
+  cancelOutgoingForScopeChange(); historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
 }
 function deviceChanged() {
   resetHistoryScope(); clearTimeout(reconnectTimer); active?.abort(); active = undefined;
-  selectedId = null; clearRecentViews(); clearConversation(); invalidateThreadList(); status('电脑已切换', 'error');
+  selectedId = null; renderOutgoingMessages(); clearRecentViews(); clearConversation(); invalidateThreadList(); status('电脑已切换', 'error');
   location.reload();
 }
 if (deviceChannel) deviceChannel.onmessage = event => { if (event.data?.type === 'device-changed') deviceChanged(); };
@@ -303,25 +303,28 @@ const drafts = new Map();
 const imageDrafts = new Map();
 let imageUploadAvailable = false;
 let uploadCompression = null;
-const imageChunkBytes = 128 * 1024;
-async function encodeUploadChunk(chunk, signal) {
+let uploadConcurrency = 1;
+let imageChunkBytes = 128 * 1024;
+async function encodeUploadChunk(chunk, signal, compressionAllowed = true) {
   if (signal?.aborted) throw new Error('cancelled');
-  if (uploadCompression === 'gzip' && typeof CompressionStream === 'function') {
+  if (compressionAllowed && uploadCompression === 'gzip' && typeof CompressionStream === 'function') {
     try {
       const compressed = await new Response(chunk.stream().pipeThrough(new CompressionStream('gzip'))).blob();
       if (signal?.aborted) throw new Error('cancelled');
-      if (compressed.size < chunk.size) return { body: compressed, headers: { 'content-type': 'application/octet-stream', 'content-encoding': 'gzip' } };
+      if (compressed.size < chunk.size) return { body: compressed, compressionRatio: compressed.size / chunk.size, headers: { 'content-type': 'application/octet-stream', 'content-encoding': 'gzip' } };
     } catch (error) { if (signal?.aborted) throw error; }
   }
-  return { body: chunk, headers: { 'content-type': 'application/octet-stream' } };
+  return { body: chunk, compressionRatio: 1, headers: { 'content-type': 'application/octet-stream' } };
 }
 async function loadCapabilities() {
   try {
     const response = await scopedFetch('/api/capabilities', { credentials: 'same-origin', cache: 'no-store' });
     const data = response.ok ? await response.json() : null;
-    imageUploadAvailable = data?.imageUpload === true && data?.imageChunkBytes === imageChunkBytes && data?.maxImageBytes === 20 * 1024 * 1024;
+    imageUploadAvailable = data?.imageUpload === true && [128 * 1024, 512 * 1024].includes(data?.imageChunkBytes) && data?.maxImageBytes === 20 * 1024 * 1024;
+    imageChunkBytes = imageUploadAvailable ? data.imageChunkBytes : 128 * 1024;
     uploadCompression = data?.uploadCompression === 'gzip' ? 'gzip' : null;
-  } catch { imageUploadAvailable = false; uploadCompression = null; }
+    uploadConcurrency = data?.uploadConcurrency === 2 ? 2 : 1;
+  } catch { imageUploadAvailable = false; uploadCompression = null; uploadConcurrency = 1; }
   updateComposer();
 }
 const submissions = new Map();
@@ -569,7 +572,7 @@ function updateComposer() {
   }
   messageInput.disabled = !selectedId || !connected;
   imageChoose.hidden = true;
-  imageChoose.disabled = !imageUploadAvailable || messageInput.disabled || Boolean(state?.pending || state?.uncertain);
+  imageChoose.disabled = !imageUploadAvailable || messageInput.disabled;
   fileChoose.hidden = !imageUploadAvailable;
   fileChoose.disabled = imageChoose.disabled;
   const modeAvailable = ['default', 'plan'].includes(liveMode);
@@ -581,14 +584,14 @@ function updateComposer() {
   attachmentControl.hidden = !imageUploadAvailable && !modeAvailable;
   attachmentToggle.disabled = messageInput.disabled || (fileChoose.disabled && !modeAvailable);
   if (attachmentToggle.disabled) closeAttachmentMenu();
-  for (const removeImage of imageDraft.querySelectorAll?.('.image-draft-remove') || []) removeImage.disabled = Boolean(state?.pending || state?.uncertain);
+  for (const removeImage of imageDraft.querySelectorAll?.('.image-draft-remove') || []) removeImage.disabled = false;
   if (voiceSession && (messageInput.disabled || voiceSession.threadId !== selectedId)) { stopVoice(); voiceStatus.textContent = ''; }
   voiceButton.disabled = messageInput.disabled || !SpeechRecognition;
   if (!SpeechRecognition) voiceButton.title = '当前浏览器不支持语音输入';
   messageInput.placeholder = selectedId ? (connected ? (liveMode === 'plan' ? '输入任务生成计划' : '输入消息') : '等待连接') : '选择任务后输入消息';
-  sendButton.disabled = messageInput.disabled || Boolean(state?.pending || state?.uncertain) || Boolean(selectedId && imageDrafts.has(selectedId) && !imageUploadAvailable) || (!messageInput.value.trim() && !(imageUploadAvailable && selectedId && imageDrafts.has(selectedId)));
-  sendStatus.textContent = state?.message || '';
-  unlockSend.hidden = !state?.uncertain;
+  sendButton.disabled = messageInput.disabled || Boolean(selectedId && imageDrafts.has(selectedId) && !imageUploadAvailable) || (!messageInput.value.trim() && !(imageUploadAvailable && selectedId && imageDrafts.has(selectedId)));
+  sendStatus.textContent = '';
+  unlockSend.hidden = true;
   const stop = selectedId && stops.get(selectedId);
   const hasDraft = Boolean(messageInput.value?.trim() || (selectedId && imageDrafts.has(selectedId)));
   stopButton.hidden = !activeTurnId || hasDraft;
@@ -631,91 +634,191 @@ stopButton.addEventListener('click', async () => {
     if (selectedId === id) updateComposer();
   }
 });
-unlockSend.addEventListener('click', () => { if (selectedId && submissions.get(selectedId)?.uncertain) submissions.delete(selectedId); updateComposer(); });
-messageInput.addEventListener('input', () => {
-  if (selectedId) drafts.set(selectedId, messageInput.value);
-  const state = selectedId && submissions.get(selectedId);
-  if (state && !state.pending && !state.uncertain) submissions.delete(selectedId);
-  updateComposer();
-});
-messageInput.addEventListener('focus', updateComposer);
-messageInput.addEventListener('blur', updateComposer);
-composerForm.addEventListener('submit', async event => {
-  event.preventDefault();
-  flushPendingRender();
-  const id = selectedId;
-  const text = messageInput.value;
-  const images = imageDrafts.get(id) || [];
-  if (!id || !connected || (!text.trim() && !images.length) || (images.length && !imageUploadAvailable) || submissions.get(id)?.pending || submissions.get(id)?.uncertain) return;
-  stopVoice();
-  voiceStatus.textContent = '';
-  submissions.set(id, { pending: true, message: '发送中...' });
-  updateComposer();
-  const controller = new AbortController();
+const outgoingMessages = new Map();
+const outgoingWorkers = new Map();
+const outgoingViewVersions = new Map();
+const outgoingBarriers = new Map();
+let nextOutgoingId = 0;
+const outgoingList = document.createElement('section');
+outgoingList.className = 'outgoing-messages'; outgoingList.hidden = true;
+outgoingList.setAttribute('aria-label', '待送达的消息');
+turns.after?.(outgoingList);
+function outgoingScopeKey(threadId = selectedId) { return JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId]); }
+function outgoingScopeMatches(entry) { return entry.scopeGeneration === historyScopeGeneration && entry.scopeKey === outgoingScopeKey(entry.threadId); }
+function disposeOutgoing(entry) {
+  entry.controller?.abort();
+  for (const image of entry.images) disposeAttachmentDraft(image);
+  const entries = outgoingMessages.get(entry.scopeKey) || [];
+  const remaining = entries.filter(item => item !== entry);
+  if (remaining.length) outgoingMessages.set(entry.scopeKey, remaining); else outgoingMessages.delete(entry.scopeKey);
+}
+function outgoingFileNode(image) {
+  if (image.url) { const preview = element('img', 'outgoing-image'); preview.src = image.url; preview.alt = image.file.name; return preview; }
+  const file = element('div', 'outgoing-file');
+  file.append(element('span', 'outgoing-file-name', image.file.name), element('span', 'outgoing-file-size', image.file.size < 1024 * 1024 ? `${Math.ceil(image.file.size / 1024)} KB` : `${(image.file.size / (1024 * 1024)).toFixed(1)} MB`));
+  return file;
+}
+function renderOutgoingMessages() {
+  const fragment = document.createDocumentFragment();
+  const entries = outgoingMessages.get(outgoingScopeKey()) || [];
+  for (const entry of entries) {
+    const row = element('article', 'turn outgoing-message'); row.dataset.outgoingId = entry.localId;
+    const group = element('div', 'user-message-group');
+    if (entry.text) group.append(element('p', 'item user-message item-text', entry.text));
+    if (entry.images.length) { const files = element('div', 'outgoing-files'); for (const image of entry.images) files.append(outgoingFileNode(image)); group.append(files); }
+    const failed = entry.state === 'failed' || entry.state === 'unknown';
+    const feedback = element('div', failed ? 'outgoing-feedback outgoing-error' : 'outgoing-feedback');
+    feedback.setAttribute('role', failed ? 'alert' : 'status');
+    if (failed) feedback.textContent = entry.state === 'failed' ? entry.error : '发送结果未知，请先检查聊天记录';
+    else {
+      feedback.className += ' outgoing-pending';
+      feedback.setAttribute('aria-label', '待送达');
+      feedback.innerHTML = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="M8 4.5V8l2.5 1.5"/></svg>';
+    }
+    group.append(feedback);
+    if (failed) {
+      const actions = element('div', 'outgoing-actions');
+      const edit = element('button', 'outgoing-edit', entry.state === 'unknown' ? '确认未送达后恢复草稿' : '恢复草稿'); edit.type = 'button';
+      edit.addEventListener('click', () => {
+        if (!outgoingScopeMatches(entry) || selectedId !== entry.threadId || !['failed', 'unknown', 'queued'].includes(entry.state)) return;
+        const pending = imageDrafts.get(entry.threadId) || [];
+        if (pending.length + entry.images.length > 4) { entry.error = '请先处理输入框中的附件，再恢复这条消息'; renderOutgoingMessages(); return; }
+        messageInput.value = [messageInput.value, entry.text].filter(Boolean).join('\n'); drafts.set(entry.threadId, messageInput.value);
+        if (entry.images.length) imageDrafts.set(entry.threadId, [...pending, ...entry.images]);
+        entry.images = []; disposeOutgoing(entry); renderImageDraft(); renderOutgoingMessages(); updateComposer(); void runOutgoingQueue(entry.threadId);
+      });
+      const dismiss = element('button', 'outgoing-dismiss', '移除'); dismiss.type = 'button';
+      dismiss.addEventListener('click', () => { if (entry.state === 'sending') return; disposeOutgoing(entry); renderOutgoingMessages(); updateComposer(); void runOutgoingQueue(entry.threadId); });
+      actions.append(edit, dismiss); group.append(actions);
+    }
+    row.append(group); fragment.append(row);
+  }
+  outgoingList.replaceChildren(fragment); outgoingList.hidden = entries.length === 0;
+  if (followLatest && conversation) conversation.scrollTop = conversation.scrollHeight;
+}
+function cancelOutgoingForScopeChange() {
+  for (const entries of outgoingMessages.values()) for (const entry of [...entries]) {
+    if (entry.messageDispatched) { entry.state = 'unknown'; entry.controller?.abort(); }
+    else disposeOutgoing(entry);
+  }
+  outgoingBarriers.clear(); outgoingViewVersions.clear();
+  renderOutgoingMessages();
+}
+function syncOutgoingWithView(view) {
+  if (!view || view.id !== selectedId) return;
+  const key = outgoingScopeKey(view.id), previous = outgoingViewVersions.get(key);
+  if (previous?.view !== view) outgoingViewVersions.set(key, { view, version: (previous?.version || 0) + 1 });
+  const version = outgoingViewVersions.get(key)?.version || 0;
+  if (outgoingBarriers.has(key) && version > outgoingBarriers.get(key)) outgoingBarriers.delete(key);
+  renderOutgoingMessages();
+  void runOutgoingQueue(view.id);
+}
+async function runOutgoingQueue(threadId) {
+  const key = outgoingScopeKey(threadId);
+  if (outgoingWorkers.has(key) || outgoingBarriers.has(key) || selectedId !== threadId || !connected) return outgoingWorkers.get(key);
+  const entry = (outgoingMessages.get(key) || [])[0];
+  if (!entry || entry.state !== 'queued' || !outgoingScopeMatches(entry)) return;
+  const work = sendOutgoing(entry);
+  outgoingWorkers.set(key, work);
+  try { await work; } finally { outgoingWorkers.delete(key); if (selectedId === threadId) { renderOutgoingMessages(); updateComposer(); } void runOutgoingQueue(threadId); }
+}
+async function sendOutgoing(entry) {
+  const id = entry.threadId, text = entry.text, images = entry.images;
+  const controller = new AbortController(); entry.controller = controller; entry.state = 'sending';
   const timer = setTimeout(() => controller.abort(), 120000);
   let uploadId;
   const attachmentIds = [];
-  let messageDispatched = false;
   let uploadStage = '初始化', uploadStatus = '', uploadReason = '';
   const uploadBegan = Date.now();
+  const ensureScope = () => { if (!outgoingScopeMatches(entry) || controller.signal.aborted) throw new Error('cancelled'); };
+  const call = (url, options) => { ensureScope(); return scopedFetch(url, { ...options, signal: options.signal || controller.signal }); };
   const checkUpload = async response => {
     uploadStatus = String(response.status);
-    if (!response.ok) {
-      const result = await response.json().catch(() => null);
-      if (['busy', 'host-offline', 'unavailable', 'invalid', 'device-replaced', 'unsupported-encoding', 'invalid-compressed-chunk'].includes(result?.error)) uploadReason = result.error;
-      throw new Error('upload');
-    }
+    if (!response.ok) { const result = await response.json().catch(() => null); if (['busy', 'host-offline', 'unavailable', 'invalid', 'device-replaced', 'unsupported-encoding', 'invalid-compressed-chunk'].includes(result?.error)) uploadReason = result.error; throw Object.assign(new Error('upload'), { uploadStatus: String(response.status), uploadReason }); }
   };
+  const cleanup = () => {
+    if (!outgoingScopeMatches(entry)) return;
+    for (const attachmentId of [...attachmentIds, ...(uploadId ? [uploadId] : [])]) void scopedFetch(`/api/threads/${encodeURIComponent(id)}/uploads/${encodeURIComponent(attachmentId)}`, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store' }).catch(() => {});
+  };
+  renderOutgoingMessages();
   try {
-    for (const [fileIndex, image] of images.entries()) {
+    for (const image of images) {
       uploadStage = '初始化'; uploadStatus = ''; uploadReason = '';
+      await loadCapabilities(); ensureScope();
+      if (!imageUploadAvailable) throw new Error('upload');
+      const chunkBytes = imageChunkBytes;
       const base = `/api/threads/${encodeURIComponent(id)}/uploads`;
-      const start = await scopedFetch(base, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: image.file.name, size: image.file.size, kind: image.kind || 'image' }) });
-      await checkUpload(start);
-      const created = await start.json();
-      if (!uuid.test(created?.uploadId)) throw new Error('upload');
-      uploadId = created.uploadId;
-      for (let offset = 0, seq = 0; offset < image.file.size; offset += imageChunkBytes, seq++) {
-        uploadStage = `传输 ${seq + 1}/${Math.ceil(image.file.size / imageChunkBytes)}`; uploadStatus = ''; uploadReason = '';
-        const chunk = await encodeUploadChunk(image.file.slice(offset, offset + imageChunkBytes), controller.signal);
-        const response = await scopedFetch(`${base}/${encodeURIComponent(uploadId)}/chunks/${seq}`, {
-          method: 'PUT', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-          headers: chunk.headers, body: chunk.body,
-        });
-        await checkUpload(response);
-        submissions.set(id, { pending: true, message: `上传附件 ${fileIndex + 1}/${images.length} · ${Math.round(Math.min(image.file.size, offset + imageChunkBytes) / image.file.size * 100)}%` });
-        if (selectedId === id) updateComposer();
-      }
+      const start = await call(base, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: image.file.name, size: image.file.size, kind: image.kind || 'image' }) });
+      await checkUpload(start); ensureScope();
+      const created = await start.json(); if (!uuid.test(created?.uploadId)) throw new Error('upload'); uploadId = created.uploadId;
+      const fileController = new AbortController();
+      const abortFile = () => fileController.abort();
+      controller.signal.addEventListener('abort', abortFile, { once: true });
+      let nextSeq = 0, firstError, compressionAllowed = true;
+      const count = Math.ceil(image.file.size / chunkBytes);
+      const worker = async () => {
+        while (!fileController.signal.aborted) {
+          const seq = nextSeq++;
+          if (seq >= count) return;
+          const stage = `传输 ${seq + 1}/${count}`;
+          try {
+            const offset = seq * chunkBytes;
+            const chunk = await encodeUploadChunk(image.file.slice(offset, offset + chunkBytes), fileController.signal, compressionAllowed);
+            // Sample every file losslessly, but avoid repeated CPU work for already compressed data.
+            if (seq === 0 && chunk.compressionRatio > 0.98) compressionAllowed = false;
+            if (fileController.signal.aborted) throw new Error('cancelled');
+            const response = await call(`${base}/${encodeURIComponent(uploadId)}/chunks/${seq}`, { method: 'PUT', credentials: 'same-origin', cache: 'no-store', signal: fileController.signal, headers: chunk.headers, body: chunk.body });
+            await checkUpload(response); ensureScope();
+          } catch (error) {
+            if (!firstError) firstError = Object.assign(error, { uploadStage: stage });
+            fileController.abort(); return;
+          }
+        }
+      };
+      try { await Promise.all(Array.from({ length: Math.min(uploadConcurrency, count) }, () => worker())); }
+      finally { controller.signal.removeEventListener('abort', abortFile); }
+      if (firstError) throw firstError;
+      ensureScope();
       uploadStage = '完成'; uploadStatus = ''; uploadReason = '';
-      const finish = await scopedFetch(`${base}/${encodeURIComponent(uploadId)}/finish`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
-      await checkUpload(finish);
-      const staged = await finish.json();
-      if (!uuid.test(staged?.attachmentId)) throw new Error('upload');
-      attachmentIds.push(staged.attachmentId); uploadId = undefined;
+      const finish = await call(`${base}/${encodeURIComponent(uploadId)}/finish`, { method: 'POST', credentials: 'same-origin', cache: 'no-store' });
+      await checkUpload(finish); ensureScope();
+      const staged = await finish.json(); if (!uuid.test(staged?.attachmentId)) throw new Error('upload'); attachmentIds.push(staged.attachmentId); uploadId = undefined;
     }
-    messageDispatched = true;
-    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/messages`, {
-      method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-      headers: { 'content-type': 'application/json' }, body: JSON.stringify(attachmentIds.length ? { text, attachmentIds } : { text }),
-    });
+    if (selectedId !== id || !connected) throw Object.assign(new Error('paused'), { code: 'paused' });
+    ensureScope(); entry.messageDispatched = true; entry.dispatchVersion = outgoingViewVersions.get(entry.scopeKey)?.version || 0;
+    const response = await call(`/api/threads/${encodeURIComponent(id)}/messages`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(attachmentIds.length ? { text, attachmentIds } : { text }) });
     if (response.ok) {
-      if (drafts.get(id) === text) drafts.delete(id);
-      if (images.length && imageDrafts.get(id) === images) { for (const image of images) disposeAttachmentDraft(image); imageDrafts.delete(id); if (selectedId === id) renderImageDraft(); }
-      submissions.delete(id);
-      if (selectedId === id && messageInput.value === text) messageInput.value = '';
-    } else {
-      const uncertain = response.status === 408 || response.status >= 500;
-      if (!uncertain) for (const attachmentId of [...attachmentIds, ...(uploadId ? [uploadId] : [])]) void scopedFetch(`/api/threads/${encodeURIComponent(id)}/uploads/${encodeURIComponent(attachmentId)}`, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store' }).catch(() => {});
-      submissions.set(id, { pending: false, uncertain, message: uncertain ? '发送结果未知，请先检查聊天记录' : `发送失败 (${response.status})` });
+      // The protocol acknowledges acceptance but does not return a message ID.
+      // Remove only our local placeholder; never guess which server message is its echo.
+      entry.state = 'accepted';
+      if ((outgoingViewVersions.get(entry.scopeKey)?.version || 0) <= entry.dispatchVersion) outgoingBarriers.set(entry.scopeKey, entry.dispatchVersion);
+      disposeOutgoing(entry);
     }
-  } catch {
-    if (!messageDispatched) for (const attachmentId of [...attachmentIds, ...(uploadId ? [uploadId] : [])]) void scopedFetch(`/api/threads/${encodeURIComponent(id)}/uploads/${encodeURIComponent(attachmentId)}`, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store' }).catch(() => {});
-    submissions.set(id, { pending: false, uncertain: messageDispatched, message: messageDispatched ? '发送结果未知，请先检查聊天记录' : `附件上传失败（${uploadStage} · ${uploadStatus || '网络异常'}${uploadReason ? ` · ${uploadReason}` : ''} · ${Math.round((Date.now() - uploadBegan) / 1000)}秒）` });
-  } finally {
-    clearTimeout(timer);
-    if (selectedId === id) updateComposer();
-  }
+    else { const uncertain = response.status === 408 || response.status >= 500; if (!uncertain) cleanup(); entry.state = uncertain ? 'unknown' : 'failed'; entry.error = `发送失败 (${response.status})`; }
+  } catch (error) {
+    uploadStage = error?.uploadStage || uploadStage; uploadStatus = error?.uploadStatus || uploadStatus; uploadReason = error?.uploadReason || uploadReason;
+    if (!entry.messageDispatched) cleanup();
+    if (!outgoingScopeMatches(entry)) { if (entry.messageDispatched) entry.state = 'unknown'; return; }
+    entry.state = error?.code === 'paused' ? 'queued' : entry.messageDispatched ? 'unknown' : 'failed';
+    entry.error = entry.messageDispatched ? '发送结果未知，请先检查聊天记录' : `附件上传失败（${uploadStage} · ${uploadStatus || '网络异常'}${uploadReason ? ` · ${uploadReason}` : ''} · ${Math.round((Date.now() - uploadBegan) / 1000)}秒）`;
+  } finally { clearTimeout(timer); entry.controller = null; }
+}
+unlockSend.addEventListener('click', () => {});
+messageInput.addEventListener('input', () => { if (selectedId) drafts.set(selectedId, messageInput.value); updateComposer(); });
+messageInput.addEventListener('focus', updateComposer);
+messageInput.addEventListener('blur', updateComposer);
+composerForm.addEventListener('submit', event => {
+  event.preventDefault(); flushPendingRender();
+  const id = selectedId, text = messageInput.value, images = imageDrafts.get(id) || [];
+  if (!id || !connected || (!text.trim() && !images.length) || (images.length && !imageUploadAvailable)) return;
+  const all = [...outgoingMessages.values()].flat();
+  if (all.length >= 16 || all.reduce((bytes, entry) => bytes + entry.images.reduce((n, image) => n + image.file.size, 0), 0) + images.reduce((bytes, image) => bytes + image.file.size, 0) > 80 * 1024 * 1024) { sendStatus.textContent = '待发送消息过多，请先处理聊天中的消息'; return; }
+  stopVoice(); voiceStatus.textContent = '';
+  const scopeKey = outgoingScopeKey(id), entry = { localId: `local-${++nextOutgoingId}`, scopeKey, scopeGeneration: historyScopeGeneration, threadId: id, text, images, state: 'queued', messageDispatched: false };
+  outgoingMessages.set(scopeKey, [...(outgoingMessages.get(scopeKey) || []), entry]);
+  drafts.delete(id); imageDrafts.delete(id); messageInput.value = ''; imageFile.value = ''; fileInput.value = '';
+  followLatest = true; renderImageDraft(); updateComposer(); renderOutgoingMessages();
+  return runOutgoingQueue(id);
 });
 function closeDevices() { deviceMenu.open = false; deviceScrim.hidden = true; }
 function showSidebar(show) { if (show) { closeDevices(); showSummary(false); } sidebar.classList.toggle('open', show); scrim.hidden = !show; scheduleVisibleStatusRefresh(); }
@@ -732,7 +835,7 @@ let summaryTouch;
 summaryPanel.addEventListener('touchstart', event => { const touch = event.touches?.[0]; summaryTouch = touch ? { x: touch.clientX, y: touch.clientY } : null; }, { passive: true });
 summaryPanel.addEventListener('touchend', event => { const touch = event.changedTouches?.[0]; if (summaryTouch && touch && touch.clientX - summaryTouch.x > 60 && Math.abs(touch.clientY - summaryTouch.y) < 70) showSummary(false); summaryTouch = null; }, { passive: true });
 
-function status(text, state) { connection.textContent = text; connection.dataset.state = state; connected = state === 'ready'; updateComposer(); }
+function status(text, state) { connection.textContent = text; connection.dataset.state = state; connected = state === 'ready'; updateComposer(); renderOutgoingMessages(); if (connected && selectedId) void runOutgoingQueue(selectedId); }
 async function responseError(response, fallback) {
   if (response.status === 401 || response.status === 403) return '配对状态不可用，请重新配对';
   try {
@@ -742,7 +845,7 @@ async function responseError(response, fallback) {
   return fallback;
 }
 let displayedHistoryId = null, homeErrorSource = null;
-function clearConversation() { cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); }
+function clearConversation() { cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
 function diffStats(changes) {
   let added = 0, removed = 0;
   for (const change of changes || []) {
@@ -1797,6 +1900,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   const inputFocus = focusedInput?.dataset?.inputDraftKey ? { key: focusedInput.dataset.inputDraftKey, question: focusedInput.dataset.inputQuestionId, start: focusedInput.selectionStart, end: focusedInput.selectionEnd } : null;
   const oldQuestionScroll = questionPanel.scrollTop;
   turns.replaceChildren(fragment);
+  if (live && sourceView.id === selectedId) syncOutgoingWithView(sourceView); else renderOutgoingMessages();
   pruneVideoPreviews();
   for (const video of playingVideos) if (video.isConnected && video.paused) void video.play().catch(() => {});
   if (workFocus) {
