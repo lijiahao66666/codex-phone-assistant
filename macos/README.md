@@ -6,10 +6,10 @@ macOS 客户端使用 Swift、WKWebView 和菜单栏入口，随包 Node 后台�
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.0) 下载：
+从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.1.1) 下载：
 
-- [macOS Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/codex-phone-assistant-macos-arm64.dmg)
-- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.0/SHA256SUMS.txt)
+- [macOS Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-macos-arm64.dmg)
+- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/SHA256SUMS.txt)
 
 也可以从[项目下载页](https://codex.air-inc.top/download/)获取同一安装包。
 
