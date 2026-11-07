@@ -190,15 +190,15 @@ button.file-change-path::after,.file-change-path:not(button)::after,.summary-fil
 .picker-trigger[aria-expanded="true"] .chevron-icon{transform:rotate(-90deg)}
 @media(prefers-reduced-motion:reduce){.picker-trigger .chevron-icon{transition:none}}
 .picker-model{flex:1;min-width:96px;max-width:156px}
-.picker-effort{flex:none;min-width:58px;max-width:86px}
+.picker-effort{flex:none;min-width:0;max-width:86px}
 .picker-project{max-width:min(46vw,220px);height:30px;padding:0 4px;color:#737b77;font-size:13px;font-weight:400}
-.picker-panel{position:absolute;z-index:20;min-width:160px;max-width:min(280px,calc(100vw - 32px));max-height:min(60vh,360px);overflow:auto;padding:4px;background:#fff;border:1px solid #dce1de;border-radius:8px;box-shadow:0 8px 24px #0002;-webkit-tap-highlight-color:transparent}
+.picker-panel{position:absolute;z-index:20;min-width:0;width:max-content;max-width:min(240px,calc(100vw - 32px));max-height:min(60vh,360px);overflow:auto;padding:4px;background:#fff;border:1px solid #dce1de;border-radius:8px;box-shadow:0 8px 24px #0002;-webkit-tap-highlight-color:transparent}
 .picker-panel[hidden]{display:none}
 .picker-up{bottom:calc(100% + 8px);left:0}
 .picker-up.picker-align-right{left:auto;right:0}
 .picker-down{top:calc(100% + 6px);left:16px}
 .picker-panel-title{padding:6px 10px 5px;color:#727a76;font-size:12px;font-weight:600}
-.picker-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:36px;padding:7px 10px;border:0;border-radius:5px;background:transparent;color:#252826;font:inherit;font-size:13px;text-align:left;white-space:nowrap;cursor:pointer}
+.picker-option{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:36px;padding:7px 10px;border:0;border-radius:5px;background:transparent;color:#252826;font:inherit;font-size:13px;text-align:left;white-space:nowrap;cursor:pointer}
 .picker-option:hover,.picker-option:active{background:#f1f2f1}
 .picker-option.is-current{color:#176b50;font-weight:600}
 .picker-option.is-current::after{content:'✓';flex:none;font-size:13px}
