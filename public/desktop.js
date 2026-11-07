@@ -60,7 +60,7 @@ function renderPickerPanel(item) {
       const button = element('button', 'picker-option' + (option.current ? ' is-current' : ''), option.label);
       button.type = 'button';
       button.setAttribute?.('role', 'option');
-      button.addEventListener('click', () => { view.apply(option.value); item.view = null; closeAllPickers(); });
+      button.addEventListener('click', event => { event?.stopPropagation?.(); view.apply(option.value); item.view = null; closeAllPickers(); });
       return button;
     });
     item.panel.replaceChildren?.(back, element('div', 'picker-panel-title', view.title), ...rows);
@@ -72,7 +72,8 @@ function renderPickerPanel(item) {
     const button = element('button', 'picker-option' + (String(option.value) === String(item.select.value) ? ' is-current' : ''), option.textContent || option.value || '默认');
     button.type = 'button';
     button.setAttribute?.('role', 'option');
-    button.addEventListener('click', () => {
+    button.addEventListener('click', event => {
+      event?.stopPropagation?.();
       const view = item.submenu?.(option.value);
       if (view) { item.view = view; renderPickerPanel(item); return; }
       applyPickerValue(item.select, option.value); closeAllPickers();
@@ -623,7 +624,7 @@ function openNewChat(projectId) {
   if (selectedId) drafts.set(selectedId, messageInput.value);
   const saved = savedNewDraft?.deviceId === currentDeviceId ? savedNewDraft : null;
   const defaultId = availableProjects.some(project => project.id === projectId) ? projectId : (saved?.projectId || rememberedProject());
-  newDraft = { projectId: availableProjects.some(project => project.id === defaultId) ? defaultId : (availableProjects[0]?.id || ''), text: saved?.text || '', attachments: saved?.attachments || [], model: saved?.model ?? null, effort: saved?.effort ?? null, pending: false, uncertain: false };
+  newDraft = { projectId: availableProjects.some(project => project.id === defaultId) ? defaultId : (availableProjects[0]?.id || ''), text: saved?.text || '', attachments: saved?.attachments || [], model: saved?.model ?? null, effort: saved?.effort ?? null, mode: saved?.mode === 'plan' ? 'plan' : 'default', pending: false, uncertain: false };
   selectedId = null; selectedTitle = ''; clearTimeout(reconnectTimer); active?.abort(); active = undefined;
   clearConversation(); title.textContent = '新聊天'; messageInput.value = newDraft.text; newProjectBar.hidden = true;
   newModels = []; renderNewModels(); void loadNewModels(newDraft, currentDeviceId);
@@ -922,7 +923,7 @@ conversation?.addEventListener('scroll', () => {
   previousHistoryScrollTop = top;
   followLatest = conversation.scrollHeight - conversation.clientHeight - conversation.scrollTop < 80;
   updateScrollButton();
-  if (upward && top < 120 && historyCanLoad && !historyAutoBlocked && !historyIsStale()) void loadEarlierPage();
+  if (upward && top < 120 && historyCanLoad && historyHasOlder() && !historyAutoBlocked && !historyIsStale()) void loadEarlierPage();
 });
 // Pulling down at the very top also pages in older turns, including when the
 // loaded window is shorter than the viewport and never fires a scroll event.
@@ -935,7 +936,7 @@ conversation?.addEventListener('touchmove', event => {
   const touch = event.touches?.[0];
   if (!touch || !historyPullStart) return;
   if (conversation.scrollTop > 8) { historyPullStart = null; return; }
-  if (touch.clientY - historyPullStart.y >= 45 && historyCanLoad && !historyAutoBlocked && !historyIsStale() && !historyRequest) {
+  if (touch.clientY - historyPullStart.y >= 45 && historyCanLoad && historyHasOlder() && !historyAutoBlocked && !historyIsStale() && !historyRequest) {
     historyPullStart = null;
     void loadEarlierPage();
   }
@@ -1057,6 +1058,13 @@ function flushPendingModeChange() {
   void applyModeChange(id, target);
 }
 modeChoose.addEventListener('click', async () => {
+  if (newDraft) {
+    if (!connected || newDraft.pending || newDraft.uncertain || newDraft.prepared) return;
+    newDraft.mode = newDraft.mode === 'plan' ? 'default' : 'plan';
+    closeAttachmentMenu();
+    updateComposer();
+    return;
+  }
   const id = selectedId;
   if (!id || !connected || !['default', 'plan'].includes(liveMode) || modeChanges.has(id) || modelChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return;
   closeAttachmentMenu();
@@ -1164,10 +1172,10 @@ function updateComposer() {
   imageChoose.disabled = !imageUploadAvailable || messageInput.disabled || Boolean(state?.pending || state?.uncertain);
   fileChoose.hidden = !imageUploadAvailable;
   fileChoose.disabled = imageChoose.disabled;
-  const modeAvailable = ['default', 'plan'].includes(liveMode);
+  const modeAvailable = newDraft ? true : ['default', 'plan'].includes(liveMode);
   const modeChange = selectedId && modeChanges.get(selectedId);
   const pendingMode = selectedId && pendingModeChanges.get(selectedId);
-  const effectiveMode = pendingMode || modeChange?.target || liveMode;
+  const effectiveMode = newDraft ? (newDraft.mode === 'plan' ? 'plan' : 'default') : (pendingMode || modeChange?.target || liveMode);
   modeChoose.hidden = !modeAvailable;
   modeChoose.textContent = effectiveMode === 'plan' ? '计划模式 ✓' : '计划模式';
   modeChoose.dataset.active = String(effectiveMode === 'plan');
@@ -1608,7 +1616,11 @@ composerForm.addEventListener('submit', async event => {
       if (!uuid.test(result?.threadId || '')) throw new Error('uncertain');
       for (const attachment of draft.attachments) disposeAttachmentDraft(attachment);
       saveProject(draft.projectId); savedNewDraft = null; newDraft = null; newProjectBar.hidden = true;
-      selectedId = result.threadId; selectedTitle = '新聊天'; messageInput.value = ''; renderImageDraft(); void loadThreads(); void connect(selectedId);
+      selectedId = result.threadId; selectedTitle = '新聊天'; messageInput.value = '';
+      // A plan-mode choice made before the chat existed applies as soon as the
+      // first turn goes idle.
+      if (draft.mode === 'plan') pendingModeChanges.set(selectedId, 'plan');
+      renderImageDraft(); void loadThreads(); void connect(selectedId);
     } catch (error) {
       if (preparedThread && !dispatched) {
         if (inProgressUpload) void scopedFetch(`/api/threads/${preparedThread}/uploads/${inProgressUpload}`, { method: 'DELETE', credentials: 'same-origin', headers: { 'x-creation-id': draft.requestId } }).catch(() => {});
@@ -2313,9 +2325,14 @@ async function loadRecordedPage() {
     }
   } finally { if (historyRequest === controller) { historyRequest = null; updateHistoryControl(); } }
 }
+function historyHasOlder() {
+  return Boolean(loadedHistory?.nextBefore || streamView?.history?.cursor || recordedHistory?.nextCursor || displayedHistoryId);
+}
 function updateHistoryControl() {
   const shortContent = !conversation || !Number.isFinite(conversation.scrollHeight) || !Number.isFinite(conversation.clientHeight) || conversation.scrollHeight <= conversation.clientHeight + 1;
-  loadEarlier.hidden = Boolean(newDraft) || !historyCanLoad || (!historyRequest && !historyAutoBlocked && !historyIsStale() && !shortContent);
+  // A short window is only worth a manual control when something older exists;
+  // a brand-new chat must never advertise "加载更早消息".
+  loadEarlier.hidden = Boolean(newDraft) || !historyCanLoad || (!historyRequest && !historyAutoBlocked && !historyIsStale() && !(shortContent && historyHasOlder()));
   loadEarlier.disabled = Boolean(historyRequest);
   loadEarlier.textContent = historyRequest ? '加载中...' : historyIsStale() ? '历史已变化，刷新' : historyAutoBlocked ? '重新加载更早消息' : '加载更早消息';
 }

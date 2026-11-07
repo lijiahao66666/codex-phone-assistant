@@ -99,7 +99,8 @@ test('new chat hides the load-earlier action and never writes a history notice',
   const f=await fixture();
   f.run("newDraft={projectId:'p',attachments:[],model:null,effort:null,pending:false,uncertain:false};historyCanLoad=true;updateHistoryControl()");
   assert.equal(f.run('loadEarlier.hidden'),true);
-  f.run('newDraft=null;updateHistoryControl()');assert.equal(f.run('loadEarlier.hidden'),false);
+  f.run('newDraft=null;updateHistoryControl()');assert.equal(f.run('loadEarlier.hidden'),true);
+  f.run("streamView={id:selectedId,turns:[],history:{cursor:'older'}};updateHistoryControl()");assert.equal(f.run('loadEarlier.hidden'),false);
   f.run("history.textContent='部分历史未加载';selectedId='11111111-1111-4111-8111-111111111111';streamView={id:selectedId,title:'t',turns:[],requests:[],history:{complete:false}};showState(streamView,true)");
   assert.equal(f.nodes.get('#history').textContent,'');
 });

@@ -246,3 +246,9 @@ body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-
 /* No scrollbar track beside the task list. */
 .project-list{scrollbar-width:none;-ms-overflow-style:none}
 .project-list::-webkit-scrollbar{display:none;width:0;height:0}
+/* Plan badge is neutral gray, not tinted. */
+.plan-badge{background:#f1f2f1;color:#7c847f;font-weight:500}
+/* Pull the picker row harder toward the bottom edge and the send button. */
+.composer-inner:has(.model-controls:not([hidden])){column-gap:2px;padding-bottom:2px}
+.picker-trigger{padding:0 3px}
+.picker-model{padding-right:1px}

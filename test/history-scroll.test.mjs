@@ -61,7 +61,7 @@ test('short content and invalidated history provide an accessible load action', 
   const nodes=new Map(),document={querySelector(k){if(!nodes.has(k))nodes.set(k,new Element());return nodes.get(k);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
   const context=vm.createContext({document,fetch:async()=>({ok:true,json:async()=>({projects:[],recent:[]})}),AbortController,TextDecoder,setTimeout,clearTimeout,sessionStorage:{removeItem(){}},window:{addEventListener(){}}});
   vm.runInContext(await readFile(new URL('../public/desktop.js',import.meta.url),'utf8'),context);
-  vm.runInContext('historyCanLoad=true; updateHistoryControl()',context);
+  vm.runInContext("streamView={id:'11111111-1111-4111-8111-111111111111',turns:[],history:{cursor:'older'}}; historyCanLoad=true; updateHistoryControl()",context);
   const button=vm.runInContext('loadEarlier',context); assert.equal(button.hidden,false); assert.equal(button.textContent,'加载更早消息');
   vm.runInContext("conversation.scrollHeight=1000; loadedHistory={stale:true}; updateHistoryControl()",context);
   assert.equal(button.hidden,false); assert.equal(button.textContent,'历史已变化，刷新');
