@@ -23,6 +23,7 @@ const attachmentMenu = document.querySelector('#attachment-menu');
 const imageFile = document.querySelector('#image-file');
 const fileChoose = document.querySelector('#file-choose');
 const modeChoose = document.querySelector('#mode-choose');
+const planBadge = document.querySelector('#plan-badge');
 const currentProject = document.querySelector('#current-project');
 const modeStatus = document.querySelector('#mode-status');
 const modelControl = document.createElement('select');
@@ -50,12 +51,32 @@ function closeAllPickers() {
   for (const item of pickerRegistry) { item.panel.hidden = true; item.trigger.setAttribute?.('aria-expanded', 'false'); }
 }
 function renderPickerPanel(item) {
+  if (item.view) {
+    const view = item.view;
+    const back = element('button', 'picker-back', item.title);
+    back.type = 'button';
+    back.addEventListener('click', event => { event?.stopPropagation?.(); item.view = null; renderPickerPanel(item); });
+    const rows = view.options.map(option => {
+      const button = element('button', 'picker-option' + (option.current ? ' is-current' : ''), option.label);
+      button.type = 'button';
+      button.setAttribute?.('role', 'option');
+      button.addEventListener('click', () => { view.apply(option.value); item.view = null; closeAllPickers(); });
+      return button;
+    });
+    item.panel.replaceChildren?.(back, element('div', 'picker-panel-title', view.title), ...rows);
+    if (!rows.length) item.panel.append?.(element('div', 'picker-empty', '暂无可选项'));
+    return;
+  }
   const options = pickerOptions(item.select);
   const rows = options.map(option => {
     const button = element('button', 'picker-option' + (String(option.value) === String(item.select.value) ? ' is-current' : ''), option.textContent || option.value || '默认');
     button.type = 'button';
     button.setAttribute?.('role', 'option');
-    button.addEventListener('click', () => { applyPickerValue(item.select, option.value); closeAllPickers(); });
+    button.addEventListener('click', () => {
+      const view = item.submenu?.(option.value);
+      if (view) { item.view = view; renderPickerPanel(item); return; }
+      applyPickerValue(item.select, option.value); closeAllPickers();
+    });
     return button;
   });
   item.panel.replaceChildren?.(element('div', 'picker-panel-title', item.title), ...rows);
@@ -64,10 +85,10 @@ function renderPickerPanel(item) {
 function syncPicker(item) {
   const options = pickerOptions(item.select);
   const current = options.find(option => String(option.value) === String(item.select.value)) || options[0];
-  item.label.textContent = current?.textContent || item.placeholder;
+  item.label.textContent = item.labelFor ? item.labelFor(current) : (current?.textContent || item.placeholder);
   item.trigger.hidden = Boolean(item.select.hidden);
   item.trigger.disabled = Boolean(item.select.disabled);
-  if (item.select.hidden || item.select.disabled) { item.panel.hidden = true; item.trigger.setAttribute?.('aria-expanded', 'false'); }
+  if (item.select.hidden || item.select.disabled) { item.panel.hidden = true; item.view = null; item.trigger.setAttribute?.('aria-expanded', 'false'); }
   else if (!item.panel.hidden) renderPickerPanel(item);
 }
 function syncAllPickers() { for (const item of pickerRegistry) syncPicker(item); }
@@ -82,11 +103,12 @@ function openPicker(item) {
   const closed = item.panel.hidden;
   closeAllPickers();
   if (!closed) return;
+  item.view = null;
   renderPickerPanel(item);
   item.panel.hidden = false;
   item.trigger.setAttribute?.('aria-expanded', 'true');
 }
-function createPicker(select, { className, title, placeholder, direction = 'up', align = 'left' }) {
+function createPicker(select, { className, title, placeholder, direction = 'up', align = 'left', submenu, labelFor }) {
   const trigger = document.createElement('button');
   trigger.type = 'button';
   trigger.className = 'picker-trigger ' + className;
@@ -99,15 +121,13 @@ function createPicker(select, { className, title, placeholder, direction = 'up',
   const panel = element('div', 'picker-panel picker-' + direction + (align === 'right' ? ' picker-align-right' : ''), '');
   panel.hidden = true;
   panel.setAttribute?.('role', 'listbox');
-  const item = { select, trigger, label, panel, title, placeholder };
+  const item = { select, trigger, label, panel, title, placeholder, submenu, labelFor, view: null };
   trigger.addEventListener('click', event => { event?.stopPropagation?.(); openPicker(item); });
   pickerRegistry.push(item);
   return item;
 }
-const modelPicker = createPicker(modelControl, { className: 'picker-model', title: '选择模型', placeholder: '模型' });
-const effortPicker = createPicker(effortControl, { className: 'picker-effort', title: '选择推理强度', placeholder: '强度', align: 'right' });
-modelControls.append?.(modelPicker.trigger, effortPicker.trigger, modelPicker.panel, effortPicker.panel);
-modelControls.insertBefore?.(modeChoose, modelPicker.trigger);
+const modelPicker = createPicker(modelControl, { className: 'picker-model', title: '选择模型', placeholder: '模型', submenu: modelEffortView, labelFor: modelTriggerLabel });
+modelControls.append?.(modelPicker.trigger, modelPicker.panel);
 const projectPicker = createPicker(currentProject, { className: 'picker-project', title: '选择项目目录', placeholder: '项目', direction: 'down' });
 currentProject.after?.(projectPicker.trigger);
 projectPicker.trigger.after?.(projectPicker.panel);
@@ -175,6 +195,18 @@ function updateModelControl() {
   const shownModel = pending?.model || liveModel?.model;
   const shownEffort = pending?.effort || liveModel?.effort;
   modelControl.replaceChildren();
+  if (!shownModel) {
+    // History-only views do not know the desktop's live model; never present a
+    // catalog default as if it were the model in use.
+    const modelPlaceholder = document.createElement('option'); modelPlaceholder.value = ''; modelPlaceholder.textContent = '模型';
+    modelControl.append?.(modelPlaceholder);
+    const effortPlaceholder = document.createElement('option'); effortPlaceholder.value = ''; effortPlaceholder.textContent = '等级';
+    effortControl.replaceChildren(effortPlaceholder);
+    modelControls.hidden = Boolean(newDraft) || !selectedId;
+    modelControl.disabled = true; effortControl.disabled = true;
+    syncAllPickers();
+    return;
+  }
   const matching = modelCatalog.find(entry => entry.model === shownModel);
   if (!matching) { const option = document.createElement('option'); option.value = ''; option.textContent = shownModel || '模型'; modelControl.append?.(option); }
   for (const entry of modelCatalog) { const option = document.createElement('option'); option.value = entry.model; option.textContent = entry.displayName; option.selected = entry.model === shownModel; modelControl.append?.(option); }
@@ -187,6 +219,40 @@ function updateModelControl() {
   modelControl.disabled = disabled;
   effortControl.disabled = disabled || !matching || !efforts.length;
   syncAllPickers();
+}
+function pickerModelEntry(model) {
+  if (newDraft) return newModels.find(item => item.model === model) || preferredNewModel();
+  return modelCatalog.find(item => item.model === model) || null;
+}
+function modelTriggerLabel() {
+  const entry = pickerModelEntry(modelControl.value);
+  if (!entry) return effortControl.value || '模型';
+  const name = entry.displayName || entry.model;
+  return effortControl.value ? `${name} · ${effortControl.value}` : name;
+}
+function modelEffortView(model) {
+  const entry = pickerModelEntry(model);
+  const efforts = entry?.supportedReasoningEfforts || [];
+  if (!entry || !efforts.length) return null;
+  const current = efforts.includes(effortControl.value) ? effortControl.value : (efforts.includes(entry.defaultReasoningEffort) ? entry.defaultReasoningEffort : efforts[0]);
+  return { title: '思考等级', options: efforts.map(value => ({ value, label: value, current: value === current })), apply: value => applyModelAndEffort(entry.model, value) };
+}
+function applyModelAndEffort(model, effort) {
+  if (newDraft) {
+    if (newDraft.pending || newDraft.uncertain || newDraft.prepared) return;
+    const entry = newModels.find(item => item.model === model);
+    if (!entry) return;
+    newDraft.model = entry.model;
+    newDraft.effort = entry.supportedReasoningEfforts.includes(effort) ? effort : (entry.supportedReasoningEfforts.includes(entry.defaultReasoningEffort) ? entry.defaultReasoningEffort : (entry.supportedReasoningEfforts[0] || null));
+    renderNewModels();
+    return;
+  }
+  const entry = modelCatalog.find(item => item.model === model);
+  if (!entry) return;
+  const nextEffort = entry.supportedReasoningEfforts.includes(effort) ? effort : (entry.supportedReasoningEfforts.includes(liveModel?.effort) ? liveModel.effort : entry.defaultReasoningEffort);
+  modelControl.value = entry.model;
+  effortControl.value = nextEffort;
+  void requestModelChange(entry.model, nextEffort);
 }
 function flushPendingModelChange() {
   const id = selectedId;
@@ -390,13 +456,27 @@ function guardRecoveryControl(button, isPending) {
 function updateRecoveryControl() {
   const key = recoveryKey(currentDeviceId, selectedId), state = recoveryState(currentDeviceId, selectedId), check = recoveryChecks.get(key);
   const checkNotice = check?.status === 'failed' || check?.status === 'locked' || (connected && check?.status === 'checking');
-  const visible = Boolean(selectedId && currentDeviceId && !newDraft && (checkNotice || (state && !['unavailable', 'clear'].includes(state.status))));
+  const pendingAttempt = Boolean(state && ['pending', 'awaiting-state', 'unknown'].includes(state.status));
+  const visible = Boolean(selectedId && currentDeviceId && !newDraft && (checkNotice || pendingAttempt));
   recoveryControl.hidden = !visible;
   // Recovery is automatic; no manual retry or cancel buttons are exposed.
   recoverChat.hidden = true;
   cancelRecovery.hidden = true;
   if (!visible) return;
-  recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理' : '正在连接任务…';
+  recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理' : pendingAttempt ? '正在连接任务…' : '';
+}
+// Entering a recoverable history thread attaches to it on its own, without
+// waiting for the user to send a message first.
+function scheduleHistoryRecovery(id, deviceId) {
+  if (!id || !deviceId) return;
+  const key = recoveryKey(deviceId, id);
+  let tries = 0;
+  const tick = () => {
+    if (selectedId !== id || recoverableHistoryId !== id || connected || newDraft) return;
+    if (recoveryChecks.get(key)?.status === 'checking' && tries++ < 100) { setTimeout(tick, 100); return; }
+    void recoverSelectedChat();
+  };
+  setTimeout(tick, 0);
 }
 async function checkRecoveryAttempt(id, deviceId, state) {
   if (state.checking || state.cancelling || !state.requestId) return;
@@ -844,6 +924,22 @@ conversation?.addEventListener('scroll', () => {
   updateScrollButton();
   if (upward && top < 120 && historyCanLoad && !historyAutoBlocked && !historyIsStale()) void loadEarlierPage();
 });
+// Pulling down at the very top also pages in older turns, including when the
+// loaded window is shorter than the viewport and never fires a scroll event.
+let historyPullStart = null;
+conversation?.addEventListener('touchstart', event => {
+  const touch = event.touches?.[0];
+  historyPullStart = touch && conversation.scrollTop <= 4 ? { y: touch.clientY } : null;
+}, { passive: true });
+conversation?.addEventListener('touchmove', event => {
+  const touch = event.touches?.[0];
+  if (!touch || !historyPullStart) return;
+  if (conversation.scrollTop > 8) { historyPullStart = null; return; }
+  if (touch.clientY - historyPullStart.y >= 45 && historyCanLoad && !historyAutoBlocked && !historyIsStale() && !historyRequest) {
+    historyPullStart = null;
+    void loadEarlierPage();
+  }
+}, { passive: true });
 scrollBottomButton?.addEventListener('click', () => {
   followLatest = true;
   conversation.scrollTop = conversation.scrollHeight;
@@ -963,6 +1059,7 @@ function flushPendingModeChange() {
 modeChoose.addEventListener('click', async () => {
   const id = selectedId;
   if (!id || !connected || !['default', 'plan'].includes(liveMode) || modeChanges.has(id) || modelChanges.has(id) || hasPendingOutgoing(id) || recoveryBlocksWrite()) return;
+  closeAttachmentMenu();
   const target = (pendingModeChanges.get(id) || liveMode) === 'plan' ? 'default' : 'plan';
   if (liveRuntimeStatus !== 'idle') {
     if (target === liveMode) pendingModeChanges.delete(id);
@@ -1070,9 +1167,11 @@ function updateComposer() {
   const modeAvailable = ['default', 'plan'].includes(liveMode);
   const modeChange = selectedId && modeChanges.get(selectedId);
   const pendingMode = selectedId && pendingModeChanges.get(selectedId);
+  const effectiveMode = pendingMode || modeChange?.target || liveMode;
   modeChoose.hidden = !modeAvailable;
-  modeChoose.textContent = '计划';
-  modeChoose.dataset.active = String((pendingMode || liveMode) === 'plan');
+  modeChoose.textContent = effectiveMode === 'plan' ? '计划模式 ✓' : '计划模式';
+  modeChoose.dataset.active = String(effectiveMode === 'plan');
+  if (planBadge) planBadge.hidden = !modeAvailable || effectiveMode !== 'plan';
   modeChoose.disabled = messageInput.disabled || Boolean(modeChange) || Boolean(selectedId && modelChanges.has(selectedId)) || hasPendingOutgoing(selectedId);
   modeStatus.textContent = (modeChange?.message.includes('未知') ? modeChange.message : '') || (selectedId && modelChanges.get(selectedId)?.message) || (selectedId && modeNotices.get(selectedId)) || (pendingMode ? '将在当前回合结束后切换' : '');
   const modelChange = selectedId && modelChanges.get(selectedId);
@@ -2104,7 +2203,9 @@ async function loadThreads() {
     const visible = visibleStatusIds();
     const visibleKey = visible.join(',');
     const handover = [...statusHandovers.keys()][0];
-    const response = await fetch('/api/threads', { credentials: 'same-origin', cache: 'no-store', headers: { 'x-codex-visible-threads': visible.join(','), ...(handover ? { 'x-codex-handover-thread': handover } : {}) } });
+    let body = JSON.stringify({ visibleThreads: visible, ...(handover && visible.includes(handover) ? { handoverThread: handover } : {}) });
+    if (visible.length > 1024 || body.length > 1048576) body = JSON.stringify({ visibleThreads: [] });
+    const response = await fetch('/api/threads', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body });
     if (generation !== listRequestGeneration) return;
     if (response.status === 401 || response.status === 403) retry = false;
     if (!response.ok) throw new Error(await responseError(response, `任务列表加载失败 (${response.status})`));
@@ -2967,7 +3068,7 @@ function handleEvent(block) {
     if (controlSignature(streamView) !== previousControls) { cancelPendingRender(); rememberView(streamView); showState(streamView); }
     else queueDeltaRender(streamView);
     return true;
-  } else if (type === 'history') { cancelPendingRender(); if (!payload.conversation || payload.conversation.id !== selectedId || !Array.isArray(payload.conversation.turns)) throw new Error('状态无效'); recoverableHistoryId = selectedId; streamView = null; streamSeq = null; showState(payload.conversation, false); return false; }
+  } else if (type === 'history') { cancelPendingRender(); if (!payload.conversation || payload.conversation.id !== selectedId || !Array.isArray(payload.conversation.turns)) throw new Error('状态无效'); recoverableHistoryId = selectedId; streamView = null; streamSeq = null; showState(payload.conversation, false); scheduleHistoryRecovery(selectedId, currentDeviceId); return false; }
   else if (type === 'status' && payload.status === 'unavailable') { cancelPendingRender(); streamView = null; streamSeq = null; updateLiveTaskStatus(selectedId, 'unknown'); if (displayedHistoryId === selectedId && selectedId) status('仅查看历史', 'error'); else fail('任务状态暂不可用'); }
   return false;
 }

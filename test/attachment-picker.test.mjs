@@ -53,24 +53,24 @@ test('plan mode remains accessible through the plus menu when attachments are un
   assert.equal(nodes.get('#attachment-file').clicks, 0);
 });
 
-test('selecting plan mode keeps the menu open through pending and confirmed states', async () => {
+test('selecting plan mode from the plus menu closes it and lights the plus badge', async () => {
   let confirm;
   const modeResponse = new Promise(resolve => { confirm = resolve; });
   const { context, nodes, requests } = await setup({ modeResponse });
   vm.runInContext("liveMode='default'; liveRuntimeStatus='idle'; updateComposer()", context);
+  assert.equal(nodes.get('#plan-badge').hidden, true);
   nodes.get('#attachment-toggle').click();
   const pending = nodes.get('#mode-choose').listeners.click();
-  assert.equal(nodes.get('#attachment-menu').hidden, false);
-  assert.equal(nodes.get('#mode-choose').textContent, '计划');
+  assert.equal(nodes.get('#attachment-menu').hidden, true);
+  assert.equal(nodes.get('#mode-choose').textContent, '计划模式 ✓');
+  assert.equal(nodes.get('#mode-choose').dataset.active, 'true');
+  assert.equal(nodes.get('#plan-badge').hidden, false);
   assert.equal(nodes.get('#mode-choose').disabled, true);
   confirm({ ok: true }); await pending;
-  assert.equal(nodes.get('#attachment-menu').hidden, false);
   vm.runInContext("liveMode='plan'; modeChanges.delete(selectedId); updateComposer()", context);
-  assert.equal(nodes.get('#mode-choose').textContent, '计划');assert.equal(nodes.get('#mode-choose').dataset.active, 'true');
-  assert.equal(nodes.get('#attachment-menu').hidden, false);
+  assert.equal(nodes.get('#mode-choose').textContent, '计划模式 ✓');assert.equal(nodes.get('#mode-choose').dataset.active, 'true');
+  assert.equal(nodes.get('#plan-badge').hidden, false);
   assert.equal(requests.filter(url => url.endsWith('/mode')).length, 1);
-  nodes.get('#attachment-toggle').click();
-  assert.equal(nodes.get('#attachment-menu').hidden, true);
 });
 
 test('mixed attachments keep image upload semantics and thumbnails, with removable file cards', async () => {

@@ -6,7 +6,7 @@ import { webcrypto } from 'node:crypto';
 const id='11111111-1111-4111-8111-111111111111';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const response=(value={},status=200)=>({ok:status>=200&&status<300,status,json:async()=>value,clone:()=>({json:async()=>value})});
-async function fixture(handler) {
+async function fixture(handler, { stubLoadThreads = true } = {}) {
   class Element {
     constructor(){this.children=[];this.listeners={};this.dataset={};this.value='';this.style={};this.classList={toggle(){},contains(){return false;}};this.scrollHeight=300;this.clientHeight=500;this.scrollTop=0;}
     addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}querySelectorAll(){return [];}after(){}before(){}
@@ -20,7 +20,7 @@ async function fixture(handler) {
   let source=await readFile(new URL('../public/desktop.js',import.meta.url),'utf8');
   source=source.replace("import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore())",'Promise.resolve(store)');
   const run=code=>vm.runInContext(code,context);run(source);run('const fixtureConnect=connect');await tick();
-  run(`selectedId='${id}';currentDeviceId='device';historyScope={hostId:'host',deviceId:'device'};connected=false;recoverableHistoryId=selectedId;recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});loadThreads=async()=>{};connect=async()=>{};updateComposer();`);
+  run(`selectedId='${id}';currentDeviceId='device';historyScope={hostId:'host',deviceId:'device'};connected=false;recoverableHistoryId=selectedId;recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});${stubLoadThreads ? 'loadThreads=async()=>{};' : ''}connect=async()=>{};updateComposer();`);
   return {run,nodes,requests,reserves,removes,submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
 }
 
@@ -86,13 +86,13 @@ test('new chat defaults to a concrete model and effort and the in-app pickers dr
   assert.equal(f.run('newEffort.disabled'),false);
   assert.equal(f.run("[...modelControl.children].some(o=>o.value==='')"),false);
   assert.equal(f.run("[...effortControl.children].some(o=>o.value==='')"),false);
-  assert.equal(f.run('modelPicker.label.textContent'),'A');assert.equal(f.run('effortPicker.label.textContent'),'high');
-  f.run('openPicker(effortPicker)');assert.equal(f.run('effortPicker.panel.hidden'),false);assert.equal(f.run('effortPicker.panel.children.length'),3);
-  f.run('effortPicker.panel.children[1].listeners.click()');
-  assert.equal(f.run('newDraft.effort'),'low');assert.equal(f.run('effortPicker.panel.hidden'),true);
-  f.run("modelControl.value='b';modelControl.listeners.change()");
+  assert.equal(f.run('modelPicker.label.textContent'),'A · high');
+  f.run('openPicker(modelPicker)');assert.equal(f.run('modelPicker.panel.hidden'),false);assert.equal(f.run('modelPicker.view'),null);
+  f.run('modelPicker.panel.children[2].listeners.click()');
+  assert.equal(f.run('modelPicker.view !== null'),true);assert.equal(f.run('modelPicker.panel.children[1].textContent'),'思考等级');
+  f.run('modelPicker.panel.children[2].listeners.click()');
   assert.equal(f.run('newDraft.model'),'b');assert.equal(f.run('newDraft.effort'),'medium');
-  assert.equal(f.run('effortPicker.label.textContent'),'medium');
+  assert.equal(f.run('modelPicker.label.textContent'),'B · medium');assert.equal(f.run('modelPicker.panel.hidden'),true);
 });
 
 test('new chat hides the load-earlier action and never writes a history notice',async()=>{
@@ -117,4 +117,14 @@ test('connecting negotiates recent history windows and staged preview before rea
   const request=f.requests.find(r=>r.url.endsWith('/events'));assert.ok(request);
   assert.equal(request.options.headers['x-codex-history-window'],'1');assert.equal(request.options.headers['x-codex-staged-preview'],'1');
   f.run('active?.abort()');
+});
+
+test('thread list sends visible ids as a POST body so the relay can resolve running status',async()=>{
+  const f=await fixture(async()=>response({projects:[],recent:[]}),{stubLoadThreads:false});
+  f.run(`connected=true;selectedId='${id}'`);
+  await f.run('loadThreads()');await tick();
+  const call=f.requests.filter(r=>r.url.endsWith('/api/threads')).at(-1);
+  assert.ok(call);assert.equal(call.options.method,'POST');
+  assert.equal(call.options.headers['content-type'],'application/json');
+  assert.deepEqual(JSON.parse(call.options.body).visibleThreads,[id]);
 });
