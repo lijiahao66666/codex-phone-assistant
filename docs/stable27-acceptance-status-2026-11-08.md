@@ -1,5 +1,9 @@
 # stable27 至 stable30 验收记录
 
+stable33 同版本列表复验：53 个既有聊天逐条执行，每条等待最多 15 秒，51 个实时连接且输入可用；主任务在该窗口未连接，礼品卡已实时连接但 recovery locked、输入禁用。51 个成功项等待中位数 894 ms，最大 13603 ms，选中 ID 错位 0。最初有分组未展开，展开后对遗漏条目补测，结果分批取得而非一次连续遍历；原始记录 `/private/tmp/codex-stable33-all53-retest.json`。复验结束时助手和桌面进程均存在；结束时 RSS 不是过程峰值，也不能据此证明所有历史路径无内存问题。
+
+礼品卡锁的并发审查发现可达反例：原生 follower handler 入口校验 owner 后会异步等待设置；若此时角色变成 follower、后续转发收到 `no-client-found`，原生代码会调用 `resumeConversationForUnavailableOwner`。当前原生代码的隔离 VM 复现了该路径，尚未证明礼品卡现网发生。助手侧 session/owner/revision 的写前校验不能约束原生后续自动 resume，且模型写入 journal 还与 recovery 锁互斥。因此未实施绕过锁的方案；需要原生提供禁止自动 resume 的执行期保护，或取得旧 attempt 已结束的权威证据。
+
 stable33 补充复验：2026-11-09 00:55（北京时间）运行中的新助手下，一次全局未知聊天 IPC discovery 以 4.99 ms 返回 `no-client-found`；此前独立样本约 10008 ms。C/D 各一次新物理 IPC 连接到 fresh snapshot 为 2.93/2.89 ms，这是 IPC 样本，不等于 H5 冷连接。此前超时的 9 个聊天在 H5 各等待最多 15 秒复验：7 个输入可用，耗时 591 至 4259 ms；主任务 15 秒内未连接，礼品卡实时连接但旧 recovery 锁使输入禁用。不能由此声称全部聊天或全局延迟通过。
 
 随后重新选择主任务，一次实测在 12.302 秒后实时连接且输入可用，模型 Terra/high；这是另一轮选择，不更改上一次 15 秒超时记录。礼品卡在同日重新选择后约 708 ms 显示实时 Sol/high，但恢复锁仍在、输入仍禁用。
