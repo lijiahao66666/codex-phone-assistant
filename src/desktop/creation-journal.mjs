@@ -61,6 +61,12 @@ export class CreationJournal {
     const row = this.db.prepare('SELECT status FROM recovery_attempts WHERE host_id=? AND device_id=? AND thread_id=? AND request_id=?').get(hostId, deviceId, threadId, requestId);
     return ['registered', 'dispatching'].includes(row?.status) ? 'pending' : row?.status || 'missing';
   }
+  recoveryAttemptExecutionTracked(hostId, deviceId, threadId, requestId) {
+    const row = this.db.prepare('SELECT execution_id,execution_pid,execution_started FROM recovery_attempts WHERE host_id=? AND device_id=? AND thread_id=? AND request_id=?').get(hostId, deviceId, threadId, requestId);
+    if (!row) return null;
+    // Only entirely unattributed rows can use the confirmed-route fallback.
+    return row.execution_id !== null || row.execution_pid !== null || row.execution_started !== null;
+  }
   dispatchRecovery(hostId, deviceId, threadId, requestId, execution = null) {
     this.db.exec('BEGIN IMMEDIATE');
     try {

@@ -12,6 +12,20 @@ import { createOwnerRuntime } from '../src/desktop/owner-runtime.mjs';
 import { readProcessStartIdentity, reconcileExitedRecoveryExecutions } from '../src/desktop/recovery-execution.mjs';
 
 const host = randomUUID(), device = randomUUID();
+test('attempt tracking is explicit, scoped, and conservative for partial execution metadata',()=>{
+  const journal=new CreationJournal(':memory:');
+  try {
+    const thread=randomUUID(),request=randomUUID();
+    assert.equal(journal.recoveryAttemptExecutionTracked(host,device,thread,request),null);
+    journal.beginRecoveryAttempt(host,device,thread,request);
+    journal.finishRecoveryAttempt(host,device,thread,request,'accepted');
+    assert.equal(journal.recoveryAttemptExecutionTracked(host,device,thread,request),false);
+    assert.equal(journal.recoveryAttemptExecutionTracked(host,randomUUID(),thread,request),null);
+    journal.db.prepare('UPDATE recovery_attempts SET execution_id=? WHERE request_id=?').run('partially-tracked',request);
+    assert.equal(journal.recoveryAttemptExecutionTracked(host,device,thread,request),true);
+    assert.equal(journal.recoveryAttempt(host,device,thread,request),'accepted');
+  } finally { journal.close(); }
+});
 function reserve(journal, execution, threadId = randomUUID(), requestId = randomUUID()) {
   journal.beginRecoveryAttempt(host, device, threadId, requestId);
   assert.equal(journal.dispatchRecovery(host, device, threadId, requestId, execution), true);

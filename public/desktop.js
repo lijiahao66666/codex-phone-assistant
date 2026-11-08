@@ -582,6 +582,7 @@ function recoveryNoticeTick() {
 // to pile up one resume per task), so this waits, keeps only the latest target,
 // and gives up as soon as the selection moves on.
 const historyRecoveryAttempts = new Map();
+const unboundAcceptedRetries = new Set();
 let historyRecoveryTimer = null, historyRecoverySeq = 0;
 function scheduleHistoryRecovery(id, deviceId) {
   if (!id || !deviceId) return;
@@ -632,6 +633,7 @@ async function runHistoryRecovery(id, deviceId) {
 }
 async function checkRecoveryAttempt(id, deviceId, state) {
   if (state.checking || state.cancelling || !state.requestId) return;
+  const queriedStream = recoveryStream, queriedScope = historyScopeGeneration;
   state.checking = true; state.lastCheckedAt = Date.now(); updateComposer();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
   try {
@@ -647,6 +649,23 @@ async function checkRecoveryAttempt(id, deviceId, state) {
     } else if (result?.locked === false && result.status === 'accepted') {
       const firstAccepted = state.status !== 'awaiting-state';
       state.status = 'awaiting-state'; state.message = '正在连接任务';
+      if (result.executionTracked === false && Date.now() - state.since >= 30000 && !unboundAcceptedRetries.has(recoveryKey(deviceId, id))) {
+        const stream = queriedStream, generation = queriedScope;
+        const isCurrent = () => selectedId === id && currentDeviceId === deviceId && historyScopeGeneration === generation && recoverableHistoryId === id && !connected && !newDraft && recoveryStream === stream && stream?.threadId === id && !stream.controller.signal.aborted;
+        if (isCurrent()) {
+          unboundAcceptedRetries.add(recoveryKey(deviceId, id));
+          if (!(await clearRecoveryAttempt(deviceId, id, state))) throw new Error('storage');
+          if (recoveries.get(recoveryKey(deviceId, id)) !== state) return;
+          if (!isCurrent()) return;
+          recoveryChecks.delete(recoveryKey(deviceId, id));
+          await checkRecoveryStatus(id, deviceId, stream, { onReady: () => {
+            if (!isCurrent() || recoveries.get(recoveryKey(deviceId, id)) !== state) return;
+            state.status = 'unavailable';
+            return recoverSelectedChat({ preserveStream: stream, isCurrent });
+          } });
+          return;
+        }
+      }
       // Keep the attachment's own retry sequence alive after acceptance. A
       // status poll must not cancel and restart that session every five seconds.
       const attachedStream = recoveryStream?.threadId === id && !recoveryStream.controller.signal.aborted && (recoveryStream.liveState || recoverableHistoryId !== id);
@@ -683,7 +702,7 @@ cancelRecovery.addEventListener('click', async () => {
     if (selectedId === id && currentDeviceId === deviceId) updateComposer();
   }
 });
-async function checkRecoveryStatus(id, deviceId, stream) {
+async function checkRecoveryStatus(id, deviceId, stream, { onReady } = {}) {
   const key = recoveryKey(deviceId, id), check = { status: 'checking', since: Date.now() };
   recoveryChecks.set(key, check);
   if (selectedId === id && currentDeviceId === deviceId) updateComposer();
@@ -700,7 +719,9 @@ async function checkRecoveryStatus(id, deviceId, stream) {
     clearTimeout(timer);
     if (selectedId === id && currentDeviceId === deviceId) {
       updateComposer();
-      if (check.status === 'ready' && recoverableHistoryId === id && !connected) void recoverSelectedChat();
+      if (check.status === 'ready' && recoverableHistoryId === id && !connected) {
+        if (onReady) await onReady(); else void recoverSelectedChat();
+      }
     }
   }
 }
@@ -1376,9 +1397,9 @@ function updateComposer() {
   if (selectedId && (connected || canDraftInHistory()) && !newDraft) { const id = selectedId; void Promise.resolve().then(() => runOutgoingQueue(id)); }
 }
 const activeRecoveryAborts = new Map();
-async function recoverSelectedChat() {
+async function recoverSelectedChat({ preserveStream = null, isCurrent = () => true } = {}) {
   const id = selectedId, deviceId = currentDeviceId;
-  if (!id || !deviceId || newDraft) return;
+  if (!id || !deviceId || newDraft || !isCurrent()) return;
   const key = recoveryKey(deviceId, id), previous = recoveryState(deviceId, id);
   const check = recoveryChecks.get(key);
   if (previous?.status === 'unknown') { await checkRecoveryAttempt(id, deviceId, previous); return; }
@@ -1400,7 +1421,7 @@ async function recoverSelectedChat() {
     if (!(await store.reserve(deviceId, id, state.requestId))) throw new Error('occupied');
     reserved = true;
     recoveryChannel?.postMessage({ deviceId, threadId: id });
-    if (selectedId !== id || currentDeviceId !== deviceId || newDraft || connected) throw new Error('selection changed');
+    if (selectedId !== id || currentDeviceId !== deviceId || newDraft || connected || !isCurrent()) throw new Error('selection changed');
   }
   catch {
     if (reserved) await clearRecoveryAttempt(deviceId, id, state);
@@ -1418,7 +1439,7 @@ async function recoverSelectedChat() {
     let result; try { result = await response.json(); } catch { result = null; }
     if (response.status === 202 && result?.status === 'accepted') {
       state.status = 'awaiting-state'; state.message = '正在连接任务'; state.since = Date.now();
-      if (selectedId === id && currentDeviceId === deviceId) void connect(id);
+      if (selectedId === id && currentDeviceId === deviceId && isCurrent() && !(preserveStream && recoveryStream === preserveStream && !preserveStream.controller.signal.aborted)) void connect(id);
     } else if (response.status === 409 && result?.error === 'unavailable') {
       if (!(await clearRecoveryAttempt(deviceId, id, state))) throw new Error('storage');
       state.status = 'unavailable'; state.message = '暂时无法连接，请稍后再试'; state.since = Date.now();
@@ -3287,6 +3308,7 @@ function handleEvent(block) {
     if (payload.seq !== undefined && (!Number.isSafeInteger(payload.seq) || payload.seq < 1 || (streamSeq !== null && payload.seq <= streamSeq))) throw new Error('状态版本错误');
     recoverableHistoryId = null;
     historyRecoveryAttempts.delete(recoveryKey(currentDeviceId, selectedId));
+    unboundAcceptedRetries.delete(recoveryKey(currentDeviceId, selectedId));
     if (recoveryStream?.threadId === selectedId) recoveryStream.liveState = true;
     const recovery = recoveries.get(recoveryKey(currentDeviceId, selectedId));
     if (recovery && ['pending', 'awaiting-state', 'unknown'].includes(recovery.status)) { recovery.liveStream = recoveryStream; finishAcceptedRecovery(selectedId, currentDeviceId, recoveryStream); }

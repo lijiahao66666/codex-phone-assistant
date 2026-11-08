@@ -701,7 +701,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         const answer = beginRead(msg);
         try {
           if (!ownerRouter || revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === recoveryAttempt[1] && s.uploadDeviceId === msg.deviceId)) return answer(false);
-          answer(true, { status: ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, recoveryAttempt[1], recoveryAttempt[2]), locked: ownerRouter.isRecoveryLocked(recoveryAttempt[1]) });
+          answer(true, { status: ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, recoveryAttempt[1], recoveryAttempt[2]), locked: ownerRouter.isRecoveryLocked(recoveryAttempt[1]), executionTracked: ownerRouter.journal.recoveryAttemptExecutionTracked(hostId, msg.deviceId, recoveryAttempt[1], recoveryAttempt[2]) });
         } catch { answer(false); }
         return;
       }
