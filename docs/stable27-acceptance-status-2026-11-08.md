@@ -1,5 +1,11 @@
 # stable27 至 stable30 验收记录
 
+stable33 补充复验：2026-11-09 00:55（北京时间）运行中的新助手下，一次全局未知聊天 IPC discovery 以 4.99 ms 返回 `no-client-found`；此前独立样本约 10008 ms。C/D 各一次新物理 IPC 连接到 fresh snapshot 为 2.93/2.89 ms，这是 IPC 样本，不等于 H5 冷连接。此前超时的 9 个聊天在 H5 各等待最多 15 秒复验：7 个输入可用，耗时 591 至 4259 ms；主任务 15 秒内未连接，礼品卡实时连接但旧 recovery 锁使输入禁用。不能由此声称全部聊天或全局延迟通过。
+
+随后重新选择主任务，一次实测在 12.302 秒后实时连接且输入可用，模型 Terra/high；这是另一轮选择，不更改上一次 15 秒超时记录。礼品卡在同日重新选择后约 708 ms 显示实时 Sol/high，但恢复锁仍在、输入仍禁用。
+
+专用 C 两次重复最终回复已核对原生 rollout 和 `~/.codex/logs_2.sqlite`：两个 turn 各只有一次用户输入，原生 Responses 流超时或在 `response.completed` 前断开后触发 sampling 重试，随后生成不同 message ID 的第二条 final。日志 ID 分别为 81243061、81243234、81268186。这排除了本次 H5 重复渲染和重复提交；现有证据无法区分 provider、代理和网络导致的流中断。
+
 本机更新（2026-11-09，stable33）：只读 IPC follower 现在明确回复 discovery `canHandle:false`，不改变 owner、fresh snapshot 或恢复锁。独立真实 socket A/B 中，不回复的定向发现约 10001.62 ms 才失败，回复 false 约 0.81 ms 失败；原生路由还有其他连接，本结果不等于全局连接速度改善。相关 IPC、pool、owner-router、恢复连接共 53/53 测试通过。签名校验通过的新包已安装，源码与安装文件 SHA-256 均为 `18f71cb7e18a38aa45427357ec4a88793897f3c53eafd089b71c050469ff264d`，旧包保留在 `/Applications/codex手机助手-stable31-backup-20261109.app`。公网 H5 仍为 stable32。重启后 C 切换到输入可用约 389 ms，仅为本次热切换；H5 发出的 `H5_DISCOVERY_FIX_20261109_C` 消息与回复已出现在原生回合 `01a1bc0a-01fa-7923-918f-f6f6966260bd`。该原生回合又出现两条同内容最终回复，仍须独立排查，不能判定为此修复所致。
 
 补充实测（2026-11-09）：专用 D 在真实桌面输入框中提交任务并用 Cmd+Enter 入队，原生 UI 明确出现 `Preview queued message 1` 和队列操作；前一回合完成后，跟进作为新回合自动执行一次，最终队列清空、输入框为空、聊天 idle。两组跟进消息及回复各出现一次，H5 收到第二组跟进和回复。证据 `/private/tmp/codex-native-queue-ui-20261109-receipt.json`、`/private/tmp/codex-native-queue-final-thread-20261109.json`。为补采队列卡片做了两组实测；不能将此项扩展为真实审批或问答通过。
