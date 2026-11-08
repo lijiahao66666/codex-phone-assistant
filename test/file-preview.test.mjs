@@ -4,8 +4,11 @@ import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { readChangedFile, readLinkedFile, linkedPreviewMatches } from '../src/media/file-preview.mjs';
+
+const safeMediaOpenSource = fileURLToPath(new URL('../macos/safe-media-open.c', import.meta.url));
 
 test('line suffix matching accepts only the referenced path or its numeric line suffix', () => {
   assert.equal(linkedPreviewMatches('/tmp/a.md:12:3', '/tmp/a.md'), true);
@@ -20,7 +23,7 @@ test('only a live structured change can preview a bounded text file', { skip: pr
   const root = join(dir, 'root'), helperPath = join(dir, 'safe-open');
   try {
     await mkdir(root);
-    await promisify(execFile)('/usr/bin/cc', ['-std=c11', '-D_DARWIN_C_SOURCE', new URL('../macos/safe-media-open.c', import.meta.url).pathname, '-o', helperPath]);
+    await promisify(execFile)('/usr/bin/cc', ['-std=c11', '-D_DARWIN_C_SOURCE', safeMediaOpenSource, '-o', helperPath]);
     const path = join(root, 'a.txt'), outside = join(dir, 'outside');
     await writeFile(path, 'hello'); await writeFile(outside, 'private');
     const state = { id: 't', turns: [{ turnId: 'turn', items: [{ id: 'item', type: 'fileChange', changes: [{ path }] }] }] };
@@ -41,7 +44,7 @@ test('message file links must occur in the authorized message and remain inside 
   const root = join(dir, 'root'), helperPath = join(dir, 'safe-open');
   try {
     await mkdir(root);
-    await promisify(execFile)('/usr/bin/cc', ['-std=c11', '-D_DARWIN_C_SOURCE', new URL('../macos/safe-media-open.c', import.meta.url).pathname, '-o', helperPath]);
+    await promisify(execFile)('/usr/bin/cc', ['-std=c11', '-D_DARWIN_C_SOURCE', safeMediaOpenSource, '-o', helperPath]);
     const path = join(root, 'a space.md'), outside = join(dir, 'outside.md');
     await writeFile(path, 'linked'); await writeFile(outside, 'private');
     const state = { id: 't', turns: [{ turnId: 'turn', items: [{ id: 'item', type: 'agentMessage', text: `[doc](<${path}>)` }] }] };
