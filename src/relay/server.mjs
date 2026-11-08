@@ -610,7 +610,10 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   });
   server.on('upgrade', (req, socket, head) => {
     const host = registry.authenticateHost(hostSecret(req));
-    if (closed || req.headers.host !== base.host || req.url !== '/connector' || !host || peers.has(host.id)) return socket.destroy();
+    if (closed || req.headers.host !== base.host || req.url !== '/connector' || !host || peers.has(host.id)) {
+      console.warn('connector rejected', JSON.stringify({ closed, duplicate: Boolean(host && peers.has(host.id)), hostHeader: req.headers.host ?? null, originHost: base.host, url: req.url ?? null, authenticated: Boolean(host) }));
+      return socket.destroy();
+    }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, host.id));
   });
   wss.on('connection', (ws, hostId) => {

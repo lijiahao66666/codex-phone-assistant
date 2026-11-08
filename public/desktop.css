@@ -288,3 +288,7 @@ body,.composer,.composer-inner,.composer-inner textarea,.picker-trigger,.picker-
 .composer-inner:has(textarea:not(:placeholder-shown)) #stop-turn,
 .composer-inner:has(textarea:not(:placeholder-shown)) #send-message{align-self:center;margin-bottom:0}
 
+
+/* The model label sits right next to the send button; the chevron crowded it. */
+.picker-model .chevron-icon{display:none}
+.picker-model{padding-right:12px}

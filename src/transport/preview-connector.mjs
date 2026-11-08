@@ -173,6 +173,8 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     if (stopped) return;
     ws = new WebSocket(target, { headers: { authorization: `Bearer ${secret}` }, handshakeTimeout: 10000, maxPayload: 1024 * 1024 });
     const connection = ws;
+    connection.on('open', () => trace('relay', 'open', {}));
+    connection.on('error', error => trace('relay', 'error', { message: String(error?.message || error).slice(0, 120) }));
     const connectionScheduler = createWebSocketSendScheduler({ socket: connection, maxMessageBytes: 15 * 1024 * 1024, maxStreamMessageBytes: 8 * 1024 * 1024, maxControlBytes: 16 * 1024 * 1024, reservedControlBytes: 65536, reservedControls: 8, ...(schedulerLimitForTests ? { maxStreams: schedulerLimitForTests } : {}), onError: ({ code, key, error }) => {
       if ((code === 'message-too-large' || code === 'factory-failed') && key && streams.has(key)) {
         console.warn('stream-observation', JSON.stringify({ stage: 'projection', code, cause: error?.name || null }));
@@ -671,7 +673,19 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         return;
       }
       if (msg.type !== 'request') return;
-      if (msg.path === '/api/models') { const answer = beginRead(msg); try { if (!models) return answer(false); answer(true, { models: await models.list() }); } catch { answer(false); } return; }
+      if (msg.path === '/api/models') {
+        const answer = beginRead(msg);
+        try {
+          if (!models) { trace('models', 'unavailable', { reason: 'no-service' }); return answer(false); }
+          const list = await models.list();
+          trace('models', 'listed', { count: list.length });
+          answer(true, { models: list });
+        } catch (error) {
+          trace('models', 'failed', { code: error?.code || null, message: String(error?.message || error).slice(0, 160) });
+          answer(false);
+        }
+        return;
+      }
       const modelStatus = /^\/api\/threads\/([0-9a-f-]{36})\/model-status$/i.exec(msg.path || '');
       if (modelStatus) {
         const answer = beginRead(msg);
@@ -872,7 +886,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       });
       try { session.start(); } catch { streams.delete(msg.id); void session.close(); send({ type: 'end', id: msg.id }, connection); }
     });
-    ws.on('close', () => { for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }); if (!stopped) timer = setTimeout(connect, retryMs); });
+    ws.on('close', () => { trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }); if (!stopped) timer = setTimeout(connect, retryMs); });
   }
   return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async close() { stopped = true; clearTimeout(timer); closeStreams(); await models?.close(); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
 }

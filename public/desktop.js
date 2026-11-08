@@ -68,6 +68,15 @@ function renderPickerPanel(item) {
     return;
   }
   const options = pickerOptions(item.select);
+  if (item === modelPicker && !newDraft && !modelCatalog.length) {
+    // Without the catalog the list would be empty and the control used to stay
+    // disabled, so a tap did nothing at all. Offer the reload instead.
+    const retry = element('button', 'picker-option', '模型列表未加载，点击重试');
+    retry.type = 'button';
+    retry.addEventListener('click', event => { event?.stopPropagation?.(); modelLoadAttempt = 0; void loadModels(); renderPickerPanel(item); });
+    item.panel.replaceChildren?.(element('div', 'picker-panel-title', item.title), retry);
+    return;
+  }
   const rows = options.map(option => {
     const button = element('button', 'picker-option' + (String(option.value) === String(item.select.value) ? ' is-current' : ''), option.textContent || option.value || '默认');
     button.type = 'button';
@@ -248,7 +257,9 @@ function updateModelControl() {
   const efforts = matching?.supportedReasoningEfforts || [];
   if (!efforts.includes(shownEffort)) { const option = document.createElement('option'); option.value = ''; option.textContent = shownEffort || '默认'; effortControl.append?.(option); }
   for (const effort of efforts) { const option = document.createElement('option'); option.value = effort; option.textContent = effort; option.selected = effort === shownEffort; effortControl.append?.(option); }
-  const disabled = !selectedId || !connected || !modelCatalog.length || modelChanges.has(selectedId) || modeChanges.has(selectedId) || recoveryBlocksWrite();
+  // The catalog gates the option list, not the trigger: with the trigger disabled
+  // a tap never reached the panel, so an empty catalog looked like a dead control.
+  const disabled = !selectedId || !connected || modelChanges.has(selectedId) || modeChanges.has(selectedId) || recoveryBlocksWrite();
   modelControls.hidden = Boolean(newDraft) || !selectedId;
   modelControl.disabled = disabled;
   effortControl.disabled = disabled || !matching || !efforts.length;
