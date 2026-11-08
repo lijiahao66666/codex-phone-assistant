@@ -639,7 +639,7 @@ async function checkRecoveryAttempt(id, deviceId, state) {
     if (!response.ok) throw new Error('unavailable');
     const result = await response.json();
     if (recoveries.get(recoveryKey(deviceId, id)) !== state || !['unknown', 'awaiting-state'].includes(state.status)) return;
-    if (result?.locked === false && ['rejected', 'cancelled'].includes(result.status)) {
+    if (result?.locked === false && ['rejected', 'cancelled', 'released'].includes(result.status)) {
       if (!(await clearRecoveryAttempt(deviceId, id, state))) throw new Error('storage');
       state.status = 'unavailable'; state.message = '暂时无法连接，请稍后再试'; state.since = Date.now();
       recoveryChecks.delete(recoveryKey(deviceId, id));
@@ -2118,7 +2118,8 @@ function applySidebarStatuses() {
   }
 }
 function acceptSidebarStatuses(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 4 || Object.entries(value).some(([id, state]) => !uuid.test(id) || !['active', 'idle', 'unknown'].includes(state))) return;
+  // The observer also retains running tasks outside the four visible slots.
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 1024 || Object.entries(value).some(([id, state]) => !uuid.test(id) || !['active', 'idle', 'unknown'].includes(state))) return;
   sidebarStatusSnapshot = new Map(Object.entries(value));
   for (const task of projectList.querySelectorAll?.('.task') || []) {
     const state = sidebarStatusSnapshot.get(task.dataset.id);
@@ -2186,6 +2187,9 @@ function renderTask(task) {
   button.type = 'button';
   button.dataset.id = task.id;
   button.dataset.status = task.status?.type || task.status || 'unknown';
+  // A confirmed list result completes the handover; its old deadline must not
+  // hide the status that this replacement row just received.
+  if (taskStatusIsActive(button.dataset.status) || button.dataset.status === 'idle') clearStatusHandover(task.id);
   button.setAttribute('aria-current', String(task.id === selectedId));
   button.append(element('span', 'task-title', task.title || '未命名任务'));
   const indicator = element('span', 'task-active', ''); indicator.title = '进行中'; indicator.setAttribute('aria-label', '进行中');

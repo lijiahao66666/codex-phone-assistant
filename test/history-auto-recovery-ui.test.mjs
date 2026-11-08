@@ -6,7 +6,7 @@ import { webcrypto } from 'node:crypto';
 const id='11111111-1111-4111-8111-111111111111';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const response=(value={},status=200)=>({ok:status>=200&&status<300,status,json:async()=>value,clone:()=>({json:async()=>value})});
-async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers = false } = {}) {
+async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers = false, manualHandoverTimers = false } = {}) {
   class Element {
     constructor(){this.children=[];this.listeners={};this.dataset={};this.value='';this.style={};this.classList={toggle(){},contains(){return false;}};this.scrollHeight=300;this.clientHeight=500;this.scrollTop=0;}
     addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}after(){}before(){}
@@ -15,12 +15,13 @@ async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers =
     cloneNode(){const copy=new Element();copy.value=this.value;copy.textContent=this.textContent;return copy;}
   }
   const nodes=new Map(),requests=[],reserves=[],removes=[];
-  const recoveryTimers=new Map();
+  const recoveryTimers=new Map(),handoverTimers=new Map();
   const fixtureTimeout=(fn,ms,...args)=>{
+    if(manualHandoverTimers&&ms===1500){const timer={unref(){}};handoverTimers.set(timer,()=>fn(...args));return timer;}
     if(!manualRecoveryTimers||ms!==500)return setTimeout(fn,ms,...args);
     const timer={unref(){}};recoveryTimers.set(timer,()=>fn(...args));return timer;
   };
-  const fixtureClearTimeout=timer=>{if(!recoveryTimers.delete(timer))clearTimeout(timer);};
+  const fixtureClearTimeout=timer=>{if(!recoveryTimers.delete(timer)&&!handoverTimers.delete(timer))clearTimeout(timer);};
   const document={querySelector(key){if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
   const store={read:async()=>null,reserve:async(...args)=>{reserves.push(args);return true;},remove:async(...args)=>{removes.push(args);return true;}};
   const context=vm.createContext({document,store,crypto:webcrypto,AbortController,URLSearchParams,TextDecoder,TextEncoder,Date,setTimeout:fixtureTimeout,clearTimeout:fixtureClearTimeout,localStorage:{getItem(){return null;},removeItem(){}},sessionStorage:{removeItem(){}},window:{addEventListener(){}},fetch:async(url,options={})=>{
@@ -30,7 +31,7 @@ async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers =
   source=source.replace("import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore())",'Promise.resolve(store)');
   const run=code=>vm.runInContext(code,context);run(source);run('const fixtureConnect=connect');await tick();
   run(`selectedId='${id}';currentDeviceId='device';historyScope={hostId:'host',deviceId:'device'};connected=false;recoverableHistoryId=selectedId;recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});${stubLoadThreads ? 'loadThreads=async()=>{};' : ''}connect=async()=>{};updateComposer();`);
-  return {run,nodes,requests,reserves,removes,recoveryTimers,fireRecoveryTimer(){const entry=recoveryTimers.entries().next().value;if(!entry)return false;recoveryTimers.delete(entry[0]);entry[1]();return true;},submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
+  return {run,nodes,requests,reserves,removes,recoveryTimers,handoverTimers,fireRecoveryTimer(){const entry=recoveryTimers.entries().next().value;if(!entry)return false;recoveryTimers.delete(entry[0]);entry[1]();return true;},submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
 }
 
 test('live attachment renews the history recovery budget across helper restarts',async()=>{
@@ -151,6 +152,38 @@ test('the first accepted confirmation retains an existing non-history attachment
   } finally { f.run('active?.abort()'); }
 });
 
+test('an explicitly unlocked released attempt permits a fresh recovery after checking readiness',async()=>{
+  for(const status of ['unknown','awaiting-state']){
+    const f=await fixture(url=>url.includes('/recovery-attempt/')?response({status:'released',locked:false}):url.endsWith('/recover')?response({status:'accepted'},202):response({locked:false}),{manualRecoveryTimers:true});
+    const oldRequestId='22222222-2222-4222-8222-222222222222';
+    f.run(`recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'${status}',requestId:'${oldRequestId}',since:Date.now()-21000})`);
+    await f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');await tick();
+    assert.equal(f.removes.length,1);assert.equal(f.removes[0][2],oldRequestId);
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unavailable');
+    assert.equal(f.run('recoveryChecks.has(recoveryKey(currentDeviceId,selectedId))'),false);
+    assert.equal(f.requests.some(r=>r.url.endsWith('/recover')),false);
+    f.run('recoveryStream={threadId:selectedId,controller:new AbortController()}');
+    await f.run('checkRecoveryStatus(selectedId,currentDeviceId,recoveryStream)');await tick();await tick();
+    const recover=f.requests.filter(r=>r.url.endsWith('/recover'));
+    assert.equal(recover.length,1);assert.equal(f.reserves.length,1);
+    assert.notEqual(JSON.parse(recover[0].options.body).requestId,oldRequestId);
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'awaiting-state');
+  }
+});
+
+test('a lock or an inconclusive attempt status cannot release a browser recovery record',async()=>{
+  let result;
+  const f=await fixture(url=>url.includes('/recovery-attempt/')?response(result):undefined,{manualRecoveryTimers:true});
+  f.run("recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'awaiting-state',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-21000})");
+  for(result of [{status:'released',locked:true},{status:'released'},{status:'unknown',locked:false},{status:'missing',locked:false},{status:'pending',locked:false}]){
+    await f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');await tick();
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'awaiting-state');
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'),'22222222-2222-4222-8222-222222222222');
+    assert.equal(f.run('recoveryBlocksWrite()'),true);assert.equal(f.removes.length,0);
+    assert.equal(f.requests.some(r=>r.url.endsWith('/recover')),false);
+  }
+});
+
 test('history is editable without takeover and only the explicit send recovers before dispatch',async()=>{
   const f=await fixture((url)=>url.endsWith('/recover')?response({status:'accepted'},202):url.endsWith('/messages')?response({status:'accepted'},202):undefined);
   assert.equal(f.nodes.get('#message').disabled,false);assert.equal(f.nodes.get('#recover-chat').hidden,true);
@@ -267,6 +300,39 @@ test('thread list sends visible ids as a POST body so the relay can resolve runn
   assert.ok(call);assert.equal(call.options.method,'POST');
   assert.equal(call.options.headers['content-type'],'application/json');
   assert.deepEqual(JSON.parse(call.options.body).visibleThreads,[id]);
+});
+
+test('sidebar SSE updates running indicators when retained tasks exceed the visible window',async()=>{
+  const f=await fixture();
+  f.run("projectList.append(renderTask({id:selectedId,title:'running task',status:'idle'}))");
+  const marker=f.run("projectList.querySelector('.task-active')");
+  assert.equal(marker.hidden,true);
+  const statuses=Object.fromEntries([id,...Array.from({length:8},(_,index)=>`${String(index+2).padStart(8,'0')}-1111-4111-8111-111111111111`)].map(key=>[key,'active']));
+  f.run(`handleEvent('event: sidebar-status\\ndata: '+${JSON.stringify(JSON.stringify(statuses))})`);
+  assert.equal(marker.hidden,false);assert.equal(marker.dataset.status,'active');
+  statuses[id]='idle';
+  f.run(`handleEvent('event: sidebar-status\\ndata: '+${JSON.stringify(JSON.stringify(statuses))})`);
+  assert.equal(marker.hidden,true);assert.equal(marker.dataset.status,'idle');
+});
+
+test('a confirmed list status settles handover before its deadline can hide a running task',async()=>{
+  const f=await fixture(undefined,{manualHandoverTimers:true});
+  f.run("projectList.append(renderTask({id:selectedId,title:'running',status:'idle'}));updateLiveTaskStatus(selectedId,'active');beginStatusHandover(selectedId)");
+  assert.equal(f.handoverTimers.size,1);
+  f.run("projectList.replaceChildren(renderTask({id:selectedId,title:'running',status:'active'}))");
+  for(const fire of f.handoverTimers.values())fire();f.handoverTimers.clear();
+  assert.equal(f.run("projectList.querySelector('.task').dataset.status"),'active');
+  assert.equal(f.run("projectList.querySelector('.task-active').hidden"),false);
+  assert.equal(f.run('statusHandovers.has(selectedId)'),false);
+});
+
+test('an inconclusive list status leaves the handover deadline to clear the old live spinner',async()=>{
+  const f=await fixture(undefined,{manualHandoverTimers:true});
+  f.run("projectList.append(renderTask({id:selectedId,title:'running',status:'idle'}));updateLiveTaskStatus(selectedId,'active');beginStatusHandover(selectedId);projectList.replaceChildren(renderTask({id:selectedId,title:'running',status:'unknown'}))");
+  assert.equal(f.handoverTimers.size,1);
+  for(const fire of f.handoverTimers.values())fire();f.handoverTimers.clear();
+  assert.equal(f.run("projectList.querySelector('.task-active').hidden"),true);
+  assert.equal(f.run('statusHandovers.has(selectedId)'),false);
 });
 
 test('list refresh retains the selected task project and only fills a placeholder title',async()=>{
