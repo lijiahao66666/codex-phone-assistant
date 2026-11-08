@@ -2289,6 +2289,7 @@ function visibleStatusIds() {
   return [...new Set(ids)].slice(0, 4);
 }
 let listRequestGeneration = 0;
+let listLoadInFlight = null;
 // Back off when the desktop peer is down so a dead bridge is not hammered.
 let listFailureStreak = 0;
 let listChangeTimer;
@@ -2390,6 +2391,7 @@ function invalidateThreadList() {
   clearTimeout(listRetryTimer);
   listRetryTimer = undefined;
   ++listRequestGeneration;
+  listLoadInFlight = null;
   lastVisibleStatusKey = '';
   pendingStatusRefreshes = 0;
   liveTaskStatus.clear();
@@ -2398,9 +2400,30 @@ function invalidateThreadList() {
 }
 async function loadThreads() {
   if (document.hidden === true || pageSuspended) return;
+  if (listLoadInFlight) {
+    listLoadInFlight.refresh = true;
+    return listLoadInFlight.promise;
+  }
+  const request = { refresh: false, promise: null };
+  listLoadInFlight = request;
+  request.promise = (async () => {
+    try {
+      const canRefresh = await fetchThreadList();
+      if (canRefresh !== false && listLoadInFlight === request && request.refresh) {
+        request.refresh = false;
+        await fetchThreadList();
+      }
+    } finally {
+      if (listLoadInFlight === request) listLoadInFlight = null;
+    }
+  })();
+  return request.promise;
+}
+async function fetchThreadList() {
+  if (document.hidden === true || pageSuspended) return false;
   clearTimeout(listRetryTimer);
   listRetryTimer = undefined;
-  if (document.hidden === true || pageSuspended) return;
+  if (document.hidden === true || pageSuspended) return false;
   const generation = ++listRequestGeneration;
   let retry = true;
   try {
@@ -2410,11 +2433,11 @@ async function loadThreads() {
     let body = JSON.stringify({ visibleThreads: visible, ...(handover && visible.includes(handover) ? { handoverThread: handover } : {}) });
     if (visible.length > 1024 || body.length > 1048576) body = JSON.stringify({ visibleThreads: [] });
     const response = await fetch('/api/threads', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body });
-    if (generation !== listRequestGeneration) return;
+    if (generation !== listRequestGeneration) return false;
     if (response.status === 401 || response.status === 403) retry = false;
     if (!response.ok) throw new Error(await responseError(response, `任务列表加载失败 (${response.status})`));
     const data = await response.json();
-    if (generation !== listRequestGeneration) return;
+    if (generation !== listRequestGeneration) return false;
     if (!Array.isArray(data.projects) || !Array.isArray(data.recent)) throw new Error('任务列表数据不可用');
     clearHomeError('list');
     listFailureStreak = 0;
@@ -2448,9 +2471,13 @@ async function loadThreads() {
     listRetryTimer = setTimeout(() => { listRetryTimer = undefined; void loadThreads(); }, nextDelay);
     listRetryTimer?.unref?.();
   } catch (e) {
-    if (generation !== listRequestGeneration) return;
+    if (generation !== listRequestGeneration) return false;
     const message = e instanceof TypeError ? '连接中断，正在重试' : (e.message || '任务列表加载失败');
-    projectList.replaceChildren(element('p', 'list-status list-error', message));
+    const notice = projectList.querySelector('.list-error') || element('p', 'list-status list-error');
+    notice.textContent = retry && !message.includes('正在重试') ? `${message}，正在重试` : message;
+    if (retry && projectList.querySelector('.task')) {
+      if (!projectList.querySelector('.list-error')) projectList.append(notice);
+    } else projectList.replaceChildren(notice);
     if (!(e instanceof TypeError)) showHomeError('list', message);
     if (retry) {
       listFailureStreak = Math.min(listFailureStreak + 1, 4);
@@ -2458,6 +2485,7 @@ async function loadThreads() {
       listRetryTimer = setTimeout(() => { listRetryTimer = undefined; void loadThreads(); }, retryDelay);
       listRetryTimer?.unref?.();
     }
+    return retry;
   }
 }
 let loadedHistory = null, historyRequest = null, recordedHistory = null;

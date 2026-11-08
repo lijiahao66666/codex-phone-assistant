@@ -9,7 +9,9 @@ const response=(value={},status=200)=>({ok:status>=200&&status<300,status,json:a
 async function fixture(handler, { stubLoadThreads = true } = {}) {
   class Element {
     constructor(){this.children=[];this.listeners={};this.dataset={};this.value='';this.style={};this.classList={toggle(){},contains(){return false;}};this.scrollHeight=300;this.clientHeight=500;this.scrollTop=0;}
-    addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}querySelectorAll(){return [];}after(){}before(){}
+    addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}after(){}before(){}
+    querySelectorAll(selector){return this.children.flatMap(node=>[...(selector.startsWith('.')&&String(node.className||'').split(/\s+/).includes(selector.slice(1))?[node]:[]),...node.querySelectorAll(selector)]);}
+    querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
     cloneNode(){const copy=new Element();copy.value=this.value;copy.textContent=this.textContent;return copy;}
   }
   const nodes=new Map(),requests=[],reserves=[],removes=[];
@@ -158,6 +160,90 @@ test('list refresh retains the selected task project and only fills a placeholde
   assert.equal(f.nodes.get('#current-project').hidden,true);assert.equal(f.nodes.get('#current-project').value,'');
   f.run("selectedId=null;newDraft={projectId:'phone',pending:false,uncertain:false,attachments:[]};updateNewProjectOptions()");
   assert.equal(f.nodes.get('#current-project').hidden,false);assert.equal(f.nodes.get('#current-project').value,'phone');
+});
+
+test('retryable list failures retain working task buttons and one notice until recovery',async()=>{
+  let failed=false;
+  const f=await fixture(url=>url==='/api/threads'?response(failed?{error:'host-offline'}:{projects:[],recent:[{id,title:'现有任务'}]},failed?503:200):undefined,{stubLoadThreads:false});
+  await f.run('loadThreads()');
+  const list=f.run('projectList'),task=list.querySelector('.task'),click=task.listeners.click;
+  list.scrollTop=81;failed=true;
+  await f.run('loadThreads()');await f.run('loadThreads()');
+  assert.equal(list.querySelector('.task'),task);assert.equal(task.listeners.click,click);assert.equal(list.scrollTop,81);
+  assert.equal(list.querySelectorAll('.list-error').length,1);assert.match(list.querySelector('.list-error').textContent,/电脑未连接.*正在重试/);
+  const originalFetch=f.run('fetch');
+  f.run("fetch=async()=>{throw new TypeError('network offline')}");await f.run('loadThreads()');
+  assert.equal(list.querySelector('.task'),task);assert.equal(list.querySelectorAll('.list-error').length,1);
+  assert.equal(list.querySelector('.list-error').textContent,'连接中断，正在重试');
+  f.run('value => { fetch = value; }')(originalFetch);
+  failed=false;await f.run('loadThreads()');
+  assert.ok(list.querySelector('.task'));assert.equal(list.querySelector('.list-error'),null);assert.equal(list.scrollTop,81);
+  assert.equal(f.run('listFailureStreak'),0);
+});
+
+test('list authorization failures clear old tasks and stop retrying',async()=>{
+  let status=200;
+  const f=await fixture(url=>url==='/api/threads'?response({projects:[],recent:[{id,title:'现有任务'}]},status):undefined,{stubLoadThreads:false});
+  const list=f.run('projectList');
+  for(const rejected of [401,403]){
+    status=200;await f.run('loadThreads()');assert.ok(list.querySelector('.task'));
+    status=rejected;const before=f.requests.filter(r=>r.url==='/api/threads').length;
+    await Promise.all([f.run('loadThreads()'),f.run('loadThreads()')]);
+    assert.equal(list.querySelector('.task'),null);assert.equal(list.querySelectorAll('.list-error').length,1);
+    assert.equal(list.querySelector('.list-error').textContent,'配对状态不可用，请重新配对');
+    assert.equal(f.run('listRetryTimer'),undefined);
+    assert.equal(f.requests.filter(r=>r.url==='/api/threads').length,before+1);
+  }
+});
+
+test('device invalidation clears retained tasks and ignores an old in-flight list',async()=>{
+  let defer=false,release;
+  const data={projects:[],recent:[{id,title:'旧设备任务'}]};
+  const f=await fixture(url=>url==='/api/threads'?(defer?new Promise(resolve=>{release=()=>resolve(response(data));}):response(data)):undefined,{stubLoadThreads:false});
+  await f.run('loadThreads()');const list=f.run('projectList');assert.ok(list.querySelector('.task'));
+  defer=true;const pending=f.run('loadThreads()');
+  f.run('invalidateThreadList()');assert.equal(list.querySelector('.task'),null);
+  release();await pending;
+  assert.equal(list.querySelector('.task'),null);assert.equal(list.querySelector('.list-error'),null);
+  assert.equal(list.children[0].textContent,'正在加载任务');assert.equal(f.run('listRetryTimer'),undefined);
+});
+
+test('concurrent list refreshes share one request and at most one fresh trailing request',async()=>{
+  let defer=false,inFlight=0,maxInFlight=0;const pending=[];
+  const f=await fixture(url=>{
+    if(url!=='/api/threads'||!defer)return undefined;
+    maxInFlight=Math.max(maxInFlight,++inFlight);
+    return new Promise(resolve=>pending.push(()=>{--inFlight;resolve(response({projects:[],recent:[]}));}));
+  },{stubLoadThreads:false});
+  defer=true;const before=f.requests.length;
+  const first=f.run('loadThreads()'),second=f.run('loadThreads()'),third=f.run('loadThreads()');
+  assert.equal(f.requests.length,before+1);assert.equal(inFlight,1);
+  const nextId='22222222-2222-4222-8222-222222222222';
+  f.run(`selectedId='${nextId}';statusHandovers.set('${id}',undefined)`);
+  pending.shift()();await tick();
+  assert.equal(f.requests.length,before+2);assert.equal(inFlight,1);
+  const body=JSON.parse(f.requests.at(-1).options.body);
+  assert.deepEqual(body.visibleThreads,[id,nextId]);assert.equal(body.handoverThread,id);
+  const fourth=f.run('loadThreads()'),fifth=f.run('loadThreads()');
+  assert.equal(f.requests.length,before+2);
+  pending.shift()();await Promise.all([first,second,third,fourth,fifth]);await tick();
+  assert.equal(maxInFlight,1);assert.equal(f.requests.length,before+2);assert.equal(inFlight,0);
+  assert.equal(f.run('listLoadInFlight'),null);assert.ok(f.run('listRetryTimer'));
+});
+
+test('invalidated requests neither block a new device list nor release its in-flight lock',async()=>{
+  let defer=false;const pending=[];
+  const f=await fixture(url=>url==='/api/threads'&&defer?new Promise(resolve=>pending.push(value=>resolve(response(value)))):undefined,{stubLoadThreads:false});
+  defer=true;const before=f.requests.length,old=f.run('loadThreads()');
+  f.run("invalidateThreadList();currentDeviceId='new-device'");
+  const current=f.run('loadThreads()');assert.equal(f.requests.length,before+2);
+  pending.shift()({projects:[],recent:[{id,title:'旧设备任务'}]});await old;
+  assert.equal(f.run("projectList.querySelector('.task')"),null);
+  const merged=f.run('loadThreads()');assert.equal(f.requests.length,before+2);
+  pending.shift()({projects:[],recent:[{id,title:'新设备任务'}]});await tick();
+  assert.equal(f.requests.length,before+3);
+  pending.shift()({projects:[],recent:[{id,title:'新设备任务'}]});await Promise.all([current,merged]);
+  assert.equal(f.run("projectList.querySelector('.task-title').textContent"),'新设备任务');
 });
 
 test('a dispatched placeholder is dropped once the same text arrives as a real turn',async()=>{
