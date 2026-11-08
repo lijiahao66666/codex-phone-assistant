@@ -343,62 +343,6 @@ goalObjective.addEventListener('click', () => goalObjective.classList.toggle('ex
 const summaryScrim = document.querySelector('#summary-scrim');
 const summaryContent = document.querySelector('#summary-content');
 const summaryToggle = document.querySelector('#toggle-summary');
-const taskActions = document.querySelector('#task-actions');
-const taskMenu = document.querySelector('#task-menu');
-const archiveThreadButton = document.querySelector('#archive-thread');
-const deleteThreadButton = document.querySelector('#delete-thread');
-let deleteConfirmTimer;
-function closeTaskMenu() {
-  taskMenu.hidden = true;
-  taskActions.setAttribute('aria-expanded', 'false');
-  clearTimeout(deleteConfirmTimer);
-  deleteThreadButton.textContent = '删除任务';
-  deleteThreadButton.dataset.confirm = '';
-}
-taskActions.addEventListener('click', event => {
-  event.stopPropagation();
-  if (taskMenu.hidden) { taskMenu.hidden = false; taskActions.setAttribute('aria-expanded', 'true'); }
-  else closeTaskMenu();
-});
-document.addEventListener?.('click', event => {
-  if (taskMenu.hidden || taskMenu.contains(event.target) || taskActions.contains(event.target)) return;
-  closeTaskMenu();
-});
-async function submitThreadAction(action) {
-  const id = selectedId;
-  if (!id) return closeTaskMenu();
-  const button = action === 'archive' ? archiveThreadButton : deleteThreadButton;
-  button.disabled = true;
-  try {
-    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/${action}`, {
-      method: 'POST', credentials: 'same-origin', cache: 'no-store',
-      headers: { 'content-type': 'application/json' }, body: '{}',
-    });
-    if (response.status === 202) {
-      // The task is gone from the list either way; leaving the view avoids a
-      // dead stream pointing at an archived or deleted thread.
-      clearTimeout(reconnectTimer); active?.abort(); active = undefined;
-      selectedId = null; selectedTitle = ''; title.textContent = '尚未选择任务';
-      messageInput.value = ''; clearConversation(); updateComposer();
-      invalidateThreadList(); void loadThreads();
-    } else if (response.status === 409) fail('电脑上没有这个任务，可能已被处理');
-    else if (response.status === 504 || response.status >= 500) fail('操作结果未知，请刷新任务列表确认');
-    else fail('操作未被接受');
-  } catch { fail('操作失败，请检查连接'); }
-  finally { button.disabled = false; closeTaskMenu(); }
-}
-archiveThreadButton.addEventListener('click', event => { event.stopPropagation(); void submitThreadAction('archive'); });
-deleteThreadButton.addEventListener('click', event => {
-  event.stopPropagation();
-  if (deleteThreadButton.dataset.confirm !== '1') {
-    deleteThreadButton.dataset.confirm = '1';
-    deleteThreadButton.textContent = '再点一次删除';
-    clearTimeout(deleteConfirmTimer);
-    deleteConfirmTimer = setTimeout(() => { deleteThreadButton.dataset.confirm = ''; deleteThreadButton.textContent = '删除任务'; }, 4000);
-    return;
-  }
-  void submitThreadAction('delete');
-});
 const deviceMenu = document.querySelector('#devices');
 const deviceScrim = document.querySelector('#device-scrim');
 const deviceCurrent = document.querySelector('#device-current');
@@ -493,12 +437,14 @@ async function clearRecoveryAttempt(deviceId, threadId, state) {
   } catch { return false; }
 }
 async function finishAcceptedRecovery(id, deviceId, stream) {
-  const key = recoveryKey(deviceId, id), state = recoveries.get(key), check = recoveryChecks.get(key);
-  // connect() clears the check record when it takes over, so a missing record
-  // means there is nothing left to wait for; only a pending/failed check blocks.
+  const key = recoveryKey(deviceId, id), state = recoveries.get(key);
+  // A live snapshot is the only proof that matters: once this stream delivers
+  // state the session is attached, so the notice must go. Waiting on the
+  // recovery-status check kept the notice on screen whenever that request failed
+  // on a fresh stream, which is exactly when the user is staring at 正在连接任务.
   // The stream identity is deliberately not compared: a reconnect replaces the
-  // stream, and pinning to the old one left recovery stuck on "正在连接任务".
-  if (!stream || state?.finishing || state?.status !== 'awaiting-state' || stream.controller.signal.aborted || (check && check.status !== 'ready')) return;
+  // stream, and pinning to the old one left recovery stuck as well.
+  if (!stream || !state || state.finishing || !['pending', 'awaiting-state'].includes(state.status) || stream.controller.signal.aborted) return;
   state.finishing = true;
   const cleared = await clearRecoveryAttempt(deviceId, id, state);
   if (recoveries.get(key) === state) {
@@ -576,6 +522,12 @@ function recoveryNoticeTick() {
       void clearRecoveryAttempt(deviceId, id, state);
       changed = true;
     }
+  }
+  // A check that never resolved (failed on a fresh stream, or still checking)
+  // keeps the notice visible with empty text; drop it on the same deadline.
+  if (!state && check && check.status !== 'locked' && check.status !== 'ready' && Date.now() - (check.since || 0) >= RECOVERY_NOTICE_DEADLINE_MS) {
+    recoveryChecks.delete(key);
+    changed = true;
   }
   if (check?.status === 'locked' && connected && recoveryStream?.threadId === id && !recoveryStream.controller.signal.aborted) {
     const watch = recoveryLockWatches.get(key) || { count: 0, at: 0 };
@@ -709,7 +661,7 @@ cancelRecovery.addEventListener('click', async () => {
   }
 });
 async function checkRecoveryStatus(id, deviceId, stream) {
-  const key = recoveryKey(deviceId, id), check = { status: 'checking' };
+  const key = recoveryKey(deviceId, id), check = { status: 'checking', since: Date.now() };
   recoveryChecks.set(key, check);
   if (selectedId === id && currentDeviceId === deviceId) updateComposer();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
@@ -1392,8 +1344,6 @@ function updateComposer() {
   stopButton.title = stopping ? '正在停止' : '停止任务';
   stopButton.setAttribute('aria-label', stopping ? '正在停止' : '停止任务');
   stopStatus.textContent = stop?.error ? stop.message : '';
-  taskActions.hidden = !selectedId;
-  if (!selectedId) closeTaskMenu();
   // Recovery/model confirmations can clear a write gate without a new live message.
   if (selectedId && (connected || canDraftInHistory()) && !newDraft) { const id = selectedId; void Promise.resolve().then(() => runOutgoingQueue(id)); }
 }
