@@ -59,7 +59,7 @@ stable27 公网核验：根 HTML、JS、CSS 均 HTTP 200、`cache-control: no-st
 
 
 
-最新 stable31 复验：公网根 HTML/JS 已切换到 `20261108-stable31`，HTTP 200、`no-store`；回执 `/private/tmp/codex-stable31-public-check.json`，HTML SHA-256 `e43ef21a3e06d73aeaa63317aa2470ffe1b4754aad76b5e31db61669227fab4e`，JS SHA-256 `2d489fe035c869a5c19b2beeee27884eb574acaf4a0539e0cdb37332612f1b38`。旧记录候选复验已完成 7/8 条 ready；第 8 条（`富贵打通项目-礼品卡`）在 65 秒窗口结束时仍为仅查看历史，之后复测中断，不能记为通过。记录 `/private/tmp/codex-stable31-retest9.json`。新建 E 的原生归档最终成功且 H5 列表移除，数据库 `archived=1`；助手 PID 未重启。
+最新 stable31 复验：公网根 HTML/JS 已切换到 `20261108-stable31`，HTTP 200、`no-store`；回执 `/private/tmp/codex-stable31-public-check.json`，HTML SHA-256 `e43ef21a3e06d73aeaa63317aa2470ffe1b4754aad76b5e31db61669227fab4e`，JS SHA-256 `2d489fe035c869a5c19b2beeee27884eb574acaf4a0539e0cdb37332612f1b38`。旧记录候选复验已完成 7/9 条 ready；`富贵打通项目-礼品卡` 与 `youzan-toolkit` 在 65 秒窗口结束时仍为仅查看历史，不能记为通过。记录 `/private/tmp/codex-stable31-retest9.json`。新建 E 的原生归档最终成功且 H5 列表移除，数据库 `archived=1`；助手 PID 未重启。
 
 本机当前安装包为 `/private/tmp/codex-phone-stable31-idle-release.noindex/codex手机助手.app`，构建 `/private/tmp/codex-stable31-build.log`。
 ## 未读跨端对照与原生入口边界（2026-11-08）
