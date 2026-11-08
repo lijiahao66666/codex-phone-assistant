@@ -214,3 +214,91 @@ test('an idle pool closes its socket and a later lease creates a fresh connectio
     await assert.rejects(a.discover('thread'), { code: 'unavailable' });
   } finally { await f.close(); }
 });
+
+test('owner probes request a fresh baseline without hydrating history or disturbing a main stream', async () => {
+  let holdRefresh = false;
+  const f = await fixture({ onRequest({ msg }) {
+    if (holdRefresh && msg.method === 'thread-stream-following-changed' && msg.params.following) return true;
+  } });
+  try {
+    const main = await f.pool.acquire().connect(), changes = [];
+    await main.subscribe('thread', change => changes.push(change)); await until(() => changes.length === 1);
+    holdRefresh = true;
+    const caller = await f.pool.acquire().connect(); let settled = false;
+    const probing = caller.probeOwner('thread', 'owner', { timeout: 1000 }).then(result => { settled = true; return result; });
+    await until(() => f.messages.filter(msg => msg.method === 'thread-stream-following-changed' && msg.params.following).length === 2);
+    await delay(10); assert.equal(settled, false, 'an earlier snapshot cannot prove liveness');
+    const socket = [...f.sockets][0];
+    const broadcast = (change, sourceClientId = 'owner') => socket.write(packet({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId, params: { conversationId: 'thread', hostId: 'local', change } }));
+    broadcast({ type: 'snapshot', revision: 2, conversationState: { id: 'thread' } }, 'other-owner');
+    broadcast({ type: 'snapshot', revision: 2, conversationState: { id: 'different-thread' } });
+    broadcast({ type: 'snapshot', revision: 1.5, conversationState: { id: 'thread' } });
+    broadcast({ type: 'patches', revision: 2, baseRevision: 1, patches: [] });
+    await delay(10); assert.equal(settled, false);
+    f.change(socket, 'thread');
+    assert.deepEqual(await probing, { revision: 2 });
+    assert.equal(f.pool.entries.get(JSON.stringify(['local', 'thread'])).consumers.size, 1);
+    assert.equal(f.connections, 1);
+    assert.equal(f.messages.some(msg => msg.method === 'thread-follower-load-complete-history'), false);
+    assert.equal(f.messages.some(msg => msg.method === 'thread-stream-following-changed' && !msg.params.following), false);
+    await caller.close();
+    const prior = changes.length; f.change(socket, 'thread', 'patches'); await until(() => changes.length > prior);
+    assert.equal(main.state, 'ready');
+  } finally { await f.close(); }
+});
+
+test('a standalone owner probe releases only its temporary subscription', async () => {
+  const f = await fixture();
+  try {
+    const caller = await f.pool.acquire().connect();
+    assert.deepEqual(await caller.probeOwner('thread', 'owner'), { revision: 1 });
+    await until(() => f.messages.some(msg => msg.method === 'thread-stream-following-changed' && !msg.params.following));
+    assert.equal(f.pool.entries.size, 0); assert.equal(f.pool.leases.size, 1);
+    assert.equal(caller.state, 'ready'); assert.equal(f.connections, 1);
+  } finally { await f.close(); }
+});
+
+test('owner probes reject a different discovered owner and clean up', async () => {
+  const f = await fixture();
+  try {
+    const caller = await f.pool.acquire().connect();
+    await assert.rejects(caller.probeOwner('thread', 'stale-owner'), { code: 'unavailable' });
+    assert.equal(f.pool.entries.size, 0); assert.equal(f.pool.leases.size, 1);
+  } finally { await f.close(); }
+});
+
+test('probe timeout and caller cancellation preserve a main stream on the shared connection', async () => {
+  let ignoreFollow = false;
+  const f = await fixture({ onRequest({ msg }) { if (ignoreFollow && msg.method === 'thread-stream-following-changed' && msg.params.following) return true; } });
+  try {
+    const main = await f.pool.acquire().connect(); await main.subscribe('thread', () => {});
+    await until(() => f.messages.some(msg => msg.method === 'thread-stream-following-changed'));
+    ignoreFollow = true;
+    const caller = await f.pool.acquire().connect();
+    await assert.rejects(caller.probeOwner('thread', 'owner', { timeout: 20 }), /timed out/);
+    assert.equal(f.pool.entries.get(JSON.stringify(['local', 'thread'])).consumers.size, 1);
+    const cancelled = caller.probeOwner('thread', 'owner', { timeout: 1000 });
+    const rejected = assert.rejects(cancelled, { code: 'unavailable' });
+    await until(() => f.pool.entries.get(JSON.stringify(['local', 'thread'])).consumers.size === 2);
+    await caller.close(); await rejected;
+    assert.equal(f.pool.leases.size, 1); assert.equal(main.state, 'ready'); assert.equal(f.connections, 1);
+    assert.equal(f.messages.some(msg => msg.method === 'thread-stream-following-changed' && !msg.params.following), false);
+  } finally { await f.close(); }
+});
+
+test('owner or transport disconnection rejects an outstanding probe immediately', async () => {
+  const f = await fixture({ onRequest({ msg }) { if (msg.method === 'thread-stream-following-changed') return true; } });
+  try {
+    const caller = await f.pool.acquire().connect();
+    const probing = caller.probeOwner('thread', 'owner', { timeout: 1000 });
+    const rejected = assert.rejects(probing, { code: 'unavailable' });
+    await until(() => f.messages.some(msg => msg.method === 'thread-stream-following-changed'));
+    [...f.sockets][0].write(packet({ type: 'broadcast', method: 'client-status-changed', sourceClientId: 'owner', params: { status: 'disconnected', clientId: 'owner' } }));
+    await rejected;
+    const again = caller.probeOwner('thread', 'owner', { timeout: 1000 });
+    const rejectedAgain = assert.rejects(again, { code: 'unavailable' });
+    await until(() => f.pool.entries.size === 1);
+    [...f.sockets][0].destroy(); await rejectedAgain;
+    assert.equal(f.pool.entries.size, 0); assert.equal(f.pool.leases.size, 0);
+  } finally { await f.close(); }
+});

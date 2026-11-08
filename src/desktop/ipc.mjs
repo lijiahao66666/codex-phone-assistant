@@ -155,7 +155,7 @@ export class DesktopIpc extends EventEmitter {
     return this.#control('thread-follower-submit-user-input', conversationId, { requestId, response }, 1, expectedOwnerId, undefined, signal);
   }
 
-  async subscribe(conversationId, listener, hostId = 'local', { beforeFollow } = {}) {
+  async subscribe(conversationId, listener, hostId = 'local', { beforeFollow, beforeSnapshotRequest } = {}) {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     const key = JSON.stringify([hostId, conversationId]);
     if (this.subscriptions.has(key)) throw new Error('Thread already subscribed');
@@ -169,6 +169,7 @@ export class DesktopIpc extends EventEmitter {
       if (beforeFollow && (await this.discover(conversationId, hostId)).ownerId !== ownerId) throw new Error('Thread owner changed');
       if (this.state !== 'ready' || this.subscriptions.get(key) !== subscription) throw new Error('Subscription cancelled');
       subscription.ownerId = ownerId;
+      beforeSnapshotRequest?.();
       this.#follow(subscription, true);
     } catch (error) { if (this.subscriptions.get(key) === subscription) this.subscriptions.delete(key); throw error; }
     return () => this.subscriptions.get(key) === subscription && this.unsubscribe(conversationId, hostId);

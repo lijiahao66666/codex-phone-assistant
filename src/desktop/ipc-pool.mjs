@@ -60,7 +60,7 @@ export class DesktopIpcPool {
       lease.emit('disconnect', detail);
     }
   }
-  async subscribe(lease, id, listener, host, { beforeFollow } = {}) {
+  async subscribe(lease, id, listener, host, { beforeFollow, beforeSnapshotRequest } = {}) {
     lease.assertReady();
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     const key = keyFor(id, host);
@@ -90,7 +90,7 @@ export class DesktopIpcPool {
             try { item.listener(change, source); }
             catch (error) { item.lease.emit('listenerError', error); }
           }
-        }, host).then(off => {
+        }, host, { beforeSnapshotRequest }).then(off => {
           if (this.entries.get(key) !== entry) off(); else entry.off = off;
         });
       }
@@ -99,7 +99,7 @@ export class DesktopIpcPool {
       if (this.entries.get(key) !== entry || lease.subscriptions.get(key) !== consumer) throw unavailable();
       // Do not retain another complete history in the pool. The owner sends a
       // fresh snapshot for this thread, also preserving existing listeners.
-      if (existing) client.refreshSubscription(id, host);
+      if (existing) { beforeSnapshotRequest?.(); client.refreshSubscription(id, host); }
       return () => lease.subscriptions.get(key) === consumer && this.unsubscribe(lease, id, host);
     } catch (error) {
       if (lease.subscriptions.get(key) === consumer) this.unsubscribe(lease, id, host);
@@ -155,9 +155,44 @@ class IpcLease extends EventEmitter {
   connect() { return this.pool.connect(this); }
   subscribe(id, listener, host = 'local', options) { return this.pool.subscribe(this, id, listener, host, options); }
   unsubscribe(id, host = 'local') { return this.pool.unsubscribe(this, id, host); }
+  async probeOwner(id, expectedOwnerId, { timeout = 2000 } = {}) {
+    this.assertReady();
+    if (typeof id !== 'string' || !id || typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw new TypeError('conversationId and ownerId required');
+    if (!Number.isFinite(timeout) || timeout <= 0) throw new TypeError('Positive probe timeout required');
+    const probe = this.pool.acquire();
+    let timer, rejectProbe, armed = false;
+    const cancelled = () => rejectProbe?.(unavailable());
+    const disconnectedOwner = ownerId => { if (ownerId === expectedOwnerId) cancelled(); };
+    try {
+      await probe.connect();
+      this.assertReady();
+      const result = new Promise((resolve, reject) => {
+        rejectProbe = reject;
+        timer = setTimeout(() => reject(new Error('Owner snapshot probe timed out')), timeout);
+        this.abort.signal.addEventListener('abort', cancelled, { once: true });
+        probe.on('disconnect', cancelled);
+        probe.on('ownerDisconnected', disconnectedOwner);
+        void probe.subscribe(id, (change, source) => {
+          if (!armed || change?.type !== 'snapshot') return;
+          if (source?.ownerId !== expectedOwnerId) return reject(unavailable());
+          if (source.conversationId !== id || source.hostId !== 'local' || change.conversationState?.id !== id ||
+              !Number.isSafeInteger(change.revision) || change.revision < 0) return;
+          if (change.conversationState.remodexRemoved === true) return reject(unavailable());
+          resolve({ revision: change.revision });
+        }, 'local', { beforeSnapshotRequest: () => { armed = true; } }).catch(reject);
+      });
+      return await result;
+    } finally {
+      clearTimeout(timer);
+      this.abort.signal.removeEventListener('abort', cancelled);
+      probe.off('disconnect', cancelled);
+      probe.off('ownerDisconnected', disconnectedOwner);
+      await probe.close();
+    }
+  }
   async close() { this.pool.release(this); }
 }
-for (const method of ['discover', 'probeOwner']) {
+for (const method of ['discover']) {
   IpcLease.prototype[method] = async function (...args) { this.assertReady(); return this.transport[method](...args); };
 }
 for (const [method, optionsIndex] of Object.entries({ startTurn: 2, steerTurn: 2, interruptTurn: 2, setCollaborationMode: 3, replyCommandApproval: 3, replyFileApproval: 3, replyUserInput: 3 })) {

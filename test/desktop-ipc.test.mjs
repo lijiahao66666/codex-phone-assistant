@@ -54,6 +54,26 @@ test('non-object IPC frames disconnect and reject pending discovery', async () =
   }
 });
 
+test('direct custom-socket owner probes preserve targeted history revision verification', async () => {
+  const probes = [];
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'test' } }));
+    else {
+      probes.push(msg);
+      socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: { revision: 42 } }));
+    }
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
+  try {
+    await client.connect();
+    assert.deepEqual(await client.probeOwner('thread', 'owner'), { revision: 42 });
+    assert.equal(probes.length, 1);
+    assert.equal(probes[0].method, 'thread-follower-load-complete-history');
+    assert.equal(probes[0].targetClientId, 'owner');
+    assert.deepEqual(probes[0].params, { conversationId: 'thread' });
+  } finally { await client.close(); await f.close(); }
+});
+
 test('closing a half-open peer cannot block session recovery indefinitely', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'hub-ipc-half-open-'));
   const socketPath = socketPathFor(dir);

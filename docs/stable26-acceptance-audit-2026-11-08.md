@@ -19,6 +19,12 @@
 
 未读候选未通过真实闭环，未发布：候选在 22 项定向测试中通过，包括真实 loopback socket、主 stream reader 生命周期、身份隔离、竞态及排队消息。实际 D 发起 180 行回复后 140 ms 切 C；完成日志证明 owned=true、readers=0、status=completed，已向现有 owner socket 写入 unread=true，真实 ChatGPT 身份和 executionHostKey 与桌面持久化身份匹配；桌面仍未持久化 D 未读，H5 未出现蓝点。socket 写成功不能证明桌面接收，不能将本项写 PASS。候选已通过 Git stash 单独保存，安装恢复到已验证的思考等级修复包 `/private/tmp/codex-phone-stable26-effort-final.noindex/codex手机助手.app`，没有将失败候选留在运行版本。
 
+后续原生归档/删除的条件复验：助手正常重启释放 B 的 writer 后，B 未再由 H5 打开恢复；桌面原生侧栏 `Archive chat` 按钮成功，SQLite `archived=1`，H5 列表随后移除 B。桌面 `delete_thread` 工具再删除这一已归档专用聊天，返回 `deleted=true`，SQLite 行数为 0。结论是 writer 已释放时原生归档 PASS、桌面工具删除 PASS；不能据此覆盖“助手仍持有 writer 时原生归档失败”的已复现限制。没有操作其他用户聊天。
+
+连接探测优化：共享池内 `probeOwner` 改用发出 follow 后收到的当前任务 snapshot 验证 owner、任务 ID 和 revision，省去原来的 `load-complete-history`/完整历史重新 hydrate；隔离 custom socket 保留原验证方式。45 项 IPC/pool/router 定向测试通过，覆盖超时、取消、owner 变更、断线、旧快照不作存活证据和主订阅隔离。已重新构建安装并通过签名校验。对 C 的实机快照探测返回 revision=1，耗时 2 ms，临时消费者归零；公网恢复接口返回 202、295 ms。D/C 四次热切换均 ready，记录 291/296/295/300 ms；第一次 ready 瞬间输入仍暂禁，后续 settled 可用，不能以连接 ready 瞬时值保证整个 composer 已完成更新。此优化仍接收当前 snapshot，不声称消除冷启动广播或大历史内存峰值。
+
+未读对照：通过桌面 `set_thread_read_state(read=false)` 将专用 D 标未读后，桌面持久化与 H5 蓝点均立即为 true，证明 H5 对桌面权威状态的投影可用；随后已通过桌面工具恢复已读。H5 当前仅在选中行本地移除蓝点，选中 D 后并未清除桌面持久化未读，跨端已读同样需要修复。失败候选的完成通知在 native 日志出现同毫秒的 `Received broadcast but no handler is configured`，证明至少部分 Desktop IPC client 收到，仍不能证明专用 read-state 管理器接受通知。源码核验 method v3、conversationId 到 threadId 的映射以及身份/host 校验均一致，未找到可信的单点修复，不伪造桌面未读文件。
+
 核对基线为 `1f6f54b`，H5 版本为 `20261108-stable26`。本记录区分公网资源、浏览器交互、隔离测试和安装包；不将旧页面结果或模拟模型结果记为当前完整验收通过。主代理负责本轮桌面真实 UI 双向收发、归档/删除和快速切换，本核对没有重复操作这些流程。
 
 现有 `stable-candidate-2026-11-07.md`、`OWNER-MODEL-VALIDATION-20261107.md` 等是历史记录。其中“线上仍为旧版”“暂未切换”和早期文件哈希不代表本轮线上状态；182 项测试通过也不是当前 HEAD 的全量回归结果。
