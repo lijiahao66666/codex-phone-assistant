@@ -5,7 +5,7 @@ import { identityNet } from './identity-net.mjs';
 import { createOwnerSettingsObserver } from './owner-settings-observer.mjs';
 
 const require = createRequire(import.meta.url);
-const { createDesktopIpcLiveOwner } = require('remodex/src/desktop-ipc-live-owner');
+const { createDesktopIpcLiveOwner } = require('./vendor/remodex/desktop-ipc-live-owner.cjs');
 
 export class LocalOwner extends EventEmitter {
   constructor(options) {
@@ -110,7 +110,8 @@ export class LocalOwner extends EventEmitter {
   }
   async resume(threadId, { attemptId } = {}) {
     let result;
-    try { result = await this.write('thread/resume', { threadId }, { attemptId }); }
+    try { result = await this.write('thread/resume', { threadId, excludeTurns: true,
+      initialTurnsPage: { limit: 3, itemsView: 'summary', sortDirection: 'desc' } }, { attemptId }); }
     catch (error) {
       if (error?.rpcError?.code === -32600 && /already has an active writer/i.test(error.rpcError.message || '')) error.code = 'writer-conflict';
       throw error;
