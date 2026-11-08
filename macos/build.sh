@@ -35,7 +35,7 @@ cc "$root/macos/validate-image.c" -o "$output/Contents/Resources/runtime/validat
 cc "$root/macos/safe-media-open.c" -o "$output/Contents/Resources/runtime/safe-media-open"
 swift "$root/macos/icon.swift" "$tmp/CodexHelper.iconset" "$root/macos/chatgpt-icon.png"
 iconutil -c icns "$tmp/CodexHelper.iconset" -o "$output/Contents/Resources/AppIcon.icns"
-/usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string local.codex-hub.preview' -c 'Add :CFBundleName string codex手机助手' -c 'Add :CFBundleDisplayName string codex手机助手' -c 'Add :CFBundleExecutable string CodexHub' -c 'Add :CFBundlePackageType string APPL' -c 'Add :CFBundleIconFile string AppIcon' -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' "$output/Contents/Info.plist" >/dev/null
+/usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string local.codex-hub.preview' -c 'Add :CFBundleName string codex手机助手' -c 'Add :CFBundleDisplayName string codex手机助手' -c 'Add :CFBundleShortVersionString string 0.2.0' -c 'Add :CFBundleVersion string 2' -c 'Add :CFBundleExecutable string CodexHub' -c 'Add :CFBundlePackageType string APPL' -c 'Add :CFBundleIconFile string AppIcon' -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' "$output/Contents/Info.plist" >/dev/null
 for executable in "$output/Contents/Resources/node" "$output/Contents/Resources/runtime/safe-media-open" "$output/Contents/Resources/runtime/validate-image"; do
   codesign --force --sign - --timestamp=none "$executable"
 done
