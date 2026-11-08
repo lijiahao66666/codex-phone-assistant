@@ -15,6 +15,10 @@
 
 第二条真实旧聊天 cli 开放也已连接并显示 `GPT-6.1 Terra · high`，输入可用；证据 `/private/tmp/codex-stable26-effort-cli-live.json`。两条旧聊天均仅打开读取，没有发送新消息或修改模型/等级。
 
+补充公网交互：专用 D 的等级从 low 切 high，再恢复 low，均等到 owner 确认；文本文件与 160×100 PNG 一起发送成功，输入框立即清空，真实模型准确回复验收标识，聊天图片及大图预览均加载到原始 160 像素宽。停止专项在 active 时点击停止，最终 turn 为 interrupted、runtime 为 idle、输入框恢复可用。证据 `/private/tmp/codex-effort-live-write-regression.json`、`/private/tmp/codex-stable-stop-live.json`；附件回复为 `ATTACHMENT_SENT_OK_20261108_D`。
+
+未读候选未通过真实闭环，未发布：候选在 22 项定向测试中通过，包括真实 loopback socket、主 stream reader 生命周期、身份隔离、竞态及排队消息。实际 D 发起 180 行回复后 140 ms 切 C；完成日志证明 owned=true、readers=0、status=completed，已向现有 owner socket 写入 unread=true，真实 ChatGPT 身份和 executionHostKey 与桌面持久化身份匹配；桌面仍未持久化 D 未读，H5 未出现蓝点。socket 写成功不能证明桌面接收，不能将本项写 PASS。候选已通过 Git stash 单独保存，安装恢复到已验证的思考等级修复包 `/private/tmp/codex-phone-stable26-effort-final.noindex/codex手机助手.app`，没有将失败候选留在运行版本。
+
 核对基线为 `1f6f54b`，H5 版本为 `20261108-stable26`。本记录区分公网资源、浏览器交互、隔离测试和安装包；不将旧页面结果或模拟模型结果记为当前完整验收通过。主代理负责本轮桌面真实 UI 双向收发、归档/删除和快速切换，本核对没有重复操作这些流程。
 
 现有 `stable-candidate-2026-11-07.md`、`OWNER-MODEL-VALIDATION-20261107.md` 等是历史记录。其中“线上仍为旧版”“暂未切换”和早期文件哈希不代表本轮线上状态；182 项测试通过也不是当前 HEAD 的全量回归结果。
