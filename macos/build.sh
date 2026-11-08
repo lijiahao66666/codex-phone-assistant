@@ -26,6 +26,9 @@ else
 fi
 mkdir -p "$output/Contents/MacOS" "$output/Contents/Resources/runtime"
 cp "$node_binary" "$output/Contents/Resources/node"
+# Validate the copied binary from inside the bundle: Homebrew's Node can depend
+# on libraries outside the app even though it runs at its original location.
+"$output/Contents/Resources/node" -e 'process.exit(0)' || { printf '%s\n' 'Bundled Node cannot run independently; use a standalone Node binary.' >&2; exit 1; }
 ditto "$root/src" "$output/Contents/Resources/runtime/src"
 ditto "$root/public" "$output/Contents/Resources/runtime/public"
 ditto "$root/node_modules" "$output/Contents/Resources/runtime/node_modules"
