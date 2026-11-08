@@ -256,6 +256,97 @@ test('late confirmed-route cleanup or readiness cannot recover after live attach
   }
 });
 
+test('missing recovery is tombstoned and confirmed before one fresh route on the same stream',async()=>{
+  let cancelled=false;
+  const f=await fixture(url=>url.endsWith('/recovery-cancel')?(cancelled=true,response({status:'accepted'},202)):url.includes('/recovery-attempt/')?response({status:cancelled?'cancelled':'missing',locked:false}):url.endsWith('/recover')?response({status:'accepted'},202):response({locked:false}),{manualRecoveryTimers:true});
+  f.run("let missingConnectCalls=0;connect=async()=>{missingConnectCalls++};recoveryStream={threadId:selectedId,controller:new AbortController()};recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-31000})");
+  const stream=f.run('recoveryStream');
+  await f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');
+  const relevant=f.requests.filter(request=>/recovery-attempt|recovery-cancel|recovery-status|\/recover$/.test(request.url));
+  assert.equal(relevant.length,5);
+  assert.match(relevant[0].url,/recovery-attempt/);assert.match(relevant[1].url,/recovery-cancel/);assert.match(relevant[2].url,/recovery-attempt/);assert.match(relevant[3].url,/recovery-status/);assert.match(relevant[4].url,/\/recover$/);
+  assert.deepEqual(JSON.parse(relevant[1].options.body),{requestId:'22222222-2222-4222-8222-222222222222'});
+  assert.notEqual(JSON.parse(relevant[4].options.body).requestId,'22222222-2222-4222-8222-222222222222');
+  assert.equal(f.removes.length,1);assert.equal(f.reserves.length,1);assert.equal(f.run('missingConnectCalls'),0);
+  assert.equal(f.run('recoveryStream'),stream);assert.equal(stream.controller.signal.aborted,false);
+  cancelled=false;
+  for(let poll=0;poll<3;poll++)await f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');
+  assert.equal(f.requests.filter(request=>request.url.endsWith('/recovery-cancel')).length,1);
+  assert.equal(f.requests.filter(request=>request.url.endsWith('/recover')).length,1);
+  assert.equal(f.requests.some(request=>request.url.endsWith('/messages')),false);
+  f.run("handleEvent('event: state\\ndata: '+JSON.stringify({conversation:{id:selectedId,title:'ready',turns:[],requests:[],history:{complete:true}}}))");await tick();await tick();
+  assert.equal(f.run('missingAttemptCancellations.has(recoveryKey(currentDeviceId,selectedId))'),false);
+});
+
+test('an acknowledged missing cancellation can finish on later read-only confirmation without cancelling again',async()=>{
+  let checks=0,result={status:'cancelled',locked:false},failReadiness=true;
+  const f=await fixture(url=>{
+    if(url.endsWith('/recovery-cancel'))return response({status:'accepted'},202);
+    if(url.includes('/recovery-attempt/')){
+      if(++checks===1)return response({status:'missing',locked:false});
+      if(checks===2)throw new Error('confirmation offline');
+      return response(result);
+    }
+    if(url.endsWith('/recovery-status')&&failReadiness)throw new Error('readiness offline');
+    return url.endsWith('/recover')?response({status:'accepted'},202):response({locked:false});
+  },{manualRecoveryTimers:true});
+  f.run("let retriedCancelConnects=0;connect=async()=>{retriedCancelConnects++};recoveryStream={threadId:selectedId,controller:new AbortController()};recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-31000})");
+  const stream=f.run('recoveryStream');
+  const check=()=>f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');
+  await check();assert.equal(f.removes.length,0);assert.equal(f.reserves.length,0);
+  for(result of [{status:'pending',locked:false},{status:'unknown',locked:false},{status:'missing',locked:false},{status:'cancelled',locked:true}]){
+    await check();assert.equal(f.removes.length,0);assert.equal(f.reserves.length,0);
+  }
+  result={status:'cancelled',locked:false};await check();
+  assert.equal(f.removes.length,1);assert.equal(f.reserves.length,0);
+  failReadiness=false;await check();
+  assert.equal(f.removes.length,1);assert.equal(f.reserves.length,1);
+  assert.equal(f.requests.filter(request=>request.url.endsWith('/recovery-cancel')).length,1);
+  assert.equal(f.requests.filter(request=>request.url.endsWith('/recover')).length,1);
+  assert.equal(f.run('retriedCancelConnects'),0);assert.equal(f.run('recoveryStream'),stream);assert.equal(stream.controller.signal.aborted,false);
+});
+
+test('missing cancellation requires both an accepted cancel and an explicit unlocked cancelled confirmation',async()=>{
+  for(const invalid of ['cancel-network','cancel-unknown','confirm-network','confirm-missing','confirm-pending','confirm-locked','initial-locked']){
+    let checks=0;
+    const f=await fixture(url=>{
+      if(url.endsWith('/recovery-cancel'))return invalid==='cancel-network'?Promise.reject(new Error('offline')):response({status:invalid==='cancel-unknown'?'unknown':'accepted'},202);
+      if(url.includes('/recovery-attempt/')){
+        if(++checks===1)return response({status:'missing',locked:invalid==='initial-locked'});
+        if(invalid==='confirm-network')throw new Error('offline');
+        return response({status:invalid==='confirm-missing'?'missing':invalid==='confirm-pending'?'pending':'cancelled',locked:invalid==='confirm-locked'});
+      }
+      return response({locked:false});
+    },{manualRecoveryTimers:true});
+    f.run("recoveryStream={threadId:selectedId,controller:new AbortController()};recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-31000})");
+    await f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');
+    assert.equal(f.removes.length,0,invalid);assert.equal(f.reserves.length,0);
+    assert.equal(f.requests.some(request=>request.url.endsWith('/recover')),false);
+    assert.equal(f.run('recoveryBlocksWrite()'),true);
+  }
+});
+
+test('missing cancellation ignores stale query, cancel, confirmation, cleanup, readiness and reservation results',async()=>{
+  const mutations=["selectedId='44444444-4444-4444-8444-444444444444'","currentDeviceId='other'",'historyScopeGeneration++','recoveryStream={threadId:selectedId,controller:new AbortController()}',"handleEvent('event: state\\ndata: '+JSON.stringify({conversation:{id:selectedId,title:'ready',turns:[],requests:[],history:{complete:true}}}))"];
+  for(const stage of ['query','cancel','confirmation','cleanup','readiness','reservation'])for(const mutation of mutations){
+    let release,checks=0;
+    const defer=value=>new Promise(resolve=>{release=()=>resolve(value);});
+    const f=await fixture(url=>{
+      if(url.includes('/recovery-attempt/')){const value=response({status:++checks===1?'missing':'cancelled',locked:false});return stage===(checks===1?'query':'confirmation')?defer(value):value;}
+      if(url.endsWith('/recovery-cancel'))return stage==='cancel'?defer(response({status:'accepted'},202)):response({status:'accepted'},202);
+      if(url.endsWith('/recovery-status'))return stage==='readiness'?defer(response({locked:false})):response({locked:false});
+      return response({locked:false});
+    },{manualRecoveryTimers:true});
+    if(stage==='cleanup'){const remove=f.store.remove;let first=true;f.store.remove=async(...args)=>{if(first){first=false;await defer();}return remove(...args);};}
+    if(stage==='reservation'){const reserve=f.store.reserve;f.store.reserve=async(...args)=>{await defer();return reserve(...args);};}
+    f.run("recoveryStream={threadId:selectedId,controller:new AbortController()};recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-31000})");
+    const stream=f.run('recoveryStream'),work=f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');await tick();
+    assert.equal(typeof release,'function',stage);f.run(mutation);await tick();release();await work;await tick();
+    assert.equal(f.requests.some(request=>request.url.endsWith('/recover')),false,`${stage}: ${mutation}`);
+    assert.equal(stream.controller.signal.aborted,false);
+  }
+});
+
 test('history is editable without takeover and only the explicit send recovers before dispatch',async()=>{
   const f=await fixture((url)=>url.endsWith('/recover')?response({status:'accepted'},202):url.endsWith('/messages')?response({status:'accepted'},202):undefined);
   assert.equal(f.nodes.get('#message').disabled,false);assert.equal(f.nodes.get('#recover-chat').hidden,true);

@@ -22,7 +22,7 @@ test('connector reports scoped execution tracking without exposing identities or
   let started;
   const sessionStarted = new Promise(resolve => { started = resolve; });
   const connector = createPreviewConnector({ url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId, allowInsecureForTests: true,
-    ownerRouter: { journal, isRecoveryLocked: () => false },
+    ownerRouter: { journal, isRecoveryLocked: () => false, async route() { throw new Error('cancelled attempt must never reach route'); } },
     createSession: ({ conversationId }) => Object.assign(new EventEmitter(), { conversationId, start() { started(); }, async close() {} }),
   });
   connector.start();
@@ -32,6 +32,9 @@ test('connector reports scoped execution tracking without exposing identities or
   const query = (request, device = deviceId) => new Promise(resolve => {
     const id = randomUUID(); waiters.set(id, resolve);
     socket.send(JSON.stringify({ type: 'request', id, deviceId: device, path: `/api/threads/${threadId}/recovery-attempt/${request}` }));
+  });
+  const command = value => new Promise(resolve => {
+    const id=randomUUID();waiters.set(id,resolve);socket.send(JSON.stringify({id,deviceId,...value}));
   });
   try {
     socket.send(JSON.stringify({ type: 'request', id: 'stream', deviceId, path: `/api/threads/${threadId}/events` }));
@@ -43,6 +46,13 @@ test('connector reports scoped execution tracking without exposing identities or
     assert.deepEqual((await query(randomUUID())).data, { status: 'missing', locked: false, executionTracked: null });
     assert.equal((await query(unbound, randomUUID())).ok, false);
     assert.deepEqual(journal.db.prepare('SELECT * FROM recovery_attempts').all(), before);
+    const unseen=randomUUID();
+    assert.equal((await query(unseen)).data.status,'missing');
+    assert.equal((await command({type:'cancel-unseen-recovery',conversationId:threadId,requestId:unseen})).status,'accepted');
+    assert.deepEqual((await query(unseen)).data,{status:'cancelled',locked:false,executionTracked:false});
+    assert.equal((await command({type:'recover-chat',conversationId:threadId,requestId:unseen})).status,'unavailable');
+    assert.equal(journal.recoveryAttempt(hostId,deviceId,threadId,unseen),'cancelled');
+    assert.equal(journal.recoveryPending(hostId,threadId),false);
   } finally {
     await connector.close(); await new Promise(resolve => server.close(resolve)); journal.close();
   }

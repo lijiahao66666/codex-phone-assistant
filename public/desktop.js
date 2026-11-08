@@ -583,6 +583,7 @@ function recoveryNoticeTick() {
 // and gives up as soon as the selection moves on.
 const historyRecoveryAttempts = new Map();
 const unboundAcceptedRetries = new Set();
+const missingAttemptCancellations = new Set();
 let historyRecoveryTimer = null, historyRecoverySeq = 0;
 function scheduleHistoryRecovery(id, deviceId) {
   if (!id || !deviceId) return;
@@ -641,6 +642,46 @@ async function checkRecoveryAttempt(id, deviceId, state) {
     if (!response.ok) throw new Error('unavailable');
     const result = await response.json();
     if (recoveries.get(recoveryKey(deviceId, id)) !== state || !['unknown', 'awaiting-state'].includes(state.status)) return;
+    const completeMissingCancellation = async () => {
+      const stream = queriedStream, generation = queriedScope;
+      const isCurrent = () => selectedId === id && currentDeviceId === deviceId && historyScopeGeneration === generation && recoverableHistoryId === id && !connected && !newDraft && recoveryStream === stream && stream?.threadId === id && !stream.controller.signal.aborted;
+      const stillPending = () => isCurrent() && recoveries.get(recoveryKey(deviceId, id)) === state;
+      if (!stillPending()) return;
+      if (!state.missingCancellationCleared) {
+        if (!(await clearRecoveryAttempt(deviceId, id, state))) throw new Error('storage');
+        state.missingCancellationCleared = true;
+      }
+      if (!stillPending()) return;
+      recoveryChecks.delete(recoveryKey(deviceId, id));
+      await checkRecoveryStatus(id, deviceId, stream, { onReady: () => {
+        if (!stillPending()) return;
+        state.status = 'unavailable';
+        return recoverSelectedChat({ preserveStream: stream, isCurrent });
+      } });
+    };
+    // Retry only the read after an acknowledged cancel; never send it twice.
+    if (state.missingCancellation) {
+      if (state.missingCancellationAccepted && result?.status === 'cancelled' && result.locked === false) await completeMissingCancellation();
+      return;
+    }
+    if (result?.status === 'missing' && result.locked === false && !missingAttemptCancellations.has(recoveryKey(deviceId, id))) {
+      const stream = queriedStream, generation = queriedScope;
+      const isCurrent = () => selectedId === id && currentDeviceId === deviceId && historyScopeGeneration === generation && recoverableHistoryId === id && !connected && !newDraft && recoveryStream === stream && stream?.threadId === id && !stream.controller.signal.aborted;
+      const stillPending = () => isCurrent() && recoveries.get(recoveryKey(deviceId, id)) === state;
+      if (!stillPending()) return;
+      missingAttemptCancellations.add(recoveryKey(deviceId, id));
+      state.missingCancellation = true;
+      const cancelled = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recovery-cancel`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: state.requestId }) });
+      const cancellation = await cancelled.json();
+      if (!stillPending() || cancelled.status !== 202 || cancellation?.status !== 'accepted') return;
+      state.missingCancellationAccepted = true;
+      const confirmation = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recovery-attempt/${encodeURIComponent(state.requestId)}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      const confirmed = await confirmation.json();
+      if (!stillPending() || !confirmation.ok || confirmed?.status !== 'cancelled' || confirmed.locked !== false) return;
+      await completeMissingCancellation();
+      return;
+    }
     if (result?.locked === false && ['rejected', 'cancelled', 'released'].includes(result.status)) {
       if (!(await clearRecoveryAttempt(deviceId, id, state))) throw new Error('storage');
       state.status = 'unavailable'; state.message = '暂时无法连接，请稍后再试'; state.since = Date.now();
@@ -3309,6 +3350,7 @@ function handleEvent(block) {
     recoverableHistoryId = null;
     historyRecoveryAttempts.delete(recoveryKey(currentDeviceId, selectedId));
     unboundAcceptedRetries.delete(recoveryKey(currentDeviceId, selectedId));
+    missingAttemptCancellations.delete(recoveryKey(currentDeviceId, selectedId));
     if (recoveryStream?.threadId === selectedId) recoveryStream.liveState = true;
     const recovery = recoveries.get(recoveryKey(currentDeviceId, selectedId));
     if (recovery && ['pending', 'awaiting-state', 'unknown'].includes(recovery.status)) { recovery.liveStream = recoveryStream; finishAcceptedRecovery(selectedId, currentDeviceId, recoveryStream); }
