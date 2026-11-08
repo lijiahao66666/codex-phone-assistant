@@ -8,7 +8,7 @@ function unavailable(code, cause) {
 
 // The adapters must distinguish an explicit missing owner from an unavailable bus.
 export class OwnerRouter {
-  constructor({ discover, verifyOwner = null, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 5000, recoveryPollMs = 300, recoveryLockTtlMs = 90_000, competeUnknown = false }) {
+  constructor({ discover, verifyOwner = null, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 2500, recoveryPollMs = 300, recoveryLockTtlMs = 90_000, competeUnknown = false }) {
     if (typeof discover !== 'function' || !localOwner || typeof projects !== 'function') throw new TypeError('Missing owner adapters');
     this.competeUnknown = competeUnknown;
     this.discover = discover;
@@ -137,26 +137,24 @@ export class OwnerRouter {
       throw unavailable('unavailable', error);
     }
     if (this.closed) throw unavailable('unavailable');
-    const deadline = Date.now() + this.recoveryTimeoutMs;
-    let owner, localOwnerId;
-    do {
-      if (this.closed || isCancelled()) throw unavailable('owner-unknown');
-      localOwnerId = await this.localOwner.ownerId();
-      if (localOwnerId) {
-        try { owner = await this.discover(threadId); } catch { owner = null; }
-        if (owner?.kind === 'owner' && owner.ownerId === localOwnerId) break;
-        if (owner?.kind === 'owner' && owner.ownerId !== localOwnerId) throw unavailable('owner-unknown');
+    // resume returned this thread, so its writer is already ours. Ownership is only
+    // worth re-checking when the bus can actually name an owner: a quiet bus is the
+    // normal state while Desktop stays closed, and waiting on it turned successful
+    // takeovers into 正在连接任务. A different named owner is the one signal that
+    // someone else took the thread back.
+    const identity = typeof this.localOwner.ownerId === 'function' ? await this.localOwner.ownerId() : null;
+    let owner = null;
+    if (identity) {
+      try { owner = await this.discover(threadId); } catch { owner = null; }
+      if (owner?.kind === 'owner' && owner.ownerId !== identity) {
+        if (!(deviceId ? this.journal.completeRecovery(this.hostId, deviceId, threadId, attemptId, 'rejected') : this.journal.endRecovery(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
+        this.uncertainRecovery.delete(threadId);
+        throw unavailable('owner-unknown');
       }
-      if (Date.now() >= deadline) throw unavailable('owner-unknown');
-      await new Promise(resolve => setTimeout(resolve, Math.min(this.recoveryPollMs, Math.max(0, deadline - Date.now()))));
-    } while (Date.now() < deadline);
-    if (!localOwnerId || owner?.kind !== 'owner' || owner.ownerId !== localOwnerId) throw unavailable('owner-unknown');
-    if (typeof this.confirmRecovery !== 'function' || !(await this.confirmRecovery(threadId, localOwnerId))) throw unavailable('owner-unknown');
-    const currentOwner = await this.discover(threadId);
-    if (this.closed || await this.localOwner.ownerId() !== localOwnerId || currentOwner?.kind !== 'owner' || currentOwner.ownerId !== localOwnerId) throw unavailable('owner-unknown');
+    }
     if (!(deviceId ? this.journal.completeRecovery(this.hostId, deviceId, threadId, attemptId, 'accepted') : this.journal.endRecovery(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
     this.uncertainRecovery.delete(threadId);
-    return owner;
+    return owner?.kind === 'owner' ? owner : { kind: 'owner', ownerId: identity || null };
   }
 
   creationStatus(deviceId, requestId) {
