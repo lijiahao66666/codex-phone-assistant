@@ -1,5 +1,50 @@
 import Cocoa
 import WebKit
+import Darwin
+
+private final class RuntimeStderrTail {
+    private let handle: FileHandle
+    private let lock = NSLock()
+    private let limit = 64 * 1024
+    private var bytes = Data()
+    private var closed = false
+
+    init?(_ handle: FileHandle) {
+        self.handle = handle
+        let flags = fcntl(handle.fileDescriptor, F_GETFL)
+        guard flags >= 0, fcntl(handle.fileDescriptor, F_SETFL, flags | O_NONBLOCK) == 0 else { return nil }
+    }
+
+    private func drainLocked() {
+        guard !closed else { return }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        var remaining = limit
+        while remaining > 0 {
+            let count = Darwin.read(handle.fileDescriptor, &buffer, min(buffer.count, remaining))
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { break }
+            remaining -= count
+            let excess = bytes.count + count - limit
+            if excess > 0 { bytes.removeFirst(excess) }
+            bytes.append(contentsOf: buffer.prefix(count))
+        }
+    }
+
+    func drain() {
+        lock.lock()
+        defer { lock.unlock() }
+        drainLocked()
+    }
+
+    func finish() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        drainLocked()
+        closed = true
+        try? handle.close()
+        return bytes
+    }
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     private var process: Process?
@@ -80,8 +125,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         environment["HUB_IMAGE_UPLOAD"] = "1"
         child.environment = environment
         let pipe = Pipe()
+        let stderrPipe = Pipe()
+        let stderrTail = RuntimeStderrTail(stderrPipe.fileHandleForReading)
         child.standardOutput = pipe
-        child.standardError = FileHandle.nullDevice
+        child.standardError = stderrTail == nil ? FileHandle.nullDevice : stderrPipe
+        if let stderrTail = stderrTail {
+            stderrPipe.fileHandleForReading.readabilityHandler = { _ in stderrTail.drain() }
+        }
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
@@ -89,16 +139,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 self?.consumeRuntimeOutput(data)
             }
         }
-        child.terminationHandler = { [weak self] _ in
+        child.terminationHandler = { [weak self] child in
             pipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            let tail = stderrTail?.finish() ?? Data()
+            let exitedAt = Date()
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.terminationTimeout?.cancel()
                 if self.terminationRequested { NSApp.reply(toApplicationShouldTerminate: true) }
-                else { self.showError() }
+                else {
+                    self.recordRuntimeExit(child, at: exitedAt, stderrTail: tail)
+                    self.showError()
+                }
             }
         }
-        do { try child.run(); process = child } catch { showError() }
+        do { try child.run(); process = child } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            _ = stderrTail?.finish()
+            showError()
+        }
+    }
+
+    private func recordRuntimeExit(_ child: Process, at timestamp: Date, stderrTail: Data) {
+        let reason: String
+        switch child.terminationReason {
+        case .exit: reason = "exit"
+        case .uncaughtSignal: reason = "uncaughtSignal"
+        @unknown default: reason = "unknown"
+        }
+        let record: [String: Any] = [
+            "status": child.terminationStatus,
+            "reason": reason,
+            "timestamp": ISO8601DateFormatter().string(from: timestamp),
+            "stderrTail": String(decoding: stderrTail, as: UTF8.self),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: record) else { return }
+        let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex-phone", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        } catch { return }
+        let path = directory.appendingPathComponent("last-runtime-exit.json").path
+        let descriptor = Darwin.open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { return }
+        defer { Darwin.close(descriptor) }
+        guard fchmod(descriptor, 0o600) == 0 else { return }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            while offset < raw.count {
+                let count = Darwin.write(descriptor, base.advanced(by: offset), raw.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { return }
+                offset += count
+            }
+        }
     }
 
     private func consumeRuntimeOutput(_ data: Data) {
