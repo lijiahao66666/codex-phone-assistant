@@ -1,5 +1,9 @@
 # stable26 验收证据核对
 
+最新安装（2026-11-08 19:17）：`codex-phone-stable26-cleanup.noindex` 包已正常安装并通过签名校验，保留上述等级补丁。`DesktopIpc.unsubscribe` 在 socket 已 destroyed 但 close 事件尚未触发时，仍完成本地退订；正常连接上的其他协议错误仍抛出，控制写入错误未改变。真实隔离 socket 的三条旧清理路径（unsubscribe、SidebarStatus.fail、clearEntries）均退出 1，修复后均退出 0，相关 IPC/pool/cleanup 38/38 PASS。新测试已隔离临时日志，单文件 3/3 PASS。证据 `/private/tmp/codex-ipc-cleanup-race-before-20261108.json`、`/private/tmp/codex-ipc-cleanup-race-tests-20261108.log`。这证明修复了一个确定的进程退出路径，不证明它就是 PID 28169 现场退出的原因。
+
+助手更新后，未刷新的 H5 曾对购物金停留“仅查看历史”，未自动重新发出恢复请求；该更新/重连路径仍待处理，不能称全部连接问题已解决。刷新原公网页面后再打开购物金，已重新 ready、等级 high、输入可用；证据 `/private/tmp/codex-stable26-cleanup-shopping-live.json`。安装目录内 observer 与 IPC 两个改动模块哈希均与源码一致，Desktop 主进程仍为 40360。
+
 最新补充（2026-11-08 19:07）：思考等级恢复时另一个字段竞态已修复。`thread/settings/updated` 只确认 model 或 serviceTier 时，不再整条废弃待返回恢复响应中的独立 reasoningEffort；后到的新等级（包括显式 null）仍优先。observer/view/router 定向检查 42/42 PASS，签名通过的 `codex-phone-stable26-effort-partial.noindex` 包已安装，Desktop PID 40360 保留。公网 cli 开放再次显示 `GPT-6.1 Terra · high`、输入可用，证据 `/private/tmp/codex-stable26-effort-partial-cli-live.json`。这仍不保证所有已有 Desktop owner 的 snapshot 都带有有效等级；明确的 null 仍保持原义，不用数据库或历史猜测覆盖。
 
 全列表连接检查尚未完成：24 条列表中执行了 21 条短等待后，发现助手 runtime PID 28169 已退出，主壳仍在；后段超时不能作为每条聊天各自无法连接的证据。原记录保存在 `/private/tmp/codex-stable26-all24-partial-invalidated.json`，已中止该轮并正常重启助手，不能写成全 24 条通过。退出原因尚未由现场日志确认。此前 90 秒采样的原始数据另存 `/private/tmp/codex-stable26-all24-process-samples.json`，该窗口 Desktop RSS 峰值 490.2 MiB、助手 345.2 MiB；这段采样未涵盖后来退出，不能证明进程长期稳定。

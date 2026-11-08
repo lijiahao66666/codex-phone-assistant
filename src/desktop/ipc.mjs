@@ -192,7 +192,14 @@ export class DesktopIpc extends EventEmitter {
     const subscription = this.subscriptions.get(key);
     if (!subscription) return false;
     this.subscriptions.delete(key);
-    if (subscription.ownerId && this.state === 'ready') this.#follow(subscription, false);
+    if (subscription.ownerId && this.state === 'ready') {
+      try { this.#follow(subscription, false); }
+      catch (error) {
+        // Local cleanup still succeeds between socket destruction and its
+        // asynchronous close event. Keep unrelated protocol errors visible.
+        if (this.#socket && !this.#socket.destroyed && this.#socket.writable) throw error;
+      }
+    }
     return true;
   }
 
