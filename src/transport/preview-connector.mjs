@@ -294,7 +294,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           if (!ownerRouter || cancelled() || !/^[0-9a-f-]{36}$/i.test(msg.requestId || '')) throw new Error('unavailable');
           const attempt = ownerRouter.journal.beginRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId);
           if (!attempt.inserted) {
-            if (!cancelled()) send({ type: 'response', id: msg.id, status: attempt.status === 'accepted' ? 'accepted' : ['rejected', 'cancelled'].includes(attempt.status) ? 'unavailable' : 'unknown' }, connection, { request, cancellable: true });
+            if (!cancelled()) send({ type: 'response', id: msg.id, status: attempt.status === 'accepted' ? 'accepted' : ['rejected', 'cancelled', 'released'].includes(attempt.status) ? 'unavailable' : 'unknown' }, connection, { request, cancellable: true });
             return;
           }
           registered = true;

@@ -9,6 +9,7 @@ import { ModelJournal } from './model-journal.mjs';
 import { DesktopIpc } from './ipc.mjs';
 import { desktopIpcPool } from './ipc-pool.mjs';
 import { DesktopSession } from './session.mjs';
+import { readProcessStartIdentity, reconcileExitedRecoveryExecutions } from './recovery-execution.mjs';
 
 export async function confirmRecoverySnapshot(threadId, ownerId, { socketPath, timeoutMs = 15000, createSession, createClient } = {}) {
   const session = createSession ? createSession(threadId) : new DesktopSession({ conversationId: threadId,
@@ -46,10 +47,13 @@ async function releaseStaleAppServer(pidFile) {
     const pid = Number(entry?.pid);
     if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return;
     if (Number(entry?.bridge) === process.pid) return;
-    try { process.kill(pid, 0); } catch { return; }
+    // Legacy PID-only records cannot distinguish an orphan from PID reuse.
+    if (typeof entry.startedAt !== 'string' || !entry.startedAt || await readProcessStartIdentity(pid) !== entry.startedAt) return;
     try { process.kill(pid, 'SIGTERM'); } catch { return; }
     await new Promise(resolve => setTimeout(resolve, 400));
-    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    if (await readProcessStartIdentity(pid) === entry.startedAt) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
   } catch { /* no pid file */ }
 }
 
@@ -62,15 +66,23 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
   await releaseStaleAppServer(pidFile);
   const owner = await new LocalOwner({ binary: process.env.CODEX_BIN || (existsSync(bundled) ? bundled : 'codex'), cwd: homedir(), ...ownerOptions, socketPath }).start();
   const childPid = owner.client?.child?.pid;
+  const recoveryExecution = Number.isInteger(childPid) ? {
+    instanceId: owner.client.instanceId, pid: childPid,
+    startedAt: await readProcessStartIdentity(childPid).catch(() => null),
+  } : null;
   if (Number.isInteger(childPid)) {
-    await writeFile(pidFile, JSON.stringify({ pid: childPid, bridge: process.pid }), { mode: 0o600 }).catch(() => {});
-    process.once('exit', () => { try { process.kill(childPid, 'SIGTERM'); } catch { /* already gone */ } });
+    await writeFile(pidFile, JSON.stringify({ pid: childPid, bridge: process.pid, instanceId: recoveryExecution.instanceId, startedAt: recoveryExecution.startedAt }), { mode: 0o600 }).catch(() => {});
+    process.once('exit', () => {
+      if (owner.client.child.exitCode !== null || owner.client.child.signalCode !== null) return;
+      try { owner.client.child.kill('SIGTERM'); } catch { /* already gone */ }
+    });
   }
   let journal, modelJournal;
   try {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
     if (existsSync(join(dataDir, 'model-writes.sqlite'))) throw new Error('Legacy model journal requires migration');
     journal = new CreationJournal(join(dataDir, 'creations.sqlite'));
+    await reconcileExitedRecoveryExecutions(journal, hostId);
     modelJournal = new ModelJournal(join(dataDir, 'creations.sqlite'));
     const discover = async threadId => {
       const ipc = sharedClient();
@@ -84,11 +96,19 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
       catch { return false; }
       finally { ipc.close(); }
     };
-    const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, projects, journal, hostId, competeUnknown: true,
+    const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, projects, journal, hostId, recoveryExecution, competeUnknown: true,
       confirmRecovery: (threadId, ownerId) => confirmRecoverySnapshot(threadId, ownerId, { createClient: sharedClient }) });
+    const onChildExit = () => {
+      if (recoveryExecution) {
+        try { router.recoveryExecutionExited(recoveryExecution); } catch { /* Preserve reservations if journal settlement fails. */ }
+      }
+    };
+    owner.client.child.once('exit', onChildExit);
+    if (owner.client.child.exitCode !== null || owner.client.child.signalCode !== null) onChildExit();
     return { router, owner, modelJournal, async close() {
       router.beginShutdown();
       try { await owner.close(); } catch (error) { router.cancelShutdown(); throw error; }
+      owner.client.child.off('exit', onChildExit);
       router.close(); journal.close(); modelJournal.close();
       await unlink(pidFile).catch(() => {});
     } };

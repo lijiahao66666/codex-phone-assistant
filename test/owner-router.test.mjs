@@ -67,41 +67,39 @@ test('an unknown resume result remains locked and is not automatically dispatche
   } finally { first.close(); restarted?.close(); journal.close(); }
 });
 
-test('a recovery reservation that never reports back stops blocking after its TTL', async () => {
+test('an old unknown recovery stays locked until its execution exit is established', async () => {
   const journal = new CreationJournal(':memory:');
   try {
     assert.equal(journal.beginRecovery('host', 'thread', 'attempt'), true);
     assert.equal(journal.recoveryPending('host', 'thread'), true);
-    // Simulate a bridge restart in the middle of a resume: the reservation is
-    // still on disk but no request can complete it anymore.
+    // Age alone does not prove that the request's app-server has exited.
     journal.db.prepare('UPDATE recovery_writes SET created_at=? WHERE host_id=? AND thread_id=?').run(Date.now() - 120000, 'host', 'thread');
-    assert.equal(journal.recoveryPending('host', 'thread'), false);
-    assert.equal(journal.recoveryPending('host', 'thread'), false);
+    assert.equal(journal.recoveryPending('host', 'thread'), true);
+    assert.equal(journal.recoveryPending('host', 'thread'), true);
     const retry = journal.beginRecovery('host', 'thread', 'next-attempt');
-    assert.equal(retry, true);
+    assert.equal(retry, false);
   } finally { journal.close(); }
 });
 
-test('legacy recovery reservations without a timestamp are treated as abandoned', async () => {
+test('legacy recovery reservations without execution identity remain protected', async () => {
   const journal = new CreationJournal(':memory:');
   try {
     journal.db.prepare('INSERT INTO recovery_writes (host_id,thread_id,attempt_id,created_at) VALUES (?,?,?,0)').run('host', 'thread', 'legacy');
-    assert.equal(journal.recoveryPending('host', 'thread'), false);
-    assert.equal(journal.db.prepare('SELECT COUNT(*) AS count FROM recovery_writes').get().count, 0);
+    assert.equal(journal.recoveryPending('host', 'thread'), true);
+    assert.equal(journal.db.prepare('SELECT COUNT(*) AS count FROM recovery_writes').get().count, 1);
   } finally { journal.close(); }
 });
 
-test('the in-memory recovery guard expires with the same TTL', async () => {
+test('the in-memory recovery guard does not expire solely with time', async () => {
   const journal = new CreationJournal(':memory:');
   const localOwner = { async resume() { throw Object.assign(new Error('lost response'), { code: 'outcome-unknown' }); } };
   const router = new OwnerRouter({ discover: async () => ({ kind: 'unknown' }), localOwner, projects: async () => [], journal, hostId: 'host', competeUnknown: true, recoveryLockTtlMs: 0 });
   try {
     await assert.rejects(router.route('thread'), { code: 'resume-unknown' });
     assert.equal(router.uncertainRecovery.has('thread'), true);
-    // The in-memory guard must not outlive the TTL even when the journal still
-    // holds the reservation; the journal applies the same TTL on its own.
+    // Even an explicit zero TTL cannot establish that an execution stopped.
     assert.equal(router.isRecoveryLocked('thread'), true);
-    assert.equal(router.uncertainRecovery.has('thread'), false);
+    assert.equal(router.uncertainRecovery.has('thread'), true);
   } finally { router.close(); journal.close(); }
 });
 

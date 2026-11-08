@@ -8,7 +8,7 @@ function unavailable(code, cause) {
 
 // The adapters must distinguish an explicit missing owner from an unavailable bus.
 export class OwnerRouter {
-  constructor({ discover, verifyOwner = null, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 2500, recoveryPollMs = 300, recoveryLockTtlMs = 90_000, competeUnknown = false }) {
+  constructor({ discover, verifyOwner = null, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 2500, recoveryPollMs = 300, recoveryExecution = null, competeUnknown = false }) {
     if (typeof discover !== 'function' || !localOwner || typeof projects !== 'function') throw new TypeError('Missing owner adapters');
     this.competeUnknown = competeUnknown;
     this.discover = discover;
@@ -17,7 +17,7 @@ export class OwnerRouter {
     this.projects = projects;
     this.journal = journal; this.hostId = hostId;
     this.confirmRecovery = confirmRecovery;
-    this.recoveryTimeoutMs = recoveryTimeoutMs; this.recoveryPollMs = recoveryPollMs; this.recoveryLockTtlMs = recoveryLockTtlMs;
+    this.recoveryTimeoutMs = recoveryTimeoutMs; this.recoveryPollMs = recoveryPollMs; this.recoveryExecution = recoveryExecution;
     this.pending = new Map();
     this.uncertainRecovery = new Map();
     this.lateRecoveries = new Map();
@@ -67,15 +67,19 @@ export class OwnerRouter {
 
   isRecoveryLocked(threadId) {
     try {
-      const since = this.uncertainRecovery.get(threadId);
-      if (since !== undefined) {
-        if (Date.now() - since < this.recoveryLockTtlMs) return true;
-        // The resume never reported back; after the TTL its in-memory guard is
-        // stale too, otherwise the phone stays on 任务正在电脑上处理 for good.
-        this.uncertainRecovery.delete(threadId);
-      }
+      if (this.uncertainRecovery.has(threadId)) return true;
       return Boolean(this.journal?.recoveryPending?.(this.hostId, threadId));
     } catch { return true; }
+  }
+
+  // Called only after the runtime observes this app-server child's exit event.
+  recoveryExecutionExited(execution) {
+    if (this.closed || execution !== this.recoveryExecution) return;
+    const retired = this.journal.retireRecoveryExecution(this.hostId, execution);
+    for (const { threadId, attemptId } of retired) {
+      this.uncertainRecovery.delete(threadId);
+      if (this.lateRecoveries.get(threadId)?.attemptId === attemptId) this.lateRecoveries.delete(threadId);
+    }
   }
 
   // A live desktop owner already streams the thread: the phone only needs to
@@ -96,9 +100,10 @@ export class OwnerRouter {
       if (ownId && first.ownerId === ownId) return first;
       if (await this.#ownerResponds(threadId, first.ownerId)) return first;
     } else if (first?.kind !== 'missing' && !(this.competeUnknown && first?.kind === 'unknown')) throw unavailable('owner-unknown');
+    if (this.recoveryExecution && this.localOwner.state !== 'ready') throw unavailable('unavailable');
     if (this.isRecoveryLocked(threadId)) throw unavailable('resume-unknown');
     const attemptId = requestId || randomUUID();
-    if (!this.hostId || !(deviceId ? this.journal?.dispatchRecovery?.(this.hostId, deviceId, threadId, attemptId) : this.journal?.beginRecovery?.(this.hostId, threadId, attemptId))) throw unavailable('resume-unknown');
+    if (!this.hostId || !(deviceId ? this.journal?.dispatchRecovery?.(this.hostId, deviceId, threadId, attemptId, this.recoveryExecution) : this.journal?.beginRecovery?.(this.hostId, threadId, attemptId, this.recoveryExecution))) throw unavailable('resume-unknown');
     this.uncertainRecovery.set(threadId, Date.now());
     if (this.closed || isCancelled()) {
       const cleared = deviceId
