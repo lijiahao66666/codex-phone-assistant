@@ -6,7 +6,7 @@ import { webcrypto } from 'node:crypto';
 const id='11111111-1111-4111-8111-111111111111';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const response=(value={},status=200)=>({ok:status>=200&&status<300,status,json:async()=>value,clone:()=>({json:async()=>value})});
-async function fixture(handler, { stubLoadThreads = true } = {}) {
+async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers = false } = {}) {
   class Element {
     constructor(){this.children=[];this.listeners={};this.dataset={};this.value='';this.style={};this.classList={toggle(){},contains(){return false;}};this.scrollHeight=300;this.clientHeight=500;this.scrollTop=0;}
     addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}after(){}before(){}
@@ -15,17 +15,107 @@ async function fixture(handler, { stubLoadThreads = true } = {}) {
     cloneNode(){const copy=new Element();copy.value=this.value;copy.textContent=this.textContent;return copy;}
   }
   const nodes=new Map(),requests=[],reserves=[],removes=[];
+  const recoveryTimers=new Map();
+  const fixtureTimeout=(fn,ms,...args)=>{
+    if(!manualRecoveryTimers||ms!==500)return setTimeout(fn,ms,...args);
+    const timer={unref(){}};recoveryTimers.set(timer,()=>fn(...args));return timer;
+  };
+  const fixtureClearTimeout=timer=>{if(!recoveryTimers.delete(timer))clearTimeout(timer);};
   const document={querySelector(key){if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
   const store={read:async()=>null,reserve:async(...args)=>{reserves.push(args);return true;},remove:async(...args)=>{removes.push(args);return true;}};
-  const context=vm.createContext({document,store,crypto:webcrypto,AbortController,URLSearchParams,TextDecoder,TextEncoder,Date,setTimeout,clearTimeout,localStorage:{getItem(){return null;},removeItem(){}},sessionStorage:{removeItem(){}},window:{addEventListener(){}},fetch:async(url,options={})=>{
+  const context=vm.createContext({document,store,crypto:webcrypto,AbortController,URLSearchParams,TextDecoder,TextEncoder,Date,setTimeout:fixtureTimeout,clearTimeout:fixtureClearTimeout,localStorage:{getItem(){return null;},removeItem(){}},sessionStorage:{removeItem(){}},window:{addEventListener(){}},fetch:async(url,options={})=>{
     requests.push({url,options});return await handler?.(url,options)||response({projects:[],recent:[]});
   }});
   let source=await readFile(new URL('../public/desktop.js',import.meta.url),'utf8');
   source=source.replace("import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore())",'Promise.resolve(store)');
   const run=code=>vm.runInContext(code,context);run(source);run('const fixtureConnect=connect');await tick();
   run(`selectedId='${id}';currentDeviceId='device';historyScope={hostId:'host',deviceId:'device'};connected=false;recoverableHistoryId=selectedId;recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});${stubLoadThreads ? 'loadThreads=async()=>{};' : ''}connect=async()=>{};updateComposer();`);
-  return {run,nodes,requests,reserves,removes,submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
+  return {run,nodes,requests,reserves,removes,recoveryTimers,fireRecoveryTimer(){const entry=recoveryTimers.entries().next().value;if(!entry)return false;recoveryTimers.delete(entry[0]);entry[1]();return true;},submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
 }
+
+test('live attachment renews the history recovery budget across helper restarts',async()=>{
+  const f=await fixture(url=>url.endsWith('/recover')?response({status:'accepted'},202):undefined,{manualRecoveryTimers:true});
+  for(let attempt=1;attempt<=7;attempt++){
+    f.run("connected=false;recoverableHistoryId=selectedId;recoveryStream={threadId:selectedId,controller:new AbortController()};scheduleHistoryRecovery(selectedId,currentDeviceId)");
+    assert.equal(f.fireRecoveryTimer(),true,`recovery ${attempt} remains available after previous live attachment`);
+    await tick();await tick();
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,attempt);
+    f.run("handleEvent('event: state\\ndata: '+JSON.stringify({conversation:{id:selectedId,title:'ready',model:'model',reasoningEffort:'high',runtimeStatus:'idle',turns:[],requests:[],history:{complete:true}}}))");
+    await tick();await tick();
+    assert.equal(f.run('historyRecoveryAttempts.has(recoveryKey(currentDeviceId,selectedId))'),false);
+    assert.equal(f.run('connected'),true);
+  }
+});
+
+test('history recovery budgets are device scoped and history is not proof of attachment',async()=>{
+  const f=await fixture(url=>url.endsWith('/recover')?response({status:'accepted'},202):undefined,{manualRecoveryTimers:true});
+  f.run("historyRecoveryAttempts.set(recoveryKey(currentDeviceId,selectedId),5);handleEvent('event: history\\ndata: '+JSON.stringify({conversation:{id:selectedId,title:'history',turns:[],requests:[],history:{complete:true}}}))");
+  assert.equal(f.fireRecoveryTimer(),false);
+  assert.equal(f.run('historyRecoveryAttempts.get(recoveryKey(currentDeviceId,selectedId))'),5);
+  assert.throws(()=>f.run("handleEvent('event: state\\ndata: '+JSON.stringify({seq:0,conversation:{id:selectedId,turns:[]}}))"));
+  assert.equal(f.run('historyRecoveryAttempts.get(recoveryKey(currentDeviceId,selectedId))'),5);
+  f.run("currentDeviceId='other';historyScope.deviceId='other';recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});scheduleHistoryRecovery(selectedId,currentDeviceId)");
+  assert.equal(f.fireRecoveryTimer(),true);await tick();await tick();
+  assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,1);
+  assert.equal(f.requests.find(r=>r.url.endsWith('/recover')).options.headers['x-codex-expected-device'],'other');
+  assert.equal(f.run("historyRecoveryAttempts.get(recoveryKey('device',selectedId))"),5);
+});
+
+test('delayed automatic recovery cannot target a different selected device',async()=>{
+  const f=await fixture(undefined,{manualRecoveryTimers:true});
+  f.run("scheduleHistoryRecovery(selectedId,currentDeviceId);currentDeviceId='other'");
+  assert.equal(f.fireRecoveryTimer(),true);await tick();
+  assert.equal(f.reserves.length,0);assert.equal(f.requests.some(r=>r.url.endsWith('/recover')),false);
+});
+
+test('unknown attempts survive deadlines and repeated history recovery while checks continue',async()=>{
+  let result={status:'pending',locked:true};
+  const f=await fixture(url=>url.includes('/recovery-attempt/')?response(result):undefined,{manualRecoveryTimers:true});
+  f.run("recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-21000});historyRecoveryAttempts.set(recoveryKey(currentDeviceId,selectedId),5)");
+  for(let attempt=0;attempt<3;attempt++){
+    const checks=f.requests.filter(r=>r.url.includes('/recovery-attempt/')).length;
+    f.run('recoveryState(currentDeviceId,selectedId).lastCheckedAt=Date.now()-6000;recoveryNoticeTick()');await tick();
+    assert.equal(f.requests.filter(r=>r.url.includes('/recovery-attempt/')).length,checks+1);
+    await f.run('runHistoryRecovery(selectedId,currentDeviceId)');
+  }
+  result={status:'missing',locked:false};
+  await f.run('runHistoryRecovery(selectedId,currentDeviceId)');
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unknown');
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'),'22222222-2222-4222-8222-222222222222');
+  assert.ok(f.requests.filter(r=>r.url.includes('/recovery-attempt/')).length>=4);
+  assert.equal(f.removes.length,0);assert.equal(f.reserves.length,0);
+  assert.equal(f.requests.some(r=>r.url.endsWith('/recover')),false);
+  result={status:'rejected',locked:false};
+  await f.run('runHistoryRecovery(selectedId,currentDeviceId)');
+  assert.equal(f.removes.length,1);assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unavailable');
+});
+
+test('the recovery deadline preserves an in-flight POST until its outcome can be checked',async()=>{
+  let release;
+  const f=await fixture(url=>url.endsWith('/recover')?new Promise(resolve=>{release=()=>resolve(response({error:'outcome-unknown'},504));}):url.includes('/recovery-attempt/')?response({status:'pending',locked:true}):undefined);
+  const work=f.run('recoverSelectedChat()');await tick();
+  f.run('recoveryState(currentDeviceId,selectedId).since=Date.now()-21000;recoveryNoticeTick()');await tick();
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'pending');
+  assert.equal(f.removes.length,0);assert.equal(f.requests.some(r=>r.url.includes('/recovery-attempt/')),false);
+  release();await work;
+  f.run('recoveryState(currentDeviceId,selectedId).since=Date.now()-21000;recoveryNoticeTick()');await tick();
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unknown');
+  assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,1);
+  assert.equal(f.requests.filter(r=>r.url.includes('/recovery-attempt/')).length,1);assert.equal(f.removes.length,0);
+});
+
+test('accepted attempts wait for live state and a status query cannot release an unknown write',async()=>{
+  const f=await fixture(url=>url.includes('/recovery-attempt/')?response({status:'accepted',locked:false}):response({locked:false}),{manualRecoveryTimers:true});
+  f.run("recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-21000});recoveryStream={threadId:selectedId,controller:new AbortController()}");
+  await f.run('checkRecoveryStatus(selectedId,currentDeviceId,recoveryStream)');await tick();
+  assert.equal(f.removes.length,0);
+  assert.equal(f.requests.some(r=>r.url.endsWith('/recover')),false);
+  for(let attempt=0;attempt<4;attempt++)await f.run('runHistoryRecovery(selectedId,currentDeviceId)');
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'awaiting-state');
+  assert.equal(f.removes.length,0);
+  f.run("handleEvent('event: state\\ndata: '+JSON.stringify({conversation:{id:selectedId,title:'ready',turns:[],requests:[],history:{complete:true}}}))");await tick();await tick();
+  assert.equal(f.removes.length,1);assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'),null);
+});
 
 test('history is editable without takeover and only the explicit send recovers before dispatch',async()=>{
   const f=await fixture((url)=>url.endsWith('/recover')?response({status:'accepted'},202):url.endsWith('/messages')?response({status:'accepted'},202):undefined);

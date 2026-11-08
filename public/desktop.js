@@ -484,7 +484,7 @@ async function finishAcceptedRecovery(id, deviceId, stream) {
   // on a fresh stream, which is exactly when the user is staring at 正在连接任务.
   // The stream identity is deliberately not compared: a reconnect replaces the
   // stream, and pinning to the old one left recovery stuck as well.
-  if (!stream || !state || state.finishing || !['pending', 'awaiting-state'].includes(state.status) || stream.controller.signal.aborted) return;
+  if (!stream?.liveState || !state || state.finishing || !['pending', 'awaiting-state', 'unknown'].includes(state.status) || stream.controller.signal.aborted) return;
   state.finishing = true;
   const cleared = await clearRecoveryAttempt(deviceId, id, state);
   if (recoveries.get(key) === state) {
@@ -534,9 +534,8 @@ function updateRecoveryControl() {
   recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理' : pendingAttempt ? '正在连接任务…' : '';
   startRecoveryNoticeTimer();
 }
-// A recovery that never settles must not leave 正在连接任务… or a stale lock
-// notice above the composer forever: give the attempt a deadline, and keep
-// asking whether a lock is still real so it clears without a reload.
+// Recheck unsettled attempts without discarding their request identity. A
+// timeout cannot prove that a resume was rejected or that retrying is safe.
 const RECOVERY_NOTICE_DEADLINE_MS = 20000;
 let recoveryNoticeTimer = null;
 const recoveryLockWatches = new Map();
@@ -557,9 +556,9 @@ function recoveryNoticeTick() {
   let changed = false;
   if (state && ['pending', 'awaiting-state', 'unknown'].includes(state.status)) {
     const since = state.since ?? (state.since = Date.now());
-    if (Date.now() - since >= RECOVERY_NOTICE_DEADLINE_MS) {
-      Object.assign(state, { status: 'unavailable', message: '', since: Date.now() });
-      void clearRecoveryAttempt(deviceId, id, state);
+    if (Date.now() - since >= RECOVERY_NOTICE_DEADLINE_MS && !activeRecoveryAborts.has(key)) {
+      if (state.status !== 'unknown') Object.assign(state, { status: 'unknown', message: '正在核对连接结果' });
+      if (Date.now() - (state.lastCheckedAt || 0) >= 5000) void checkRecoveryAttempt(id, deviceId, state);
       changed = true;
     }
   }
@@ -586,21 +585,19 @@ const historyRecoveryAttempts = new Map();
 let historyRecoveryTimer = null, historyRecoverySeq = 0;
 function scheduleHistoryRecovery(id, deviceId) {
   if (!id || !deviceId) return;
-  if ((historyRecoveryAttempts.get(id) || 0) > 4) {
-    // Give up quietly instead of leaving "正在连接任务" on screen forever.
+  const key = recoveryKey(deviceId, id);
+  if ((historyRecoveryAttempts.get(key) || 0) > 4) {
+    // Exhausting the attachment budget never cancels an unconfirmed write.
     const stuck = recoveryState(deviceId, id);
-    if (stuck?.status === 'awaiting-state') {
-      Object.assign(stuck, { status: 'unavailable', message: '' });
-      if (selectedId === id) updateComposer();
-    }
+    if (stuck?.status === 'unknown') void checkRecoveryAttempt(id, deviceId, stuck);
     return;
   }
   clearTimeout(historyRecoveryTimer);
   const seq = ++historyRecoverySeq;
   historyRecoveryTimer = setTimeout(() => {
     historyRecoveryTimer = null;
-    if (seq !== historyRecoverySeq || selectedId !== id || recoverableHistoryId !== id || connected || newDraft) return;
-    historyRecoveryAttempts.set(id, (historyRecoveryAttempts.get(id) || 0) + 1);
+    if (seq !== historyRecoverySeq || selectedId !== id || currentDeviceId !== deviceId || recoverableHistoryId !== id || connected || newDraft) return;
+    historyRecoveryAttempts.set(key, (historyRecoveryAttempts.get(key) || 0) + 1);
     enqueueHistoryRecovery(id, deviceId);
   }, 500);
   historyRecoveryTimer?.unref?.();
@@ -618,57 +615,40 @@ async function drainHistoryRecoveryQueue() {
   try {
     while (historyRecoveryPending) {
       const next = historyRecoveryPending; historyRecoveryPending = null;
-      if (selectedId !== next.id || connected || newDraft) continue;
+      if (selectedId !== next.id || currentDeviceId !== next.deviceId || connected || newDraft) continue;
       await runHistoryRecovery(next.id, next.deviceId);
     }
   } finally { historyRecoveryBusy = false; }
 }
 async function runHistoryRecovery(id, deviceId) {
+  if (selectedId !== id || currentDeviceId !== deviceId || connected || newDraft) return;
   const state = recoveryState(deviceId, id);
-  if (state?.status === 'unknown' && !state.requestId) Object.assign(state, { status: 'clear', message: '' });
-  if (state?.status === 'unknown' && state.requestId) {
-    // A stored attempt from an earlier session must not pin the composer to
-    // "正在连接任务" forever when the desktop no longer knows about it.
-    const attempt = (state.retries = (state.retries || 0) + 1);
-    if (attempt <= 1) { void checkRecoveryAttempt(id, deviceId, state); return; }
-    await clearRecoveryAttempt(deviceId, id, state);
-    Object.assign(state, { status: 'clear', requestId: null, message: '' });
-  }
-  if (state?.status === 'awaiting-state') {
-    const attempt = (state.retries = (state.retries || 0) + 1);
-    if (attempt > 2) {
-      await clearRecoveryAttempt(deviceId, id, state);
-      Object.assign(state, { status: 'unavailable', requestId: null, message: '' });
-      if (selectedId === id) updateComposer();
-      return;
-    }
-    await new Promise(resolve => setTimeout(resolve, 700 * attempt));
-    if (selectedId !== id || connected) return;
-    await clearRecoveryAttempt(deviceId, id, state);
-    Object.assign(state, { status: 'clear', requestId: null, message: '' });
+  if (state && ['unknown', 'awaiting-state'].includes(state.status)) {
+    await checkRecoveryAttempt(id, deviceId, state);
+    return;
   }
   if (selectedId !== id || recoverableHistoryId !== id || connected || newDraft) return;
   void recoverSelectedChat();
 }
 async function checkRecoveryAttempt(id, deviceId, state) {
   if (state.checking || state.cancelling || !state.requestId) return;
-  state.checking = true; updateComposer();
+  state.checking = true; state.lastCheckedAt = Date.now(); updateComposer();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recovery-attempt/${encodeURIComponent(state.requestId)}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
     if (!response.ok) throw new Error('unavailable');
     const result = await response.json();
-    if (recoveries.get(recoveryKey(deviceId, id)) !== state || state.status !== 'unknown') return;
+    if (recoveries.get(recoveryKey(deviceId, id)) !== state || !['unknown', 'awaiting-state'].includes(state.status)) return;
     if (result?.locked === false && ['rejected', 'cancelled'].includes(result.status)) {
       if (!(await clearRecoveryAttempt(deviceId, id, state))) throw new Error('storage');
       state.status = 'unavailable'; state.message = '暂时无法连接，请稍后再试'; state.since = Date.now();
       recoveryChecks.delete(recoveryKey(deviceId, id));
       if (selectedId === id && currentDeviceId === deviceId) void connect(id);
     } else if (result?.locked === false && result.status === 'accepted') {
-      state.status = 'awaiting-state'; state.message = '正在连接任务'; state.since = Date.now();
+      state.status = 'awaiting-state'; state.message = '正在连接任务';
       recoveryChecks.delete(recoveryKey(deviceId, id));
       if (selectedId === id && currentDeviceId === deviceId) void connect(id);
-    } else { state.message = '恢复结果未知，请稍后重新检查'; state.since = Date.now(); }
+    } else { state.message = '恢复结果未知，请稍后重新检查'; }
   } catch {
     if (recoveries.get(recoveryKey(deviceId, id)) === state && state.status === 'unknown') state.message = '无法确认恢复结果，请稍后重新检查';
   } finally {
@@ -1417,7 +1397,7 @@ async function recoverSelectedChat() {
     if (!(await store.reserve(deviceId, id, state.requestId))) throw new Error('occupied');
     reserved = true;
     recoveryChannel?.postMessage({ deviceId, threadId: id });
-    if (selectedId !== id || currentDeviceId !== deviceId || newDraft) throw new Error('selection changed');
+    if (selectedId !== id || currentDeviceId !== deviceId || newDraft || connected) throw new Error('selection changed');
   }
   catch {
     if (reserved) await clearRecoveryAttempt(deviceId, id, state);
@@ -3299,8 +3279,10 @@ function handleEvent(block) {
     if (!payload.conversation || payload.conversation.id !== selectedId || !Array.isArray(payload.conversation.turns)) throw new Error('状态无效');
     if (payload.seq !== undefined && (!Number.isSafeInteger(payload.seq) || payload.seq < 1 || (streamSeq !== null && payload.seq <= streamSeq))) throw new Error('状态版本错误');
     recoverableHistoryId = null;
+    historyRecoveryAttempts.delete(recoveryKey(currentDeviceId, selectedId));
+    if (recoveryStream?.threadId === selectedId) recoveryStream.liveState = true;
     const recovery = recoveries.get(recoveryKey(currentDeviceId, selectedId));
-    if (recovery?.status === 'awaiting-state') { recovery.liveStream = recoveryStream; finishAcceptedRecovery(selectedId, currentDeviceId, recoveryStream); }
+    if (recovery && ['pending', 'awaiting-state', 'unknown'].includes(recovery.status)) { recovery.liveStream = recoveryStream; finishAcceptedRecovery(selectedId, currentDeviceId, recoveryStream); }
     streamView = payload.conversation; streamSeq = payload.seq ?? null;
     rememberView(streamView);
     showState(streamView); return true;
@@ -3331,8 +3313,8 @@ function handleEvent(block) {
     if (controlSignature(streamView) !== previousControls) { cancelPendingRender(); rememberView(streamView); showState(streamView); }
     else queueDeltaRender(streamView);
     return true;
-  } else if (type === 'history') { cancelPendingRender(); if (!payload.conversation || payload.conversation.id !== selectedId || !Array.isArray(payload.conversation.turns)) throw new Error('状态无效'); recoverableHistoryId = selectedId; streamView = null; streamSeq = null; showState(payload.conversation, false); scheduleHistoryRecovery(selectedId, currentDeviceId); return false; }
-  else if (type === 'status' && payload.status === 'unavailable') { cancelPendingRender(); streamView = null; streamSeq = null; updateLiveTaskStatus(selectedId, 'unknown'); if (displayedHistoryId === selectedId && selectedId) status('仅查看历史', 'error'); else fail('任务状态暂不可用'); }
+  } else if (type === 'history') { cancelPendingRender(); if (!payload.conversation || payload.conversation.id !== selectedId || !Array.isArray(payload.conversation.turns)) throw new Error('状态无效'); if (recoveryStream) recoveryStream.liveState = false; recoverableHistoryId = selectedId; streamView = null; streamSeq = null; showState(payload.conversation, false); scheduleHistoryRecovery(selectedId, currentDeviceId); return false; }
+  else if (type === 'status' && payload.status === 'unavailable') { cancelPendingRender(); if (recoveryStream) recoveryStream.liveState = false; streamView = null; streamSeq = null; updateLiveTaskStatus(selectedId, 'unknown'); if (displayedHistoryId === selectedId && selectedId) status('仅查看历史', 'error'); else fail('任务状态暂不可用'); }
   return false;
 }
 // Opening one IPC follower per tap made fast switching stutter on both ends.
