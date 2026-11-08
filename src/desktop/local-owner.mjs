@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { AppServerClient } from './app-server-client.mjs';
 import { identityNet } from './identity-net.mjs';
+import { createOwnerSettingsObserver } from './owner-settings-observer.mjs';
 
 const require = createRequire(import.meta.url);
 const { createDesktopIpcLiveOwner } = require('remodex/src/desktop-ipc-live-owner');
@@ -23,7 +24,7 @@ export class LocalOwner extends EventEmitter {
     client.on('unavailable', error => {
       if (generation !== this.generation) return;
       if (this.pendingWrites && client.child.exitCode === null && client.child.signalCode === null) this.uncertainWrites = true;
-      this.state = 'unavailable'; this.owner?.stopAll(); this.emit('unavailable', error);
+      this.state = 'unavailable'; this.settingsObserver?.clear(); this.owner?.stopAll(); this.emit('unavailable', error);
     });
     try {
       await client.initialize();
@@ -41,7 +42,8 @@ export class LocalOwner extends EventEmitter {
           return this.rawBridge.send(raw);
         } });
       this.owner = owner;
-      client.on('inbound', (raw, value) => owner.observeInbound(raw, value));
+      const settingsObserver = this.settingsObserver = createOwnerSettingsObserver(owner);
+      client.on('inbound', (raw, value) => settingsObserver.observeInbound(raw, value));
       client.on('outbound', (raw, value) => {
         try {
           if (this.rawBridge && value?.method === 'serverRequest/resolved') this.rawBridge.resolve(value);
@@ -51,7 +53,7 @@ export class LocalOwner extends EventEmitter {
           client.invalidate(new Error('raw response bridge unavailable'));
           return;
         }
-        owner.observeOutbound(raw, value);
+        settingsObserver.observeOutbound(raw, value);
       });
       this.state = 'ready'; return this;
     } catch (error) { if (generation === this.generation) this.state = 'unavailable'; await client.close(); throw error; }
@@ -158,7 +160,7 @@ export class LocalOwner extends EventEmitter {
       }
       if (this.uncertainWrites || this.pendingWrites || this.writeGeneration !== writeGeneration || this.runningThreads().length) throw Object.assign(new Error('owned tasks are active or uncertain'), { code: 'tasks-active' });
     }
-    ++this.generation; this.state = 'closed'; this.owner?.stopAll();
+    ++this.generation; this.state = 'closed'; this.settingsObserver?.clear(); this.owner?.stopAll();
     await this.client?.close();
   }
 }

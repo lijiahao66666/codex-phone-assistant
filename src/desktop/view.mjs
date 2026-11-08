@@ -67,7 +67,9 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     id: state.id,
     collaborationMode: ['default', 'plan'].includes(state.latestCollaborationMode?.mode) ? state.latestCollaborationMode.mode : null,
     model: typeof state.latestCollaborationMode?.settings?.model === 'string' ? state.latestCollaborationMode.settings.model : null,
-    reasoningEffort: typeof state.latestCollaborationMode?.settings?.reasoning_effort === 'string' ? state.latestCollaborationMode.settings.reasoning_effort : null,
+    reasoningEffort: Object.hasOwn(state.latestCollaborationMode?.settings || {}, 'reasoning_effort')
+      ? (typeof state.latestCollaborationMode.settings.reasoning_effort === 'string' ? state.latestCollaborationMode.settings.reasoning_effort : null)
+      : (typeof state.latestReasoningEffort === 'string' ? state.latestReasoningEffort : null),
     title: typeof state.title === 'string' ? state.title : '',
     runtimeStatus: ['active', 'idle'].includes(state.threadRuntimeStatus?.type) ? state.threadRuntimeStatus.type : 'unknown',
     goal,

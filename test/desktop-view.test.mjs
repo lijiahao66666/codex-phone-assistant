@@ -3,6 +3,16 @@ import assert from 'node:assert/strict';
 import { desktopView } from '../src/desktop/view.mjs';
 import { referencedMediaPaths } from '../src/media/media-resolver.mjs';
 
+test('projects native effort only when collaboration settings omit it, preserving explicit default', () => {
+  const state = { id: 'thread', latestReasoningEffort: 'high', latestCollaborationMode: { mode: 'default', settings: { model: 'model' } } };
+  assert.equal(desktopView(state).reasoningEffort, 'high');
+  state.latestCollaborationMode.settings.reasoning_effort = null;
+  assert.equal(desktopView(state).reasoningEffort, null);
+  state.latestCollaborationMode.settings.reasoning_effort = 'medium';
+  assert.equal(desktopView(state).reasoningEffort, 'medium');
+  assert.equal(desktopView({ id: 'thread', turns: [{ params: { effort: 'max' } }] }).reasoningEffort, null);
+});
+
 test('projects the initial owner prompt from turn params before the assistant response', () => {
   const turn = { turnId: 'turn', params: { input: [{ type: 'input_text', text: 'first phone message' }] }, items: [{ type: 'agentMessage', id: 'reply', text: 'reply' }] };
   const input = { id: 'thread', turns: [turn] };
