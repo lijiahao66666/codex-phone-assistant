@@ -185,10 +185,32 @@ cancelModelPrepared.addEventListener('click', async () => {
     if (selectedId === id && modelDeviceGeneration === deviceGeneration) updateComposer();
   }
 });
+let modelLoadTimer, modelLoadAttempt = 0;
 async function loadModels() {
   const generation = modelDeviceGeneration;
-  try { const response = await scopedFetch('/api/models', { credentials: 'same-origin', cache: 'no-store' }); const data = response.ok ? await response.json() : null; if (generation === modelDeviceGeneration) modelCatalog = Array.isArray(data?.models) ? data.models : []; } catch { if (generation === modelDeviceGeneration) modelCatalog = []; }
-  if (generation === modelDeviceGeneration) updateModelControl();
+  let catalog = null;
+  try {
+    const response = await scopedFetch('/api/models', { credentials: 'same-origin', cache: 'no-store' });
+    const data = response.ok ? await response.json() : null;
+    catalog = Array.isArray(data?.models) && data.models.length ? data.models : null;
+  } catch { catalog = null; }
+  if (generation !== modelDeviceGeneration) return;
+  if (catalog) {
+    modelCatalog = catalog; modelLoadAttempt = 0;
+    clearTimeout(modelLoadTimer); modelLoadTimer = undefined;
+    updateModelControl();
+    return;
+  }
+  // A failed or empty catalog used to stay empty for the rest of the session, so
+  // the control kept its placeholder until the page was reloaded.
+  modelCatalog = [];
+  updateModelControl();
+  if (modelLoadAttempt < 4) {
+    const wait = [800, 1500, 3000, 6000][modelLoadAttempt++];
+    clearTimeout(modelLoadTimer);
+    modelLoadTimer = setTimeout(() => { modelLoadTimer = undefined; void loadModels(); }, wait);
+    modelLoadTimer?.unref?.();
+  }
 }
 // Rebuilding the native selects on every keystroke made typing stutter, so the
 // markup is only touched when one of its inputs actually changed.
@@ -217,7 +239,10 @@ function updateModelControl() {
     return;
   }
   const matching = modelCatalog.find(entry => entry.model === shownModel);
-  if (!matching) { const option = document.createElement('option'); option.value = ''; option.textContent = shownModel || '模型'; modelControl.append?.(option); }
+  // Keep the real model id on the fallback option. With an empty value the
+  // select reports "" and the picker label falls back to 模型, which is what
+  // made the control look empty whenever the catalog had not caught up.
+  if (!matching) { const option = document.createElement('option'); option.value = shownModel; option.textContent = shownModel; modelControl.append?.(option); }
   for (const entry of modelCatalog) { const option = document.createElement('option'); option.value = entry.model; option.textContent = entry.displayName; option.selected = entry.model === shownModel; modelControl.append?.(option); }
   effortControl.replaceChildren();
   const efforts = matching?.supportedReasoningEfforts || [];
@@ -240,11 +265,15 @@ function selectedEffortLabel() {
   const fallback = [...(effortControl.options || [])].find(option => option.value === '');
   return fallback ? fallback.textContent.trim() : '';
 }
-function modelTriggerLabel() {
+function currentOptionText(current) {
+  const text = current && typeof current.textContent === 'string' ? current.textContent.trim() : '';
+  return text && text !== '模型' && text !== '等级' ? text : '';
+}
+function modelTriggerLabel(current) {
   const entry = pickerModelEntry(modelControl.value);
-  if (!entry) return effortControl.value || '模型';
-  const name = entry.displayName || entry.model;
   const effort = selectedEffortLabel();
+  const name = entry ? (entry.displayName || entry.model) : (currentOptionText(current) || modelControl.value);
+  if (!name) return effort && effort !== '等级' ? effort : '模型';
   return effort && effort !== '等级' ? `${name} · ${effort}` : name;
 }
 function modelEffortView(model) {
