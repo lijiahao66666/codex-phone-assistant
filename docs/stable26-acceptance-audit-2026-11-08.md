@@ -1,5 +1,9 @@
 # stable26 验收证据核对
 
+最新补充（2026-11-08 19:07）：思考等级恢复时另一个字段竞态已修复。`thread/settings/updated` 只确认 model 或 serviceTier 时，不再整条废弃待返回恢复响应中的独立 reasoningEffort；后到的新等级（包括显式 null）仍优先。observer/view/router 定向检查 42/42 PASS，签名通过的 `codex-phone-stable26-effort-partial.noindex` 包已安装，Desktop PID 40360 保留。公网 cli 开放再次显示 `GPT-6.1 Terra · high`、输入可用，证据 `/private/tmp/codex-stable26-effort-partial-cli-live.json`。这仍不保证所有已有 Desktop owner 的 snapshot 都带有有效等级；明确的 null 仍保持原义，不用数据库或历史猜测覆盖。
+
+全列表连接检查尚未完成：24 条列表中执行了 21 条短等待后，发现助手 runtime PID 28169 已退出，主壳仍在；后段超时不能作为每条聊天各自无法连接的证据。原记录保存在 `/private/tmp/codex-stable26-all24-partial-invalidated.json`，已中止该轮并正常重启助手，不能写成全 24 条通过。退出原因尚未由现场日志确认。此前 90 秒采样的原始数据另存 `/private/tmp/codex-stable26-all24-process-samples.json`，该窗口 Desktop RSS 峰值 490.2 MiB、助手 345.2 MiB；这段采样未涵盖后来退出，不能证明进程长期稳定。
+
 本轮后续实测补充（2026-11-08）：
 
 - 登录页面已刷新，实际脚本引用为 `desktop.js?v=20261108-stable26`。
@@ -11,7 +15,7 @@
 
 思考等级后续修复：本仓库 LocalOwner 适配层消费实际 `thread/start`、`thread/resume` 成功响应中与 thread 并列的 `model`、`reasoningEffort`，在历史 hydrate 后更新本地投影。它不发送 settings 写请求，不以历史 turn 或全局默认替代当前设置；显式 null 保留，并抑制较旧恢复响应覆盖较新已确认设置。定向 owner/view/router 测试 39/39 PASS，相关运行与乐观发送回归 8/8 PASS。新 Mac 包完成签名校验并安装；原助手及子进程正常退出，Codex Desktop 未重启。公网 H5 的购物金已恢复 `reasoningEffort: high`，显示 `GPT-6.1 Terra · high`，输入可用；证据 `/private/tmp/codex-stable26-effort-shopping-live.json`。本项属于电脑同步层修复，服务端静态版本继续为 stable26。
 
-未读问题的根因也已确认：普通后台 turn 完成未发送 `thread-read-state-changed` 的 true 事件，现有依赖只在读取时广播 false；Desktop 对 IPC snapshot 的接收不等同原生完成时持久化未读。不能仅在 H5 加蓝点绕过桌面权威状态。该缺陷与原生归档 writer 冲突仍是稳定版验收阻塞项，未宣称正式稳定版通过。
+未读问题已确认一个缺口：普通后台 turn 完成未发送 `thread-read-state-changed` 的 true 事件，现有依赖只在读取时广播 false；但后续发送正确协议通知仍未通过实机持久化闭环，不能将此缺口写成完整根因。Desktop 对 IPC snapshot 的接收不等同原生完成时持久化未读。不能仅在 H5 加蓝点绕过桌面权威状态。该缺陷与原生归档 writer 冲突仍是稳定版验收阻塞项，未宣称正式稳定版通过。
 
 第二条真实旧聊天 cli 开放也已连接并显示 `GPT-6.1 Terra · high`，输入可用；证据 `/private/tmp/codex-stable26-effort-cli-live.json`。两条旧聊天均仅打开读取，没有发送新消息或修改模型/等级。
 

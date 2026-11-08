@@ -99,6 +99,38 @@ test('a real settings notification prevents a late resume from restoring older s
   assert.deepEqual(updates.at(-1).threadSettings, { effort: 'low' });
 });
 
+test('partial settings notifications preserve independent effort from a pending resume', () => {
+  for (const notification of [{ model: 'current' }, { serviceTier: 'priority' }]) {
+    const { observer, updates } = harness();
+    resume(observer, 1);
+    observer.observeOutbound('', { method: 'thread/settings/updated', params: { threadId: 'thread', threadSettings: notification } });
+    response(observer, 1, { model: 'resume-model' });
+    assert.deepEqual(updates.at(-1).threadSettings, {
+      ...(!Object.hasOwn(notification, 'model') ? { model: 'resume-model' } : {}), effort: 'high',
+    });
+  }
+});
+
+test('new effort confirmations including null protect effort without discarding a pending model', () => {
+  for (const effort of ['low', null]) {
+    for (const notification of [{ effort }, { collaborationMode: { settings: { reasoning_effort: effort } } }]) {
+      const { observer, updates } = harness();
+      resume(observer, 1);
+      observer.observeOutbound('', { method: 'thread/settings/updated', params: { threadId: 'thread', threadSettings: notification } });
+      response(observer, 1, { model: 'resume-model' });
+      assert.deepEqual(updates.at(-1).threadSettings, { model: 'resume-model' });
+    }
+  }
+});
+
+test('a newer partial resume only supersedes its confirmed fields', () => {
+  const { observer, updates } = harness();
+  resume(observer, 1); resume(observer, 2);
+  response(observer, 2, { model: 'current-model', reasoningEffort: undefined });
+  response(observer, 1, { model: 'old-model' });
+  assert.deepEqual(updates.map(update => update.threadSettings), [{ model: 'current-model' }, { effort: 'high' }]);
+});
+
 test('rejects failed, mismatched, mirrored and malformed setting responses', () => {
   const { observer, updates } = harness();
   resume(observer, 1); observer.observeOutbound('', { id: 1, error: { code: -32600 } });
