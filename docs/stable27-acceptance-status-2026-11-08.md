@@ -2,11 +2,15 @@
 
 stable33 同版本列表复验：53 个既有聊天逐条执行，每条等待最多 15 秒，51 个实时连接且输入可用；主任务在该窗口未连接，礼品卡已实时连接但 recovery locked、输入禁用。51 个成功项等待中位数 894 ms，最大 13603 ms，选中 ID 错位 0。最初有分组未展开，展开后对遗漏条目补测，结果分批取得而非一次连续遍历；原始记录 `/private/tmp/codex-stable33-all53-retest.json`。复验结束时助手和桌面进程均存在；结束时 RSS 不是过程峰值，也不能据此证明所有历史路径无内存问题。
 
+该记录的 `project` 只读取按钮文本，未检查控件可见性：其中 21 条无项目的最近聊天读取到了隐藏控件中的首个项目名称“清禾画画”，不能据此判断项目显示或项目归属。真实页面抽查无项目聊天时，项目 select 和按钮均为 hidden，按钮 CSS 为 `display:none`。模型/等级对照了各聊天最新 rollout 上下文，52 条已连接项一致；这不代替同时刻独立读取的 live snapshot 权威核验。
+
 礼品卡锁的并发审查发现可达反例：原生 follower handler 入口校验 owner 后会异步等待设置；若此时角色变成 follower、后续转发收到 `no-client-found`，原生代码会调用 `resumeConversationForUnavailableOwner`。当前原生代码的隔离 VM 复现了该路径，尚未证明礼品卡现网发生。助手侧 session/owner/revision 的写前校验不能约束原生后续自动 resume，且模型写入 journal 还与 recovery 锁互斥。因此未实施绕过锁的方案；需要原生提供禁止自动 resume 的执行期保护，或取得旧 attempt 已结束的权威证据。
 
 stable33 补充复验：2026-11-09 00:55（北京时间）运行中的新助手下，一次全局未知聊天 IPC discovery 以 4.99 ms 返回 `no-client-found`；此前独立样本约 10008 ms。C/D 各一次新物理 IPC 连接到 fresh snapshot 为 2.93/2.89 ms，这是 IPC 样本，不等于 H5 冷连接。此前超时的 9 个聊天在 H5 各等待最多 15 秒复验：7 个输入可用，耗时 591 至 4259 ms；主任务 15 秒内未连接，礼品卡实时连接但旧 recovery 锁使输入禁用。不能由此声称全部聊天或全局延迟通过。
 
 随后重新选择主任务，一次实测在 12.302 秒后实时连接且输入可用，模型 Terra/high；这是另一轮选择，不更改上一次 15 秒超时记录。礼品卡在同日重新选择后约 708 ms 显示实时 Sol/high，但恢复锁仍在、输入仍禁用。
+
+主任务后续只读诊断：新建独立 H5 events 流一次，2026-11-08 17:38:46.260 UTC 发起，约 36 ms 收到 headers、328 ms 收到 preview、400 ms 收到 state；该结果不包含 UI 渲染，也不能代表此前慢样本。另一次本地新 IPC snapshot 约 134 ms、原始约 6.9 MB，窗口化后约 99 KB；既有慢样本缺少请求起始时间及关联标识，无法据此确认 12 至 15 秒的具体瓶颈。
 
 专用 C 两次重复最终回复已核对原生 rollout 和 `~/.codex/logs_2.sqlite`：两个 turn 各只有一次用户输入，原生 Responses 流超时或在 `response.completed` 前断开后触发 sampling 重试，随后生成不同 message ID 的第二条 final。日志 ID 分别为 81243061、81243234、81268186。这排除了本次 H5 重复渲染和重复提交；现有证据无法区分 provider、代理和网络导致的流中断。
 
