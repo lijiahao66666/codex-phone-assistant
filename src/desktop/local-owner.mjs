@@ -12,7 +12,7 @@ export class LocalOwner extends EventEmitter {
     super();
     if (options?.coordinateWriteForTests !== undefined && (options.allowInsecureForTests !== true || typeof options.coordinateWriteForTests !== 'function')) throw new TypeError('Test write coordinator requires explicit test mode');
     if (options?.rawBridgeForTests !== undefined && (options.allowInsecureForTests !== true || typeof options.rawBridgeForTests !== 'function')) throw new TypeError('Test raw bridge requires explicit test mode');
-    this.options = options; this.state = 'idle'; this.generation = 0; this.threads = new Set(); this.queuedThreads = new Set(); this.pendingWrites = 0; this.writeGeneration = 0; this.uncertainWrites = false;
+    this.options = options; this.state = 'idle'; this.generation = 0; this.threads = new Set(); this.queuedThreads = new Set(); this.releasedThreads = new Set(); this.pendingWrites = 0; this.writeGeneration = 0; this.uncertainWrites = false;
   }
   async start() {
     if (this.state !== 'idle') throw new Error('already started');
@@ -35,6 +35,20 @@ export class LocalOwner extends EventEmitter {
       if (this.options.rawBridgeForTests) this.rawBridge = this.options.rawBridgeForTests(client);
       const owner = createDesktopIpcLiveOwner({ socketPath: this.options.socketPath, netModule: this.identityNet,
         startRouterWhenMissing: this.options.startRouterWhenMissing === true,
+        ...(this.options.allowInsecureForTests === true && this.options.idleReleaseGraceMsForTests !== undefined
+          ? { idleReleaseGraceMs: this.options.idleReleaseGraceMsForTests } : {}),
+        canReleaseThread: () => this.state === 'ready' && !this.pendingWrites && !this.uncertainWrites
+          && !this.client.pending.size && !this.rawBridge?.hasUnresolved(),
+        unsubscribeIdleThread: async threadId => {
+          this.pendingWrites++; this.writeGeneration++;
+          try { return await this.client.request('thread/unsubscribe', { threadId }, { observe: false }); }
+          finally { this.pendingWrites--; }
+        },
+        onThreadReleased: threadId => { this.threads.delete(threadId); this.queuedThreads.delete(threadId); this.releasedThreads.add(threadId); this.emit('threadReleased', threadId); },
+        onIdleReleaseError: (threadId, error) => {
+          if (!error?.rpcError || !Number.isSafeInteger(error.rpcError.code)) this.uncertainWrites = true;
+          this.emit('idleReleaseFailed', { threadId, error });
+        },
         sendCodexRequest: (method, params) => this.write(method, params, { observe: false }),
         sendRawCodexMessage: raw => {
           if (!this.rawBridge) return client.sendRaw(raw);
@@ -60,7 +74,10 @@ export class LocalOwner extends EventEmitter {
   }
   request(method, params, options) {
     if (this.state !== 'ready') return Promise.reject(Object.assign(new Error('owner unavailable'), { code: 'unavailable' }));
-    return this.client.request(method, params, options);
+    if (this.owner?.isThreadReleasing(params?.threadId)) return Promise.reject(Object.assign(new Error('owner releasing'), { code: 'unavailable' }));
+    if (this.releasedThreads.has(params?.threadId) && !['thread/resume', 'thread/read', 'thread/turns/list', 'thread/items/list', 'thread/unsubscribe', 'thread/archive', 'thread/delete'].includes(method)) return Promise.reject(Object.assign(new Error('owner resume required'), { code: 'unavailable' }));
+    this.owner?.noteLocalOperation(params?.threadId);
+    return this.client.request(method, params, options).finally(() => this.owner?.noteLocalOperation());
   }
   async write(method, params, options) {
     return this.#write(method, params, options, this.options.coordinateWriteForTests);
@@ -74,11 +91,14 @@ export class LocalOwner extends EventEmitter {
   }
   async #write(method, params, options, coordinate) {
     if (this.state !== 'ready') throw Object.assign(new Error('owner unavailable'), { code: 'unavailable' });
+    if (this.owner?.isThreadReleasing(params?.threadId)) throw Object.assign(new Error('owner releasing'), { code: 'unavailable' });
+    if (this.releasedThreads.has(params?.threadId) && method !== 'thread/resume') throw Object.assign(new Error('owner resume required'), { code: 'unavailable' });
     this.pendingWrites++;
     this.writeGeneration++;
+    this.owner?.noteLocalOperation(params?.threadId);
     let dispatched = false, active = true;
     const dispatch = () => {
-      if (!active || dispatched || this.state !== 'ready') throw Object.assign(new Error('Write cannot be dispatched'), { code: 'unavailable' });
+      if (!active || dispatched || this.state !== 'ready' || this.owner?.isThreadReleasing(params?.threadId)) throw Object.assign(new Error('Write cannot be dispatched'), { code: 'unavailable' });
       dispatched = true;
       return this.request(method, params, options);
     };
@@ -91,7 +111,7 @@ export class LocalOwner extends EventEmitter {
       const writerConflict = method === 'thread/resume' && error?.rpcError?.code === -32600 && /already has an active writer/i.test(error.rpcError.message || '');
       if (dispatched && !writerConflict && (!this.client?.child || (this.client.child.exitCode === null && this.client.child.signalCode === null))) this.uncertainWrites = true;
       throw error;
-    } finally { active = false; this.pendingWrites--; }
+    } finally { active = false; this.pendingWrites--; this.owner?.noteLocalOperation(params?.threadId); }
   }
   ownerId() { return this.state === 'ready' ? this.identityNet?.ownerId || null : null; }
   async create({ cwd, model, runtimeWorkspaceRoots }) {
@@ -117,6 +137,7 @@ export class LocalOwner extends EventEmitter {
       throw error;
     }
     if (result?.thread?.id !== threadId) throw new Error('resume thread mismatch');
+    this.releasedThreads.delete(threadId);
     this.threads.add(threadId);
     return { threadId };
   }

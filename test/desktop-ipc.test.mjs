@@ -74,6 +74,43 @@ test('direct custom-socket owner probes preserve targeted history revision verif
   } finally { await client.close(); await f.close(); }
 });
 
+test('owner status requests reannounce only existing subscriptions for that exact owner and host', async () => {
+  const follows = [];
+  let peer;
+  const f = await fixture((socket, msg) => {
+    peer = socket;
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId,
+      resultType: 'success', result: { clientId: 'follower' } }));
+    else if (msg.method === 'thread-owner-discovery') socket.write(frame({ type: 'response', requestId: msg.requestId,
+      resultType: 'success', handledByClientId: 'owner', result: {} }));
+    else if (msg.method === 'thread-stream-following-changed') follows.push(msg);
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
+  const query = (sourceClientId, conversationId, hostId = 'local') => frame({ type: 'broadcast',
+    method: 'thread-stream-following-status-requested', sourceClientId, params: { conversationId, hostId } });
+  try {
+    await client.connect();
+    const off = await client.subscribe('thread', () => {});
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(follows.length, 1);
+    peer.write(Buffer.concat([query('other-owner', 'thread'), query('owner', 'other-thread'), query('owner', 'thread', 'other-host')]));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(follows.length, 1);
+    peer.write(query('owner', 'thread'));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(follows.length, 2);
+    assert.deepEqual(follows[1].targetClientIds, ['owner']);
+    assert.equal(follows[1].params.following, true);
+    off();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(follows.at(-1).params.following, false);
+    const count = follows.length;
+    peer.write(query('owner', 'thread'));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(follows.length, count);
+  } finally { await client.close(); await f.close(); }
+});
+
 test('closing a half-open peer cannot block session recovery indefinitely', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'hub-ipc-half-open-'));
   const socketPath = socketPathFor(dir);

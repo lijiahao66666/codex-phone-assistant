@@ -57,6 +57,33 @@ real GiB-scale thread can complete that native path within memory/frame limits.
 Three turns are a count limit, not a byte limit on an individual summary, and
 app-server resume itself may still do substantial work. No frame limit is raised.
 
+Idle writer release is restricted to a last follower departure observed on the
+current owner connection. An initially empty follower map is not evidence that
+the task has no viewers. Each new follow cancels the candidate; connection loss
+or reinitialization clears every candidate and the follower map. H5 IPC answers
+the existing status-request broadcast only for subscriptions already bound to
+that exact owner, thread, and host, restoring presence after owner reconnection.
+Sidebar observers count as followers too; this deliberately keeps the writer
+while a task is still observed by the phone's task list.
+
+After two seconds without renewed activity, release additionally requires known
+idle runtime, terminal turns, no active goal, unfinished request, queued draft,
+pending start/resume/hydration, mutation, follower request, app-server request,
+write, unknown write outcome, or unresolved raw response. Existing work can
+finish and start a fresh grace period. A per-task admission gate closes before
+dispatch; it blocks both direct local requests/writes and follower controls.
+The unsubscribe request bypasses inbound projection removal and waits for a
+real `unsubscribed`, `notSubscribed`, or `notLoaded` acknowledgement before
+dropping the owner projection and LocalOwner's tracked thread.
+
+A definite unsubscribe RPC rejection retains the known writer. A timeout,
+connection error, or malformed acknowledgement retains an uncertain admission
+gate and prevents normal shutdown; it does not force-unlock or silently retry.
+After acknowledged release, stale local sends require a successful resume.
+This does not add a native archive handoff command: native archive/delete can
+use the released writer only after all viewers have left. An open H5/native
+view, task-list subscription, approval, or queued draft prevents release.
+
 The local fork is necessary because the dependency exposes neither an explicit
 initial-page baseline hook nor a pagination hook after compatibility projection.
 A plain wrapper triggers automatic full reads or loses completeness metadata.
@@ -67,6 +94,7 @@ Targeted integration and regression checks:
 
 ```sh
 node --test test/bounded-owner-history.test.mjs test/owner-settings-observer.test.mjs
+node --test test/idle-owner-release.test.mjs test/desktop-ipc.test.mjs test/desktop-ipc-pool.test.mjs
 ```
 
 The new integration tests use a temporary socket and fake app-server. A 1 GiB

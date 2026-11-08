@@ -246,6 +246,16 @@ export class DesktopIpc extends EventEmitter {
         }
       } else if (message.type === 'broadcast' && message.method === 'client-status-changed' && message.params?.status === 'disconnected' && typeof message.params.clientId === 'string' && message.sourceClientId === message.params.clientId) {
         this.emit('ownerDisconnected', message.params.clientId);
+      } else if (message.type === 'broadcast' && message.method === 'thread-stream-following-status-requested') {
+        // Owner reconnection discards old follower presence. Reannounce only
+        // subscriptions already bound to that exact owner and host.
+        if (this.state === 'ready') for (const subscription of this.subscriptions.values()) {
+          if (subscription.ownerId === message.sourceClientId && subscription.conversationId === message.params?.conversationId &&
+              (message.params?.hostId == null || subscription.hostId === message.params.hostId)) {
+            try { this.#follow(subscription, true); }
+            catch { /* Socket closure invalidates the subscription normally. */ }
+          }
+        }
       } else if (message.type === 'broadcast' && message.method === 'thread-stream-state-changed') {
         for (const subscription of this.subscriptions.values()) {
           if (subscription.ownerId === message.sourceClientId && subscription.conversationId === message.params?.conversationId &&
