@@ -74,6 +74,146 @@ test('direct custom-socket owner probes preserve targeted history revision verif
   } finally { await client.close(); await f.close(); }
 });
 
+function discoveryRequest(requestId, method = 'thread-owner-discovery') {
+  return { type: 'client-discovery-request', requestId, request: {
+    type: 'request', requestId: `request-${requestId}`, sourceClientId: 'another-client', version: 1,
+    method, params: { hostId: 'local', conversationId: 'thread' },
+  } };
+}
+
+test('a read-only follower promptly declines router discovery without claiming or executing a request', async () => {
+  const answers = []; let original;
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'follower' } }));
+    else if (msg.method === 'thread-owner-discovery') {
+      original = msg;
+      socket.write(frame(discoveryRequest('outer-discovery-id')));
+    } else if (msg.type === 'client-discovery-response') {
+      answers.push(msg);
+      assert.equal(msg.requestId, 'outer-discovery-id');
+      socket.write(frame({ type: 'response', requestId: original.requestId, resultType: 'error', error: 'no-client-found' }));
+    } else assert.fail(`unexpected request ${msg.type}:${msg.method}`);
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 500 });
+  try {
+    await client.connect();
+    await assert.rejects(client.discover('unowned-thread'), { code: 'no-client-found' });
+    assert.deepEqual(answers, [{ type: 'client-discovery-response', requestId: 'outer-discovery-id', response: { canHandle: false } }]);
+    assert.equal(client.state, 'ready'); assert.equal(client.pending.size, 0); assert.equal(client.subscriptions.size, 0);
+  } finally { await client.close(); await f.close(); }
+});
+
+test('fragmented and batched discovery requests decline all methods while preserving replies and stream events', async () => {
+  const answers = [];
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'follower' } }));
+    else if (msg.type === 'client-discovery-response') answers.push(msg);
+    else if (msg.method === 'thread-owner-discovery') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: {} }));
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
+  try {
+    await client.connect();
+    const changes = []; await client.subscribe('thread', change => changes.push(change));
+    const methods = ['thread-owner-discovery', 'thread-follower-start-turn', 'thread-follower-load-complete-history', 'unknown-method'];
+    for (const [index, method] of methods.entries()) {
+      const value = discoveryRequest(`outer-${index}`, method);
+      if (index === 3) value.request.version = 0;
+      for (const byte of frame(value)) client.receive(Buffer.from([byte]));
+    }
+    const discovery = client.discover('other');
+    const requestId = [...client.pending.keys()][0];
+    client.receive(Buffer.concat([
+      frame(discoveryRequest(requestId)),
+      frame({ type: 'response', requestId, resultType: 'success', handledByClientId: 'owner', result: {} }),
+      frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'owner', params: { hostId: 'local', conversationId: 'thread', change: { type: 'snapshot', revision: 1 } } }),
+    ]));
+    assert.equal((await discovery).ownerId, 'owner');
+    await client.discover('flush');
+    assert.deepEqual(answers.map(answer => answer.requestId), ['outer-0', 'outer-1', 'outer-2', 'outer-3', requestId]);
+    assert.ok(answers.every(answer => answer.response.canHandle === false));
+    assert.deepEqual(changes, [{ type: 'snapshot', revision: 1 }]);
+    assert.equal(client.pending.size, 0); assert.equal(client.subscriptions.size, 1);
+  } finally { await client.close(); await f.close(); }
+});
+
+test('malformed discovery envelopes receive no response and cannot disturb pending requests', async () => {
+  const answers = [];
+  const f = await fixture((socket, msg) => {
+    if (msg.type === 'client-discovery-response') answers.push(msg);
+    else socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: msg.method === 'initialize' ? { clientId: 'follower' } : {} }));
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
+  try {
+    await client.connect();
+    const valid = discoveryRequest('valid');
+    const invalid = [
+      ...[undefined, null, 1, {}, [], '', ' ', 'bad\nidentifier', 'x'.repeat(129)].map(requestId => ({ ...valid, requestId })),
+      ...[undefined, null, 'request', [], 1].map(request => ({ ...valid, request })),
+      ...[
+        { type: 'response' }, { requestId: '' }, { method: '' }, { method: { toString: 'unsafe' } },
+        { version: -1 }, { version: 0.5 }, { version: '1' }, { version: false },
+      ].map(change => ({ ...valid, request: { ...valid.request, ...change } })),
+    ];
+    client.receive(Buffer.concat(invalid.map(frame)));
+    assert.equal((await client.discover('still-working')).ownerId, 'owner');
+    assert.deepEqual(answers, []);
+    assert.equal(client.state, 'ready'); assert.equal(client.pending.size, 0);
+  } finally { await client.close(); await f.close(); }
+});
+
+test('discovery without a handler declines optional version and opaque params as the native protocol does', async () => {
+  const answers = [];
+  const f = await fixture((socket, msg) => {
+    if (msg.type === 'client-discovery-response') answers.push(msg);
+    else socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: msg.method === 'initialize' ? { clientId: 'follower' } : {} }));
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
+  try {
+    await client.connect();
+    const requests = [undefined, null, 0, 1].flatMap(version => [undefined, null, [], 'opaque', 1].map(params => {
+      const request = discoveryRequest(`optional-${String(version)}-${String(params)}`, 'unknown-method');
+      request.request.version = version; request.request.params = params;
+      return request;
+    }));
+    client.receive(Buffer.concat(requests.map(frame)));
+    await client.discover('flush');
+    assert.deepEqual(answers.map(answer => answer.requestId), requests.map(request => request.requestId));
+    assert.ok(answers.every(answer => answer.response.canHandle === false));
+    assert.equal(client.pending.size, 0); assert.equal(client.subscriptions.size, 0);
+  } finally { await client.close(); await f.close(); }
+});
+
+test('discovery around a batched initialization response is declined without changing connect state, and ignored after close', async () => {
+  const answers = []; let peer;
+  const f = await fixture((socket, msg) => {
+    peer = socket;
+    if (msg.type === 'client-discovery-response') answers.push(msg);
+    else if (msg.method === 'initialize') socket.write(Buffer.concat([
+      frame(discoveryRequest('before-ready')),
+      frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'follower' } }),
+      frame(discoveryRequest('after-registration')),
+    ]));
+    else socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: {} }));
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
+  const receiveStates = [];
+  const receive = client.receive.bind(client);
+  client.receive = chunk => { receiveStates.push(client.state); receive(chunk); receiveStates.push(client.state); };
+  try {
+    await client.connect();
+    assert.deepEqual(receiveStates, ['connecting', 'connecting']);
+    assert.equal(client.state, 'ready');
+    await client.discover('flush');
+    assert.deepEqual(answers.map(answer => answer.requestId), ['before-ready', 'after-registration']);
+    assert.ok(answers.every(answer => answer.response.canHandle === false));
+    const closing = client.close();
+    assert.doesNotThrow(() => client.receive(frame(discoveryRequest('while-closing'))));
+    await closing;
+    assert.doesNotThrow(() => client.receive(frame(discoveryRequest('after-closed'))));
+    assert.equal(answers.length, 2); assert.equal(client.state, 'closed');
+  } finally { peer?.destroy(); await client.close(); await f.close(); }
+});
+
 test('owner status requests reannounce only existing subscriptions for that exact owner and host', async () => {
   const follows = [];
   let peer;

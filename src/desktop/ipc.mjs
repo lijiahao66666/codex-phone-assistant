@@ -244,6 +244,17 @@ export class DesktopIpc extends EventEmitter {
           error.code = code;
           pending.reject(error);
         }
+      } else if (message.type === 'client-discovery-request') {
+        // This transport only follows owners. Silence would keep the router's
+        // no-owner discovery waiting for its timeout; never claim ownership.
+        const request = message.request;
+        const identifier = value => typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\x00-\x20\x7f]/.test(value);
+        if (!['connecting', 'ready'].includes(this.state) || !identifier(message.requestId) || !request || typeof request !== 'object' || Array.isArray(request) ||
+            request.type !== 'request' || !identifier(request.requestId) || !identifier(request.method) ||
+            !Number.isSafeInteger(request.version ?? 0) || (request.version ?? 0) < 0) continue;
+        if (!this.#socket || this.#socket.destroyed || !this.#socket.writable) continue;
+        try { this.#send({ type: 'client-discovery-response', requestId: message.requestId, response: { canHandle: false } }); }
+        catch (error) { this.failure = error; this.#socket.destroy(); return; }
       } else if (message.type === 'broadcast' && message.method === 'client-status-changed' && message.params?.status === 'disconnected' && typeof message.params.clientId === 'string' && message.sourceClientId === message.params.clientId) {
         this.emit('ownerDisconnected', message.params.clientId);
       } else if (message.type === 'broadcast' && message.method === 'thread-stream-following-status-requested') {

@@ -1,5 +1,15 @@
 # stable27 至 stable30 验收记录
 
+本机更新（2026-11-09，stable33）：只读 IPC follower 现在明确回复 discovery `canHandle:false`，不改变 owner、fresh snapshot 或恢复锁。独立真实 socket A/B 中，不回复的定向发现约 10001.62 ms 才失败，回复 false 约 0.81 ms 失败；原生路由还有其他连接，本结果不等于全局连接速度改善。相关 IPC、pool、owner-router、恢复连接共 53/53 测试通过。签名校验通过的新包已安装，源码与安装文件 SHA-256 均为 `18f71cb7e18a38aa45427357ec4a88793897f3c53eafd089b71c050469ff264d`，旧包保留在 `/Applications/codex手机助手-stable31-backup-20261109.app`。公网 H5 仍为 stable32。重启后 C 切换到输入可用约 389 ms，仅为本次热切换；H5 发出的 `H5_DISCOVERY_FIX_20261109_C` 消息与回复已出现在原生回合 `01a1bc0a-01fa-7923-918f-f6f6966260bd`。该原生回合又出现两条同内容最终回复，仍须独立排查，不能判定为此修复所致。
+
+补充实测（2026-11-09）：专用 D 在真实桌面输入框中提交任务并用 Cmd+Enter 入队，原生 UI 明确出现 `Preview queued message 1` 和队列操作；前一回合完成后，跟进作为新回合自动执行一次，最终队列清空、输入框为空、聊天 idle。两组跟进消息及回复各出现一次，H5 收到第二组跟进和回复。证据 `/private/tmp/codex-native-queue-ui-20261109-receipt.json`、`/private/tmp/codex-native-queue-final-thread-20261109.json`。为补采队列卡片做了两组实测；不能将此项扩展为真实审批或问答通过。
+
+补充实测（2026-11-08）：专用 D 在 H5 连续提交两条不同消息，第二条曾显示“待送达”，随后两条按顺序各一次出现在 H5 和原生聊天的同一回合，原生回合完成并回复第二条；这验证 H5 待送达及运行中追加，不代表原生 follow-up 队列已验收。原生记录线程 `01a1ba11-4241-7c41-96f6-657e277f16cc`，回合 `01a1bbce-1847-7a92-ac5e-4ff812c3efd3`。
+
+专用 C 通过 H5 发起真实 `apply_patch` 创建单行验收文件，H5 逐层展开“已编辑文件”和“查看差异”后显示 `H5_DIFF_OK_20261108_C`，与实际文件内容一致；验收后已删除该临时文件。原生回合 `01a1bbb1-483a-7110-b407-b6936e12469a` 显示文件变更成功，并包含两条相同最终回复；H5 同时显示 `Reconnecting... 1/5` 和 `2/5`。重复回复也存在于原生记录，不能归因于 H5；本次出现过重连，尚不能将此回合记为无异常。问答未重新测试。
+
+连接优化候选暂未发布：真实只读探测表明定向 `thread-owner-discovery` 可在专用 C 上快速取得正确 owner 的响应，错误 owner、聊天和 host 均被拒绝；但原生代码中 renderer 删除 owner role 与主进程异步清除 ownership 记录之间存在窗口，清除失败也只记日志。此时定向 discovery 仍可能成功，而原有 fresh snapshot 因角色不再是 owner 而无法产生；这是代码可达的反例，尚未确认现网发生。故不能将 discovery 直接替代 fresh snapshot 作为恢复路由判活，保留原实现，继续寻找既能验证基线又能避免大快照的方案。
+
 当前更新（stable32）：公网根 HTML/JS 已发布并核验 HTTP 200、no-store。根 HTML SHA-256 `ec059f857fa75d7ede01e6bfaedeab4bdb5a82e49ee94522014de56af654af1f`，JS SHA-256 `2bf30ecc384ea226301952aae39bdf9be92d6791ae5621692bc524f7270f13b2`，回执 `/private/tmp/codex-stable32-public-check.json`。本机仍为 stable31 运行包，此次仅前端修复，未重启助手。
 
 youzan-toolkit 的旧本地 unknown 请求在服务端不存在：前端先以同请求号原子取消，查询明确 cancelled/unlocked 后才清本地并走新 route；迟到旧请求被 tombstone 拒绝。取消后的短暂确认或 readiness 网络失败可继续只读确认，不重复取消或发消息。74 项相关定向回归通过（含重叠，不加总为独立测试数），日志 `/private/tmp/codex-stable32-missing-confirmation-tests.log`。实机已恢复 connected=true、输入可用、GPT-5.6-Sol/xhigh、恢复 clear，证据 `/private/tmp/codex-stable32-toolkit-live.json`。
