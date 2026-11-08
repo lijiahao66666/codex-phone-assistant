@@ -91,27 +91,30 @@ export class DesktopIpc extends EventEmitter {
     return response?.result ?? null;
   }
 
-  async #control(method, conversationId, params, version = 1, expectedOwnerId, beforeWrite) {
+  async #control(method, conversationId, params, version = 1, expectedOwnerId, beforeWrite, signal) {
     if (typeof conversationId !== 'string' || !conversationId.trim()) throw new TypeError('conversationId required');
     if (typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw new TypeError('expectedOwnerId required');
+    if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
     const { ownerId } = await this.discover(conversationId, 'local');
     if (ownerId !== expectedOwnerId) throw Object.assign(new Error('Thread owner changed'), { code: 'unavailable' });
+    if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
     if (this.state !== 'ready') throw new Error('IPC not ready');
     if (beforeWrite && !(await beforeWrite())) throw Object.assign(new Error('Thread state changed'), { code: 'unavailable' });
+    if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
     if (this.state !== 'ready') throw new Error('IPC not ready');
     const response = await this.#request(method, { conversationId, ...params }, { version, targetClientId: ownerId });
     if (response.handledByClientId && response.handledByClientId !== ownerId) throw new Error('Unexpected thread owner');
     return response.result;
   }
 
-  async startTurn(conversationId, turnStart, { expectedOwnerId, beforeWrite } = {}) {
+  async startTurn(conversationId, turnStart, { expectedOwnerId, beforeWrite, signal } = {}) {
     if (!turnStart || typeof turnStart !== 'object' || Array.isArray(turnStart) ||
         !turnStart.request || typeof turnStart.request !== 'object' || Array.isArray(turnStart.request) ||
         !turnStart.context || typeof turnStart.context !== 'object' || Array.isArray(turnStart.context)) throw new TypeError('turnStart request and context required');
-    return this.#control('thread-follower-start-turn', conversationId, { turnStart: { request: turnStart.request, context: turnStart.context } }, 2, expectedOwnerId, beforeWrite);
+    return this.#control('thread-follower-start-turn', conversationId, { turnStart: { request: turnStart.request, context: turnStart.context } }, 2, expectedOwnerId, beforeWrite, signal);
   }
 
-  async steerTurn(conversationId, input, { cwd, clientUserMessageId = randomUUID(), expectedOwnerId, beforeWrite } = {}) {
+  async steerTurn(conversationId, input, { cwd, clientUserMessageId = randomUUID(), expectedOwnerId, beforeWrite, signal } = {}) {
     if (!Array.isArray(input) || input.length === 0 || input.some(item => item?.type === 'text' ? typeof item.text !== 'string' : item?.type !== 'localImage' || !absolutePath(item.path))) throw new TypeError('input must contain text or local images');
     if (!absolutePath(cwd)) throw new TypeError('absolute cwd required');
     if (typeof clientUserMessageId !== 'string' || !clientUserMessageId) throw new TypeError('invalid clientUserMessageId');
@@ -119,37 +122,37 @@ export class DesktopIpc extends EventEmitter {
     const imageAttachments = input.flatMap((item, index) => item.type === 'localImage' ? [{ id: `${clientUserMessageId}:${index}`, src: item.path, localPath: item.path }] : []);
     const restoreMessage = { id: clientUserMessageId, text, cwd, createdAt: Date.now(),
       context: { prompt: text, addedFiles: [], fileAttachments: [], ideContext: null, imageAttachments, workspaceRoots: [cwd] } };
-    return this.#control('thread-follower-steer-turn', conversationId, { input, restoreMessage, clientUserMessageId }, 1, expectedOwnerId, beforeWrite);
+    return this.#control('thread-follower-steer-turn', conversationId, { input, restoreMessage, clientUserMessageId }, 1, expectedOwnerId, beforeWrite, signal);
   }
 
-  async interruptTurn(conversationId, expectedTurnId, { expectedOwnerId } = {}) {
+  async interruptTurn(conversationId, expectedTurnId, { expectedOwnerId, signal } = {}) {
     if (typeof expectedTurnId !== 'string' || !expectedTurnId) throw new TypeError('expectedTurnId required');
-    return this.#control('thread-follower-interrupt-turn', conversationId, { mode: 'user-stop', expectedTurnId }, 4, expectedOwnerId);
+    return this.#control('thread-follower-interrupt-turn', conversationId, { mode: 'user-stop', expectedTurnId }, 4, expectedOwnerId, undefined, signal);
   }
 
-  async setCollaborationMode(conversationId, mode, settings, { expectedOwnerId, beforeWrite } = {}) {
+  async setCollaborationMode(conversationId, mode, settings, { expectedOwnerId, beforeWrite, signal } = {}) {
     if (!['plan', 'default'].includes(mode) || typeof settings?.model !== 'string' || !settings.model || (settings.reasoning_effort !== null && typeof settings.reasoning_effort !== 'string') || (settings.developer_instructions !== null && typeof settings.developer_instructions !== 'string')) throw new TypeError('Invalid collaboration mode settings');
-    return this.#control('thread-follower-update-thread-settings', conversationId, { threadSettings: { collaborationMode: { mode, settings: { model: settings.model, reasoning_effort: settings.reasoning_effort, developer_instructions: settings.developer_instructions } } } }, 2, expectedOwnerId, beforeWrite);
+    return this.#control('thread-follower-update-thread-settings', conversationId, { threadSettings: { collaborationMode: { mode, settings: { model: settings.model, reasoning_effort: settings.reasoning_effort, developer_instructions: settings.developer_instructions } } } }, 2, expectedOwnerId, beforeWrite, signal);
   }
 
-  async replyCommandApproval(conversationId, requestId, decision, { expectedOwnerId } = {}) {
-    return this.#approval('thread-follower-command-approval-decision', conversationId, requestId, decision, expectedOwnerId);
+  async replyCommandApproval(conversationId, requestId, decision, { expectedOwnerId, signal } = {}) {
+    return this.#approval('thread-follower-command-approval-decision', conversationId, requestId, decision, expectedOwnerId, signal);
   }
 
-  async replyFileApproval(conversationId, requestId, decision, { expectedOwnerId } = {}) {
-    return this.#approval('thread-follower-file-approval-decision', conversationId, requestId, decision, expectedOwnerId);
+  async replyFileApproval(conversationId, requestId, decision, { expectedOwnerId, signal } = {}) {
+    return this.#approval('thread-follower-file-approval-decision', conversationId, requestId, decision, expectedOwnerId, signal);
   }
 
-  async #approval(method, conversationId, requestId, decision, expectedOwnerId) {
+  async #approval(method, conversationId, requestId, decision, expectedOwnerId, signal) {
     if (!['string', 'number'].includes(typeof requestId) || requestId === '') throw new TypeError('requestId required');
     if (!['accept', 'acceptForSession', 'decline', 'cancel'].includes(decision)) throw new TypeError('unsupported approval decision');
-    return this.#control(method, conversationId, { requestId, decision }, 1, expectedOwnerId);
+    return this.#control(method, conversationId, { requestId, decision }, 1, expectedOwnerId, undefined, signal);
   }
 
-  async replyUserInput(conversationId, requestId, response, { expectedOwnerId } = {}) {
+  async replyUserInput(conversationId, requestId, response, { expectedOwnerId, signal } = {}) {
     if (!['string', 'number'].includes(typeof requestId) || requestId === '') throw new TypeError('requestId required');
     if (!response || typeof response !== 'object' || Array.isArray(response)) throw new TypeError('response required');
-    return this.#control('thread-follower-submit-user-input', conversationId, { requestId, response }, 1, expectedOwnerId);
+    return this.#control('thread-follower-submit-user-input', conversationId, { requestId, response }, 1, expectedOwnerId, undefined, signal);
   }
 
   async subscribe(conversationId, listener, hostId = 'local', { beforeFollow } = {}) {
@@ -174,6 +177,13 @@ export class DesktopIpc extends EventEmitter {
   #follow(subscription, following) {
     this.#send({ type: 'broadcast', method: 'thread-stream-following-changed', sourceClientId: this.clientId,
       version: 1, targetClientIds: [subscription.ownerId], params: { conversationId: subscription.conversationId, hostId: subscription.hostId, following } });
+  }
+
+  refreshSubscription(conversationId, hostId = 'local') {
+    const subscription = this.subscriptions.get(JSON.stringify([hostId, conversationId]));
+    if (this.state !== 'ready' || !subscription?.ownerId) throw new Error('Subscription unavailable');
+    // A newly joined consumer needs a baseline before it can apply patches.
+    this.#follow(subscription, true);
   }
 
   unsubscribe(conversationId, hostId = 'local') {

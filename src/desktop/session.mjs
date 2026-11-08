@@ -1,5 +1,4 @@
 import { EventEmitter } from 'node:events';
-import { DesktopIpc } from './ipc.mjs';
 import { ConversationState } from './conversation-state.mjs';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
@@ -8,10 +7,11 @@ import { matchUserInput } from './user-input-guard.mjs';
 import { desktopView } from './view.mjs';
 import { formatQuestionReply } from './async-question-guard.mjs';
 import { trace } from './diagnostics.mjs';
+import { desktopIpcPool } from './ipc-pool.mjs';
 
 // A session never serves cached conversation data while disconnected or resyncing.
 export class DesktopSession extends EventEmitter {
-  constructor({ conversationId, hostId = 'local', createClient = () => new DesktopIpc(),
+  constructor({ conversationId, hostId = 'local', createClient = () => desktopIpcPool.acquire(),
     retryBaseMs = 250, retryMaxMs = 5000, snapshotTimeoutMs = 15000 } = {}) {
     super();
     if (!conversationId || !hostId) throw new Error('conversationId and hostId required');
@@ -198,7 +198,8 @@ export class DesktopSession extends EventEmitter {
         this.emit('state', result);
       }, this.hostId);
       if (generation !== this.generation) await client.close();
-    } catch {
+    } catch (error) {
+      trace('session', 'connect-failed', { thread: this.conversationId, code: error?.code || null, message: String(error?.message || error).slice(0, 160) });
       if (generation === this.generation) this.#retry('connection-failed');
     }
   }

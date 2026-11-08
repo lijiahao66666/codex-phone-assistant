@@ -7,11 +7,12 @@ import { OwnerRouter } from './owner-router.mjs';
 import { CreationJournal } from './creation-journal.mjs';
 import { ModelJournal } from './model-journal.mjs';
 import { DesktopIpc } from './ipc.mjs';
+import { desktopIpcPool } from './ipc-pool.mjs';
 import { DesktopSession } from './session.mjs';
 
-export async function confirmRecoverySnapshot(threadId, ownerId, { socketPath, timeoutMs = 15000, createSession } = {}) {
+export async function confirmRecoverySnapshot(threadId, ownerId, { socketPath, timeoutMs = 15000, createSession, createClient } = {}) {
   const session = createSession ? createSession(threadId) : new DesktopSession({ conversationId: threadId,
-    createClient: () => new DesktopIpc(socketPath ? { socketPath } : {}) });
+    createClient: createClient || (() => socketPath ? new DesktopIpc({ socketPath }) : desktopIpcPool.acquire()) });
   try {
     return await new Promise(resolve => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
@@ -55,6 +56,8 @@ async function releaseStaleAppServer(pidFile) {
 export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '.codex'), dataDir = join(homedir(), '.config/codex-hub'), ownerOptions = {}, projects = () => localProjects(codexHome) }) {
   const bundled = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
   const socketPath = ownerOptions.socketPath ?? join(codexHome, 'ipc/ipc.sock');
+  const sharedClient = () => socketPath === join(homedir(), '.codex', 'ipc/ipc.sock')
+    ? desktopIpcPool.acquire() : new DesktopIpc({ socketPath, timeout: 1500 });
   const pidFile = join(dataDir, 'app-server.pid');
   await releaseStaleAppServer(pidFile);
   const owner = await new LocalOwner({ binary: process.env.CODEX_BIN || (existsSync(bundled) ? bundled : 'codex'), cwd: homedir(), ...ownerOptions, socketPath }).start();
@@ -70,19 +73,19 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
     journal = new CreationJournal(join(dataDir, 'creations.sqlite'));
     modelJournal = new ModelJournal(join(dataDir, 'creations.sqlite'));
     const discover = async threadId => {
-      const ipc = new DesktopIpc({ socketPath, timeout: 1500 });
+      const ipc = sharedClient();
       try { await ipc.connect(); const { ownerId } = await ipc.discover(threadId); return { kind: 'owner', ownerId }; }
       catch { return { kind: 'unknown' }; }
       finally { ipc.close(); }
     };
     const verifyOwner = async (threadId, ownerId) => {
-      const ipc = new DesktopIpc({ socketPath, timeout: 1500 });
+      const ipc = sharedClient();
       try { await ipc.connect(); return Boolean(await ipc.probeOwner(threadId, ownerId, { timeout: 2500 })); }
       catch { return false; }
       finally { ipc.close(); }
     };
     const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, projects, journal, hostId, competeUnknown: true,
-      confirmRecovery: (threadId, ownerId) => confirmRecoverySnapshot(threadId, ownerId, { socketPath }) });
+      confirmRecovery: (threadId, ownerId) => confirmRecoverySnapshot(threadId, ownerId, { createClient: sharedClient }) });
     return { router, owner, modelJournal, async close() {
       router.beginShutdown();
       try { await owner.close(); } catch (error) { router.cancelShutdown(); throw error; }
