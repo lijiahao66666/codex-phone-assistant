@@ -10,6 +10,7 @@ async function fixture(handler, { stubLoadThreads = true } = {}) {
   class Element {
     constructor(){this.children=[];this.listeners={};this.dataset={};this.value='';this.style={};this.classList={toggle(){},contains(){return false;}};this.scrollHeight=300;this.clientHeight=500;this.scrollTop=0;}
     addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}querySelectorAll(){return [];}after(){}before(){}
+    cloneNode(){const copy=new Element();copy.value=this.value;copy.textContent=this.textContent;return copy;}
   }
   const nodes=new Map(),requests=[],reserves=[],removes=[];
   const document={querySelector(key){if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
@@ -27,6 +28,7 @@ async function fixture(handler, { stubLoadThreads = true } = {}) {
 test('history is editable without takeover and only the explicit send recovers before dispatch',async()=>{
   const f=await fixture((url)=>url.endsWith('/recover')?response({status:'accepted'},202):url.endsWith('/messages')?response({status:'accepted'},202):undefined);
   assert.equal(f.nodes.get('#message').disabled,false);assert.equal(f.nodes.get('#recover-chat').hidden,true);
+  assert.equal(f.nodes.get('#message').placeholder,'输入消息');
   f.run("messageInput.value='continue history';updateComposer()");await tick();
   assert.equal(f.requests.some(r=>r.url.endsWith('/recover')),false);assert.equal(f.reserves.length,0);
   await f.submit();await tick();
@@ -40,8 +42,19 @@ test('uncertain recovery keeps the queued message unsent and cannot silently ret
   const f=await fixture(url=>url.endsWith('/recover')?response({error:'outcome-unknown'},504):undefined);
   f.run("messageInput.value='continue'");await f.submit();await tick();
   assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unknown');assert.equal(f.nodes.get('#recover-chat').hidden,true);
+  assert.equal(f.nodes.get('#message').disabled,true);assert.equal(f.nodes.get('#message').placeholder,'等待连接');
   f.run('updateComposer()');await f.run('runOutgoingQueue(selectedId)');await tick();
   assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,1);assert.equal(f.requests.some(r=>r.url.endsWith('/messages')),false);assert.equal(f.nodes.get('#message').disabled,true);
+});
+
+test('rejected recovery unlocks the history draft without waiting for another stream event',async()=>{
+  let release;
+  const f=await fixture(url=>url.endsWith('/recover')?new Promise(resolve=>{release=()=>resolve(response({error:'unavailable'},409));}):undefined);
+  const work=f.run('recoverSelectedChat()');await tick();
+  assert.equal(f.nodes.get('#message').disabled,true);assert.equal(f.nodes.get('#message').placeholder,'等待连接');
+  release();await work;
+  assert.equal(f.nodes.get('#message').disabled,false);assert.equal(f.nodes.get('#message').placeholder,'输入消息');
+  assert.equal(f.requests.some(r=>r.url.endsWith('/messages')),false);
 });
 
 test('new chat model and effort use the same composer controls and preserve prepared locks',async()=>{
@@ -128,6 +141,23 @@ test('thread list sends visible ids as a POST body so the relay can resolve runn
   assert.ok(call);assert.equal(call.options.method,'POST');
   assert.equal(call.options.headers['content-type'],'application/json');
   assert.deepEqual(JSON.parse(call.options.body).visibleThreads,[id]);
+});
+
+test('list refresh retains the selected task project and only fills a placeholder title',async()=>{
+  const data={projects:[{id:'phone',name:'手机助手',threads:[]},{id:'code',name:'代码项目',threads:[{id,title:'侧栏任务标题'}]}],recent:[]};
+  const f=await fixture(async()=>response(data),{stubLoadThreads:false});
+  f.run("selectedTitle='新聊天';currentProject.value='phone'");
+  await f.run('loadThreads()');
+  assert.equal(f.nodes.get('#current-project').value,'code');assert.equal(f.nodes.get('#current-project').hidden,false);
+  assert.equal(f.run('selectedTitle'),'侧栏任务标题');assert.equal(f.nodes.get('#title').textContent,'侧栏任务标题');
+  f.run("selectedTitle='实时任务新标题';title.textContent=selectedTitle;currentProject.value='phone'");
+  await f.run('loadThreads()');
+  assert.equal(f.nodes.get('#current-project').value,'code');assert.equal(f.nodes.get('#title').textContent,'实时任务新标题');
+  data.projects[1].threads=[];data.recent=[{id,title:'侧栏任务标题'}];
+  await f.run('loadThreads()');
+  assert.equal(f.nodes.get('#current-project').hidden,true);assert.equal(f.nodes.get('#current-project').value,'');
+  f.run("selectedId=null;newDraft={projectId:'phone',pending:false,uncertain:false,attachments:[]};updateNewProjectOptions()");
+  assert.equal(f.nodes.get('#current-project').hidden,false);assert.equal(f.nodes.get('#current-project').value,'phone');
 });
 
 test('a dispatched placeholder is dropped once the same text arrives as a real turn',async()=>{

@@ -652,7 +652,7 @@ async function runHistoryRecovery(id, deviceId) {
 }
 async function checkRecoveryAttempt(id, deviceId, state) {
   if (state.checking || state.cancelling || !state.requestId) return;
-  state.checking = true; updateRecoveryControl();
+  state.checking = true; updateComposer();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recovery-attempt/${encodeURIComponent(state.requestId)}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
@@ -673,7 +673,7 @@ async function checkRecoveryAttempt(id, deviceId, state) {
     if (recoveries.get(recoveryKey(deviceId, id)) === state && state.status === 'unknown') state.message = '无法确认恢复结果，请稍后重新检查';
   } finally {
     clearTimeout(timer); state.checking = false;
-    if (selectedId === id && currentDeviceId === deviceId) updateRecoveryControl();
+    if (selectedId === id && currentDeviceId === deviceId) updateComposer();
   }
 }
 cancelRecovery.addEventListener('click', async () => {
@@ -681,7 +681,7 @@ cancelRecovery.addEventListener('click', async () => {
   if (!id || !deviceId || newDraft) return;
   const key = recoveryKey(deviceId, id), state = recoveryState(deviceId, id);
   if (state?.status !== 'unknown' || !state.requestId || state.checking || state.cancelling) return;
-  state.cancelling = true; updateRecoveryControl();
+  state.cancelling = true; updateComposer();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recovery-cancel`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
@@ -697,7 +697,7 @@ cancelRecovery.addEventListener('click', async () => {
     if (recoveries.get(key) === state && state.status === 'unknown') state.message = '无法确认取消，请重新检查';
   } finally {
     clearTimeout(timer); state.cancelling = false;
-    if (selectedId === id && currentDeviceId === deviceId) updateRecoveryControl();
+    if (selectedId === id && currentDeviceId === deviceId) updateComposer();
   }
 });
 async function checkRecoveryStatus(id, deviceId, stream) {
@@ -787,7 +787,12 @@ function updateNewProjectOptions() {
   currentProject.replaceChildren(...options.map(option => option.cloneNode(true)));
   currentProject.hidden = !availableProjects.length || (!selectedId && !newDraft);
   currentProject.disabled = !newDraft || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
-  if (!newDraft) { syncAllPickers(); return; }
+  if (!newDraft) {
+    const projectId = threadProjectNames.get(selectedId);
+    currentProject.hidden = !availableProjects.some(project => project.id === projectId);
+    currentProject.value = currentProject.hidden ? '' : projectId;
+    syncAllPickers(); return;
+  }
   if (!newDraft.pending && !newDraft.prepared && !newDraft.uncertain && !availableProjects.some(project => project.id === newDraft.projectId)) newDraft.projectId = availableProjects[0]?.id || '';
   newProject.value = newDraft.projectId;
   newProject.disabled = newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared);
@@ -1370,7 +1375,7 @@ function updateComposer() {
   if (voiceSession && (messageInput.disabled || voiceSession.threadId !== selectedId || voiceSession.draft !== newDraft)) { stopVoice(); voiceStatus.textContent = ''; }
   voiceButton.disabled = messageInput.disabled || !SpeechRecognition;
   if (!SpeechRecognition) voiceButton.title = '当前浏览器不支持语音输入';
-  messageInput.placeholder = newDraft ? (connected ? '输入消息' : '等待连接') : selectedId ? (connected ? (liveMode === 'plan' ? '输入任务生成计划' : '输入消息') : '等待连接') : '选择任务后输入消息';
+  messageInput.placeholder = newDraft ? (connected ? '输入消息' : '等待连接') : selectedId ? (connected || canDraftInHistory() ? (liveMode === 'plan' ? '输入任务生成计划' : '输入消息') : '等待连接') : '选择任务后输入消息';
   sendButton.disabled = (newDraft?.prepared ? !connected || newDraft.pending || newDraft.uncertain : messageInput.disabled) || Boolean(state?.pending || state?.uncertain) || Boolean(selectedId && (modelChanges.has(selectedId) || modeChanges.has(selectedId))) || Boolean(selectedId && imageDrafts.has(selectedId) && !imageUploadAvailable) || (!messageInput.value.trim() && !(newDraft?.attachments.length || (imageUploadAvailable && selectedId && imageDrafts.has(selectedId))));
   sendStatus.textContent = newDraft?.message || state?.message || '';
   unlockSend.hidden = !(newDraft?.uncertain || state?.uncertain);
@@ -1405,7 +1410,7 @@ async function recoverSelectedChat() {
   if (check?.status !== 'ready' || connected || recoverableHistoryId !== id) return;
   if (previous && !['unavailable', 'clear'].includes(previous.status)) return;
   const state = { status: 'pending', message: '正在连接任务', requestId: crypto.randomUUID(), since: Date.now() };
-  recoveries.set(key, state); updateRecoveryControl();
+  recoveries.set(key, state); updateComposer();
   let reserved = false;
   try {
     const store = await recoveryStorePromise;
@@ -1444,7 +1449,7 @@ async function recoverSelectedChat() {
   } finally {
     clearTimeout(timer);
     if (activeRecoveryAborts.get(key) === controller) activeRecoveryAborts.delete(key);
-    if (selectedId === id && currentDeviceId === deviceId) updateRecoveryControl();
+    if (selectedId === id && currentDeviceId === deviceId) updateComposer();
   }
 }
 recoverChat.addEventListener('click', recoverSelectedChat);
@@ -2417,6 +2422,10 @@ async function loadThreads() {
     threadProjectNames.clear();
     for (const project of data.projects) for (const task of Array.isArray(project?.threads) ? project.threads : []) if (uuid.test(task?.id)) threadProjectNames.set(task.id, project.id);
     for (const task of data.recent) if (uuid.test(task?.id) && typeof task.projectId === 'string') threadProjectNames.set(task.id, task.projectId);
+    if (selectedId && !newDraft && (!selectedTitle || selectedTitle === '新聊天')) {
+      const selected = [...data.recent, ...data.projects.flatMap(project => Array.isArray(project?.threads) ? project.threads : [])].find(task => task?.id === selectedId);
+      if (typeof selected?.title === 'string' && selected.title.trim()) { selectedTitle = selected.title; title.textContent = selectedTitle; }
+    }
     updateNewProjectOptions();
     const fragment = document.createDocumentFragment();
     for (const project of data.projects) {
