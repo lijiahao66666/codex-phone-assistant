@@ -2,6 +2,7 @@ import { WebSocket } from 'ws';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DesktopSession } from '../desktop/session.mjs';
 import { trace } from '../desktop/diagnostics.mjs';
+import { createStreamDiagnostics } from '../common/stream-diagnostics.mjs';
 import { desktopView } from '../desktop/view.mjs';
 import { listDesktopThreads, ThreadListChanges } from '../desktop/thread-list.mjs';
 import { readRolloutHistory } from '../desktop/rollout-history.mjs';
@@ -150,14 +151,15 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
   const threadListChanges = allowInsecureForTests ? (threadListChangesForTests || null) : new ThreadListChanges();
   const statusPriorities = new StatusPriorities();
   function clearImageTimer(id) { clearTimeout(imageTimers.get(id)); imageTimers.delete(id); }
-  function closeStreams() { for (const id of imageTimers.keys()) clearImageTimer(id); for (const session of streams.values()) { session.chunkStop?.(); void session.close().catch(() => {}); } streams.clear(); }
+  function closeSession(session) { session.connectionDiagnostic?.mark('closed'); return session.close(); }
+  function closeStreams() { for (const id of imageTimers.keys()) clearImageTimer(id); for (const session of streams.values()) { session.chunkStop?.(); void closeSession(session).catch(() => {}); } streams.clear(); }
   function send(msg, connection, { critical = false, request, deviceId, cancellable = false } = {}) {
     if (connection !== ws || request?.cancelled) return;
     let encoded = JSON.stringify(msg);
     if ((msg.type === 'event' || msg.type === 'flow-reset') && Buffer.byteLength(encoded) > 8 * 1024 * 1024) {
       const session = streams.get(msg.id);
       if (!session) return;
-      streams.delete(msg.id); clearImageTimer(msg.id); void session.close().catch(() => {});
+      streams.delete(msg.id); clearImageTimer(msg.id); void closeSession(session).catch(() => {});
       encoded = JSON.stringify({ type: 'stream-error', id: msg.id, code: 'state-too-large' });
     }
     const readResponse = msg.type === 'response' && !('status' in msg) && !critical;
@@ -178,7 +180,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     const connectionScheduler = createWebSocketSendScheduler({ socket: connection, maxMessageBytes: 15 * 1024 * 1024, maxStreamMessageBytes: 8 * 1024 * 1024, maxControlBytes: 16 * 1024 * 1024, reservedControlBytes: 65536, reservedControls: 8, ...(schedulerLimitForTests ? { maxStreams: schedulerLimitForTests } : {}), onError: ({ code, key, error }) => {
       if ((code === 'message-too-large' || code === 'factory-failed') && key && streams.has(key)) {
         console.warn('stream-observation', JSON.stringify({ stage: 'projection', code, cause: error?.name || null }));
-        const session = streams.get(key); streams.delete(key); clearImageTimer(key); void session.close().catch(() => {});
+        const session = streams.get(key); streams.delete(key); clearImageTimer(key); void closeSession(session).catch(() => {});
         send({ type: 'stream-error', id: key, code: code === 'message-too-large' ? 'state-too-large' : 'state-invalid' }, connection, { deviceId: session.uploadDeviceId, cancellable: true });
       } else connection.terminate();
     } });
@@ -279,7 +281,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         if (deviceTransitions.get(msg.deviceId) === transition) deviceTransitions.delete(msg.deviceId);
         return;
       }
-      if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { deviceEpochs.set(msg.deviceId, (deviceEpochs.get(msg.deviceId) || 0) + 1); revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void session.close().catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); const cleanup = Promise.resolve(deviceCleanups.get(msg.deviceId)).then(() => cleanupDevice(msg.deviceId)).catch(() => {}); deviceCleanups.set(msg.deviceId, cleanup); await cleanup; if (deviceCleanups.get(msg.deviceId) === cleanup) deviceCleanups.delete(msg.deviceId); return; }
+      if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { deviceEpochs.set(msg.deviceId, (deviceEpochs.get(msg.deviceId) || 0) + 1); revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void closeSession(session).catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); const cleanup = Promise.resolve(deviceCleanups.get(msg.deviceId)).then(() => cleanupDevice(msg.deviceId)).catch(() => {}); deviceCleanups.set(msg.deviceId, cleanup); await cleanup; if (deviceCleanups.get(msg.deviceId) === cleanup) deviceCleanups.delete(msg.deviceId); return; }
       const deviceEpoch = deviceEpochs.get(msg.deviceId);
       if (typeof msg.deviceId === 'string') await deviceTransitions.get(msg.deviceId);
       if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) return;
@@ -543,7 +545,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (msg.type === 'state-chunk-ack') { streams.get(msg.id)?.chunkAck?.(msg); return; }
       if (msg.type === 'history-chunk-ack') { readRequests.get(msg.id)?.chunkAck?.(msg); return; }
       if (msg.type === 'chunk-reset-ready') { streams.get(msg.id)?.chunkResetReady?.(msg); return; }
-      if (msg.type === 'cancel') { removeSidebarStream(msg.id); const request = readRequests.get(msg.id); if (request) { request.cancelled = true; request.chunkStop?.(); readRequests.delete(msg.id); } connectionScheduler.cancelRequest(msg.id); connectionScheduler.cancelStream(msg.id); clearImageTimer(msg.id); const session = streams.get(msg.id); session?.chunkStop?.(); streams.delete(msg.id); if (session) await session.close(); return; }
+      if (msg.type === 'cancel') { removeSidebarStream(msg.id); const request = readRequests.get(msg.id); if (request) { request.cancelled = true; request.chunkStop?.(); readRequests.delete(msg.id); } connectionScheduler.cancelRequest(msg.id); connectionScheduler.cancelStream(msg.id); clearImageTimer(msg.id); const session = streams.get(msg.id); session?.chunkStop?.(); streams.delete(msg.id); if (session) await closeSession(session); return; }
       if (msg.type === 'model-cancel') {
         const answer = beginWrite(msg), id = msg.conversationId;
         if (!models || !modelJournal || typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || typeof msg.operationId !== 'string' || !/^[0-9a-f-]{36}$/i.test(msg.operationId) || revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === id && s.uploadDeviceId === msg.deviceId)) return answer('unavailable');
@@ -732,6 +734,8 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       // entire loaded desktop history when a request omits the optional flag.
       const historyWindow = msg.historyWindow === true || msg.viewDelta === 3;
       const session = createSession({ conversationId: m[1], hostId: 'local' }); session.uploadDeviceId = msg.deviceId; session.historyWindow = historyWindow; streams.set(msg.id, session);
+      const connectionDiagnostic = session.connectionDiagnostic = createStreamDiagnostics(msg.id, entry => trace('stream', 'timing', entry));
+      connectionDiagnostic.mark('open');
       if (sidebarStatus && msg.sidebarStatus === true && !revoked.has(msg.deviceId)) addSidebarStream(msg.id, msg.deviceId);
       let historyGeneration = 0, historyLoading = null, pendingHistory = null, previousView = null, viewSeq = 0, lastIssued = [], flowGeneration = 0, flowPaused = false, changedSinceReset = true, skipReset = false;
       let latest = null, lastHistory = null, pendingStatus = false, pendingReset = null, pendingPreview = msg.stagedPreview === true;
@@ -758,17 +762,20 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       // Any oversized state must go through the chunked transfer, not the 8 MiB
       // single-frame cap. The relay and the phone H5 already understand state-chunk.
       const sendChunkedState = (seq, conversation) => {
+        connectionDiagnostic.mark('first-encoded', { chunked: true });
+        const diagnosticTransfer = connectionDiagnostic.mark('chunk-begin');
         const epoch = ++chunkEpoch; sendingChunks = true;
         void chunker.send({ event: 'state', data: { seq, revision: latest.revision, conversation } }, seq).then(() => {
           if (epoch !== chunkEpoch || streams.get(msg.id) !== session || connection !== ws) return;
           previousView = msg.viewDelta ? { seq, conversation } : null; sendingChunks = false;
+          if (diagnosticTransfer) connectionDiagnostic.mark('chunk-end');
           if (chunkDirty) { chunkDirty = false; schedule(); }
         }).catch(error => {
           if (epoch !== chunkEpoch) return; sendingChunks = false;
           if (streams.get(msg.id) === session) {
             const code = error instanceof RangeError && error.message === 'state too large' ? 'state-too-large' : 'state-invalid';
             console.warn('stream-observation', JSON.stringify({ stage: 'chunk-transfer', code, cause: error?.name || null }));
-            streams.delete(msg.id); void session.close();
+            streams.delete(msg.id); void closeSession(session);
             send({ type: 'stream-error', id: msg.id, code }, connection, { deviceId: msg.deviceId, cancellable: true });
           }
         });
@@ -783,10 +790,12 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           if (pendingReset !== null) {
             pendingPreview = false;
             const generation = pendingReset; pendingReset = null;
-            let event = 'status', data = { status: 'unavailable' };
+            let event = 'status', data = { status: 'unavailable' }, projectMs;
             if (skipReset && !changedSinceReset && !pendingHistory) { event = 'unchanged'; data = undefined; }
             else if (latest?.status === 'ready') {
+              const projectionStarted = connectionDiagnostic.pending('first-encoded') ? performance.now() : null;
               const conversation = project(latest.value);
+              projectMs = projectionStarted === null ? undefined : performance.now() - projectionStarted;
               const resetSize = Buffer.byteLength(JSON.stringify(conversation));
               if (historyWindow && resetSize > 8 * 1024 * 1024) {
                 previousView = null; changedSinceReset = false; flowPaused = false; pendingStatus = false; awaitingReset = generation;
@@ -797,7 +806,10 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             } else { previousView = null; if (event !== 'unchanged') pendingHistory = lastHistory; }
             changedSinceReset = false; flowPaused = false; pendingStatus = false;
             if (pendingHistory && latest?.status !== 'ready') schedule();
-            return JSON.stringify({ type: 'flow-reset', id: msg.id, generation, event, ...(data ? { data } : {}) });
+            const encodingStarted = connectionDiagnostic.pending('first-encoded') ? performance.now() : null;
+            const encoded = JSON.stringify({ type: 'flow-reset', id: msg.id, generation, event, ...(data ? { data } : {}) });
+            if (event === 'state' && encodingStarted !== null) connectionDiagnostic.mark('first-encoded', { projectMs, encodeMs: performance.now() - encodingStarted, bytes: Buffer.byteLength(encoded), chunked: false });
+            return encoded;
           }
           if (flowPaused) return null;
           if (latest?.status !== 'ready') {
@@ -806,7 +818,9 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             if (pendingHistory) { const conversation = pendingHistory; pendingHistory = null; changedSinceReset = true; return JSON.stringify({ type: 'event', id: msg.id, event: 'history', data: { conversation } }); }
             return null;
           }
+          const projectionStarted = connectionDiagnostic.pending('first-encoded') ? performance.now() : null;
           const conversation = project(latest.value);
+          const projectMs = projectionStarted === null ? undefined : performance.now() - projectionStarted;
           if (conversation.id !== m[1]) throw new Error('mismatch');
           if (pendingPreview) {
             pendingPreview = false;
@@ -815,13 +829,19 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             if (Buffer.byteLength(result) <= 512 * 1024) { schedule(); return result; }
           }
           if (!msg.viewDelta) {
+            const encodingStarted = connectionDiagnostic.pending('first-encoded') ? performance.now() : null;
             const full = JSON.stringify({ type: 'event', id: msg.id, event: 'state', data: { revision: latest.revision, conversation } });
-            if (Buffer.byteLength(full) > 8 * 1024 * 1024) return sendChunkedState(++viewSeq, conversation);
+            const bytes = Buffer.byteLength(full);
+            if (encodingStarted !== null) connectionDiagnostic.mark('first-encoded', { projectMs, encodeMs: performance.now() - encodingStarted, bytes, chunked: bytes > 8 * 1024 * 1024 });
+            if (bytes > 8 * 1024 * 1024) return sendChunkedState(++viewSeq, conversation);
             return full;
           }
           const update = viewUpdate(previousView, conversation, ++viewSeq, msg.viewDelta === 3 ? 3 : msg.viewDelta === 2 ? 2 : 1);
+          const encodingStarted = connectionDiagnostic.pending('first-encoded') ? performance.now() : null;
           const encoded = JSON.stringify({ type: 'event', id: msg.id, event: update.event, data: { ...update.data, revision: latest.revision } });
-          if (Buffer.byteLength(encoded) > 8 * 1024 * 1024) return sendChunkedState(viewSeq, conversation);
+          const bytes = Buffer.byteLength(encoded);
+          if (encodingStarted !== null) connectionDiagnostic.mark('first-encoded', { projectMs, encodeMs: performance.now() - encodingStarted, bytes, chunked: bytes > 8 * 1024 * 1024 });
+          if (bytes > 8 * 1024 * 1024) return sendChunkedState(viewSeq, conversation);
           previousView = { seq: viewSeq, conversation };
           return encoded;
         })) connection.terminate();
@@ -841,6 +861,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       };
       session.on('state', event => {
         if (!streams.has(msg.id)) return;
+        if (event.status === 'ready') connectionDiagnostic.mark('first-ready');
         if (event.status === 'ready') models?.observe({ deviceId: msg.deviceId, threadId: m[1], session });
         const wasUnavailable = latest?.status === 'unavailable';
         if (event.status !== 'ready' && wasUnavailable && historyLoading) return;
@@ -884,7 +905,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         };
         void refreshImages();
       });
-      try { session.start(); } catch { streams.delete(msg.id); void session.close(); send({ type: 'end', id: msg.id }, connection); }
+      try { session.start(); } catch { streams.delete(msg.id); void closeSession(session); send({ type: 'end', id: msg.id }, connection); }
     });
     ws.on('close', () => { trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }); if (!stopped) timer = setTimeout(connect, retryMs); });
   }

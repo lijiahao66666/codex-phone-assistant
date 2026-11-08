@@ -7,6 +7,7 @@ import { createGzip, gunzip, constants as zlibConstants } from 'node:zlib';
 import { promisify } from 'node:util';
 import { PairingRegistry } from '../pairing/registry.mjs';
 import { serveAttachmentPreviewAsset } from '../transport/attachment-preview-assets.mjs';
+import { createStreamDiagnostics } from '../common/stream-diagnostics.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const decompressUploadChunk = promisify(gunzip);
@@ -130,6 +131,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   }
   function cancel(id, { unknown = false } = {}) {
     const entry = pending.get(id); if (!entry) return;
+    entry.connectionDiagnostic?.mark('closed');
     if (entry.uploadSent) console.warn('upload-observation', 'response-timeout-or-disconnect');
     pending.delete(id); clearTimeout(entry.timer); clearTimeout(entry.hardTimer); clearInterval(entry.heartbeat);
     const peer = peers.get(entry.hostId);
@@ -590,16 +592,18 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       const entries = [...pending.values()];
       if (pairPendingCount(entries, phone) - Number(Boolean(reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
       const id = randomUUID(), streaming = match[2].endsWith('/events');
+      const connectionDiagnostic = streaming && threadId ? createStreamDiagnostics(id, entry => console.info('stream-timing', JSON.stringify(entry))) : null;
+      connectionDiagnostic?.mark('open');
       let output = res;
       if (streaming) {
         const gzip = /(?:^|,)\s*gzip\s*(?:;\s*q=(?!0(?:\.0*)?(?:\s*(?:,|$)))\d(?:\.\d+)?)?\s*(?:,|$)/i.test(req.headers['accept-encoding'] || '');
-        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store, no-transform', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff', vary: 'Accept-Encoding', ...(gzip ? { 'content-encoding': 'gzip' } : {}) });
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store, no-transform', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff', 'x-codex-stream-id': id, vary: 'Accept-Encoding', ...(gzip ? { 'content-encoding': 'gzip' } : {}) });
         res.flushHeaders();
         if (gzip) { output = createGzip({ flush: zlibConstants.Z_SYNC_FLUSH }); output.on('error', () => res.destroy()); output.pipe(res); }
       }
       const timer = setTimeout(() => { if (streaming) console.warn('stream lifetime expired'); cancel(id); }, streaming ? 12 * 3600000 : requestTimeoutMs);
       const heartbeat = streaming ? setInterval(() => { const entry = pending.get(id); if (res.destroyed) return; if (entry?.flowPaused) return; if (output.writableLength > 16 * 1024 * 1024) return res.destroy(); output.write(entry?.sidebar ? 'event: sidebar-heartbeat\ndata: {}\n\n' : ': heartbeat\n\n'); }, heartbeatMs) : null;
-      pending.set(id, { res, output, timer, heartbeat, streaming, sidebar: match[2] === '/sidebar/events', writing: write, stop, hostId: phone.hostId, deviceId: phone.deviceId });
+      pending.set(id, { res, output, timer, heartbeat, streaming, connectionDiagnostic, sidebar: match[2] === '/sidebar/events', writing: write, stop, hostId: phone.hostId, deviceId: phone.deviceId });
       if (reservation) bodyReads.delete(reservation);
       res.once('close', () => { if (streaming && pending.has(id)) console.warn('stream client disconnected'); cancel(id); if (output !== res) output.destroy(); });
       if (write) peer.send(JSON.stringify({ type: stop ? 'stop' : approval ? 'approve' : userInput ? 'user-input' : modeUpdate ? 'mode' : modelUpdate ? 'model' : 'write', id, conversationId: match[2].split('/')[2], deviceId: phone.deviceId, ...(stop ? { turnId } : approval ? { requestId, kind, decision } : userInput ? { requestId, answers, ...(asyncQuestion ? { asyncQuestion: true } : {}) } : modeUpdate ? { mode } : modelUpdate ? { model, ...(effort ? { effort } : {}) } : { text, ...(attachmentId ? { attachmentId } : {}), ...(attachmentIds ? { attachmentIds } : {}) }) }));
@@ -652,8 +656,11 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       if (entry.streaming && msg.type === 'state-chunk' && msg.frame && !entry.flowPaused) {
         const frame = msg.frame;
         if (!['begin', 'chunk', 'end'].includes(frame.type) || typeof frame.transferId !== 'string' || !Number.isSafeInteger(frame.generation) || (frame.type === 'chunk' && (typeof frame.data !== 'string' || frame.data.length > 65536))) return entry.res.destroy();
+        if (frame.type === 'begin') { entry.connectionDiagnostic?.mark('first-received', { bytes: frame.size, chunked: true }); if (entry.connectionDiagnostic?.mark('chunk-begin')) entry.diagnosticTransfer = frame.transferId; }
+        if (frame.type === 'end' && entry.diagnosticTransfer === frame.transferId) entry.connectionDiagnostic?.mark('chunk-end');
         const ack = () => { if (pending.get(msg.id) === entry && ws.readyState === WebSocket.OPEN) { onChunkForTests?.('ack'); ws.send(JSON.stringify({ type: 'state-chunk-ack', id: msg.id, transferId: frame.transferId, generation: frame.generation, index: frame.type === 'chunk' ? frame.index : frame.type })); } };
         const written = entry.output.write(`event: state-chunk\ndata: ${JSON.stringify(frame)}\n\n`);
+        if (entry.connectionDiagnostic?.mark('first-written', { chunked: true }) && !written) entry.output.once('drain', () => entry.connectionDiagnostic?.mark('first-drain'));
         onChunkForTests?.(written ? 'write' : 'wait-drain');
         if (written) ack(); else entry.output.once('drain', ack);
         return;
@@ -690,7 +697,11 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (reset && msg.event === 'unchanged') { entry.flushSidebar?.(); return; }
         if (entry.output.writableLength > 16 * 1024 * 1024 || entry.res.writableLength > 16 * 1024 * 1024) { console.warn('stream backpressure limit'); return entry.res.destroy(); }
         const queued = entry.output.writableLength + (entry.output === entry.res ? 0 : entry.res.writableLength);
+        if (msg.event === 'state') entry.connectionDiagnostic?.mark('first-received', { bytes: raw.length, chunked: false });
         const writable = entry.output.write(`event: ${msg.event}\ndata: ${JSON.stringify(msg.data)}\n\n`);
+        if (msg.event === 'state') {
+          if (entry.connectionDiagnostic?.mark('first-written', { queuedBytes: queued, chunked: false }) && !writable) entry.output.once('drain', () => entry.connectionDiagnostic?.mark('first-drain'));
+        }
         if (reset && msg.chunkReset === true) {
           const ack = () => { if (pending.get(msg.id) === entry && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'chunk-reset-ready', id: msg.id, generation: msg.generation })); };
           if (writable) ack(); else entry.output.once('drain', ack);

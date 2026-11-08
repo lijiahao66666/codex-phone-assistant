@@ -419,6 +419,29 @@ sessionStorage.removeItem('codex-hub-token');
 sessionStorage.removeItem('codex-hub-thread');
 let active;
 let reconnectTimer;
+// Local, bounded diagnostics for connection acceptance. No chat/device identity,
+// message payload, persistence or telemetry request is recorded here.
+const connectionDiagnosticRows = [];
+let connectionDiagnosticSequence = 0, currentConnectionDiagnostic = null;
+const connectionDiagnosticStages = new Set(['selected', 'debounce', 'connect', 'fetch', 'headers', 'first-bytes', 'chunk-begin', 'chunk-end', 'first-state', 'handle-start', 'handle-end', 'connected', 'input-enabled', 'closed']);
+function connectionDiagnosticClock() { return typeof performance === 'object' && typeof performance.now === 'function' ? performance.now() : Date.now(); }
+function connectionDiagnosticsSnapshot() { return connectionDiagnosticRows.map(row => ({ ...row, milestones: { ...row.milestones } })); }
+function beginConnectionDiagnostic(trigger, began = connectionDiagnosticClock()) {
+  const row = { attempt: ++connectionDiagnosticSequence, trigger: ['selection', 'reconnect'].includes(trigger) ? trigger : 'direct', startedAt: new Date().toISOString(), milestones: {} };
+  connectionDiagnosticRows.push(row);
+  if (connectionDiagnosticRows.length > 32) connectionDiagnosticRows.shift();
+  let closed = false;
+  const mark = stage => {
+    if (closed || !connectionDiagnosticStages.has(stage) || Object.hasOwn(row.milestones, stage)) return;
+    row.milestones[stage] = Math.max(0, Math.round((connectionDiagnosticClock() - began) * 100) / 100);
+  };
+  if (trigger === 'selection') mark('selected');
+  return { mark, correlate(streamId) { if (!closed && uuid.test(streamId || '')) row.streamId = streamId; }, close(outcome) {
+    if (closed) return;
+    mark('closed'); closed = true;
+    row.outcome = ['cancelled', 'disconnected', 'superseded', 'invalid', 'stream-error'].includes(outcome) ? outcome : 'cancelled';
+  } };
+}
 let selectedId = null;
 let selectedTitle = '';
 let newDraft = null;
@@ -1394,6 +1417,7 @@ function updateComposer() {
     messageInput.style.height = `${Math.min(messageInput.scrollHeight, Math.min(300, (window.innerHeight || 844) * 0.35))}px`;
   }
   messageInput.disabled = newDraft ? !connected || !newDraft.projectId || newDraft.pending || newDraft.uncertain || Boolean(newDraft.prepared) : !selectedId || ((!connected || recoveryBlocksWrite()) && !canDraftInHistory());
+  if (!messageInput.disabled) currentConnectionDiagnostic?.mark('input-enabled');
   imageChoose.hidden = true;
   imageChoose.disabled = !imageUploadAvailable || messageInput.disabled || Boolean(state?.pending || state?.uncertain);
   fileChoose.hidden = !imageUploadAvailable;
@@ -2259,7 +2283,7 @@ function renderTask(task) {
   button.append(indicator);
   if (task.unread === true && task.id !== selectedId) { const dot = element('span', 'task-unread', ''); dot.title = '未读'; dot.setAttribute('aria-label', '未读'); button.append(dot); }
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : observedStatus);
-  button.addEventListener('click', () => { if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
@@ -3392,17 +3416,24 @@ function handleEvent(block) {
 // The old stream is dropped immediately; the new one waits for the tap to
 // settle so a swipe across the list opens a single session.
 let pendingConnectTimer = null;
-function scheduleThreadConnect(id) {
+let pendingConnectDiagnostic = null;
+function scheduleThreadConnect(id, diagnostic = beginConnectionDiagnostic('selection')) {
   clearTimeout(pendingConnectTimer);
+  pendingConnectDiagnostic?.close('superseded');
   active?.abort(); active = undefined; recoveryStream = null;
+  pendingConnectDiagnostic = currentConnectionDiagnostic = diagnostic;
+  diagnostic.mark('debounce');
+  if (!messageInput.disabled) diagnostic.mark('input-enabled');
   pendingConnectTimer = setTimeout(() => {
     pendingConnectTimer = null;
-    if (selectedId !== id || newDraft) return;
-    void connect(id);
+    pendingConnectDiagnostic = null;
+    if (selectedId !== id || newDraft) { diagnostic.close('superseded'); return; }
+    void connect(id, 0, false, diagnostic);
   }, 220);
   pendingConnectTimer?.unref?.();
 }
-async function connect(id, attempt = 0, preserveView = false) {
+async function connect(id, attempt = 0, preserveView = false, diagnostic = beginConnectionDiagnostic(attempt ? 'reconnect' : 'direct')) {
+  diagnostic.mark('connect');
   const statusDevice = modelDeviceGeneration, statusWrite = modelWriteGeneration;
   const checkModelStatus = async () => {
     try {
@@ -3428,13 +3459,15 @@ async function connect(id, attempt = 0, preserveView = false) {
   reconnectTimer = undefined;
   active?.abort();
   const current = new AbortController(); active = current;
+  currentConnectionDiagnostic = diagnostic;
   recoveryStream = null;
   if (currentDeviceId) recoveryChecks.delete(recoveryKey(currentDeviceId, id));
   let watchdog, assembler, receivedView = false, receivedModelState = false;
   const clearWatchdog = () => { clearTimeout(watchdog); watchdog = undefined; };
-  current.signal.addEventListener('abort', () => { clearWatchdog(); assembler?.cancel(); if (active === current) { sidebarStatusSnapshot = new Map(); applySidebarStatuses(); } }, { once: true });
+  current.signal.addEventListener('abort', () => { diagnostic.close('cancelled'); if (currentConnectionDiagnostic === diagnostic) currentConnectionDiagnostic = null; clearWatchdog(); assembler?.cancel(); if (active === current) { sidebarStatusSnapshot = new Map(); applySidebarStatuses(); } }, { once: true });
   function disconnected() {
     if (current.signal.aborted || active !== current) return;
+    diagnostic.close('disconnected');
     current.abort();
     updateLiveTaskStatus(id, 'unknown');
     error.hidden = true;
@@ -3457,7 +3490,7 @@ async function connect(id, attempt = 0, preserveView = false) {
   } else clearConversation();
   homeErrorSource = null; error.hidden = true; status(preserveView ? '重新连接中' : '连接中', 'connecting');
   if (!preserveView) showConversationLoading();
-  if (!uuid.test(id)) { current.abort(); fail('任务 ID 格式不正确'); return; }
+  if (!uuid.test(id)) { diagnostic.close('invalid'); current.abort(); fail('任务 ID 格式不正确'); return; }
   const cached = recentView(id);
   if (cached) void fetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store', signal: current.signal }).then(response => {
     if ((response.status === 401 || response.status === 403) && active === current) clearRecentViews();
@@ -3465,19 +3498,28 @@ async function connect(id, attempt = 0, preserveView = false) {
   }).catch(() => {});
   resetWatchdog();
   try {
+    diagnostic.mark('fetch');
     const response = await fetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1', 'x-codex-staged-preview': '1' } });
     if (current.signal.aborted || active !== current) return;
+    diagnostic.mark('headers'); diagnostic.correlate(response.headers?.get?.('x-codex-stream-id'));
     if (response.status === 401 || response.status === 403) { const message = await responseError(response, '配对状态不可用'); if (active !== current || current.signal.aborted) return; clearRecentViews(); current.abort(); fail(message); return; }
     if (!response.ok || !response.body) throw new Error(await responseError(response, `连接失败 (${response.status})`));
     recoveryStream = { threadId: id, controller: current };
     void checkModelStatus();
     if (currentDeviceId) void checkRecoveryStatus(id, currentDeviceId, recoveryStream);
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending = '';
+    const handleLiveBlock = block => {
+      const isState = /^event:\s*state\s*$/m.test(block);
+      if (isState) { diagnostic.mark('first-state'); diagnostic.mark('handle-start'); }
+      const ready = handleEvent(block);
+      if (isState) { diagnostic.mark('handle-end'); if (ready && connected) diagnostic.mark('connected'); }
+      return ready;
+    };
     while (true) {
       const { value, done } = await reader.read();
       if (current.signal.aborted || active !== current) return;
       if (done) break;
-      if (value?.byteLength) resetWatchdog();
+      if (value?.byteLength) { diagnostic.mark('first-bytes'); resetWatchdog(); }
       const chunk = decoder.decode(value, { stream: true });
       if (pending.endsWith('\r') && chunk.startsWith('\n')) pending = pending.slice(0, -1);
       pending += chunk.replace(/\r\n/g, '\n');
@@ -3488,13 +3530,16 @@ async function connect(id, attempt = 0, preserveView = false) {
         const block = pending.slice(0, end); pending = pending.slice(end + 2);
         if (/^event:\s*state-chunk\s*$/m.test(block)) {
           const line = /^data:\s*(.+)$/m.exec(block); if (!line) throw new Error('状态分片无效');
+          const frame = JSON.parse(line[1]);
+          if (frame.type === 'begin') diagnostic.mark('chunk-begin');
           if (!assembler) { const { StateChunkAssembler } = await import('/state-chunks.mjs'); assembler = new StateChunkAssembler(); }
           if (current.signal.aborted || active !== current) return;
-          const assembled = await assembler.accept(JSON.parse(line[1]));
+          const assembled = await assembler.accept(frame);
           if (current.signal.aborted || active !== current) return;
           if (assembled) {
             if (assembled.value?.event !== 'state' || assembled.value?.data?.seq !== assembled.seq) throw new Error('状态分片无效');
-            if (handleEvent(`event: state\ndata: ${JSON.stringify(assembled.value.data)}`)) attempt = 0;
+            diagnostic.mark('chunk-end');
+            if (handleLiveBlock(`event: state\ndata: ${JSON.stringify(assembled.value.data)}`)) attempt = 0;
             receivedView = true;
           }
           continue;
@@ -3503,10 +3548,10 @@ async function connect(id, attempt = 0, preserveView = false) {
           const line = /^data:\s*(.+)$/m.exec(block);
           let detail; try { detail = line && JSON.parse(line[1]); } catch { /* Invalid events are treated as a connection error. */ }
           if (!['state-too-large', 'state-invalid'].includes(detail?.code)) throw new Error('连接失败');
-          current.abort(); updateLiveTaskStatus(id, 'unknown'); fail(detail.code === 'state-too-large' ? '聊天内容过大，暂无法加载' : '聊天暂时无法加载，请在电脑上查看'); connectSidebarStatuses({ allowSelected: true }); return;
+          diagnostic.close('stream-error'); current.abort(); updateLiveTaskStatus(id, 'unknown'); fail(detail.code === 'state-too-large' ? '聊天内容过大，暂无法加载' : '聊天暂时无法加载，请在电脑上查看'); connectSidebarStatuses({ allowSelected: true }); return;
         }
         const isView = /^event:\s*(?:state|history)\s*$/m.test(block);
-        if (handleEvent(block)) attempt = 0;
+        if (handleLiveBlock(block)) attempt = 0;
         if (isView) receivedView = true;
       }
     }
