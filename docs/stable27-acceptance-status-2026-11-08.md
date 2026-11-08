@@ -1,5 +1,7 @@
 # stable27 至 stable30 验收记录
 
+原生归档入口复核：专用 B 的原生日志显示 `source=recent_tasks_menu` 归档在 08:41:26 UTC 返回 `-32600`，10:08:34 同入口成功，10:09:40 桌面删除工具成功。专用 E 在 13:52:38 归档返回 `-32600`，13:54:27 成功，后续数据库 archived=1、H5 列表移除；E 两次归档入口均为 `source=dynamic_tool`，不能表述为侧栏按钮验收。两者均不证明助手仍持有 writer 时原生归档或删除成功。日志 `/Users/lijiahao/Library/Logs/com.openai.codex/2026/11/08/codex-desktop-ff9f4375-ae77-4f49-9fbe-b4caec6018c0-40360-t0-i1-064950-0.log`，对应 B 2592、3599、3651 行和 E 7610、7637 行。
+
 stable33 运行状态补验：2026-11-09 侧栏滚动到主任务后，其 DOM 为 `data-status=active`，转圈标记 `aria-label=进行中` 且未 hidden；同一轮原生 `read_thread` 为 active/inProgress。屏幕外未订阅时曾显示 unknown，滚入可见区域后恢复 active；本次仅验证运行中显示，尚未连续观察该回合结束后的 idle。
 
 stable33 同版本列表复验：53 个既有聊天逐条执行，每条等待最多 15 秒，51 个实时连接且输入可用；主任务在该窗口未连接，礼品卡已实时连接但 recovery locked、输入禁用。51 个成功项等待中位数 894 ms，最大 13603 ms，选中 ID 错位 0。最初有分组未展开，展开后对遗漏条目补测，结果分批取得而非一次连续遍历；原始记录 `/private/tmp/codex-stable33-all53-retest.json`。复验结束时助手和桌面进程均存在；结束时 RSS 不是过程峰值，也不能据此证明所有历史路径无内存问题。
