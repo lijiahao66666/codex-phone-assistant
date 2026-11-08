@@ -1,5 +1,14 @@
 # stable27 至 stable30 验收记录
 
+当前更新（stable32）：公网根 HTML/JS 已发布并核验 HTTP 200、no-store。根 HTML SHA-256 `ec059f857fa75d7ede01e6bfaedeab4bdb5a82e49ee94522014de56af654af1f`，JS SHA-256 `2bf30ecc384ea226301952aae39bdf9be92d6791ae5621692bc524f7270f13b2`，回执 `/private/tmp/codex-stable32-public-check.json`。本机仍为 stable31 运行包，此次仅前端修复，未重启助手。
+
+youzan-toolkit 的旧本地 unknown 请求在服务端不存在：前端先以同请求号原子取消，查询明确 cancelled/unlocked 后才清本地并走新 route；迟到旧请求被 tombstone 拒绝。取消后的短暂确认或 readiness 网络失败可继续只读确认，不重复取消或发消息。74 项相关定向回归通过（含重叠，不加总为独立测试数），日志 `/private/tmp/codex-stable32-missing-confirmation-tests.log`。实机已恢复 connected=true、输入可用、GPT-5.6-Sol/xhigh、恢复 clear，证据 `/private/tmp/codex-stable32-toolkit-live.json`。
+
+礼品卡聊天只读打开原生页面后，H5 已显示实时内容和 Sol/high，但 recovery-status 仍 locked，输入禁用；不能记为完整 ready，也未清除旧未知锁。证据 `/private/tmp/codex-stable31-gift-native-follow-live.json`。因此原有 53 条中累计 52 条曾完成实时连接且输入可用（分轮、不同版本，不代表 stable32 同轮 53 条全通过），剩余 gift 输入阻塞及未读跨端同步尚未解决。
+
+本轮 24 次真实快速切换在约 2.7 秒内完成，最终 C 的模型 Terra/medium、选中与输入状态正确，助手和原生桌面仍运行；证据 `/private/tmp/codex-stable31-rapid24.json`。专用 D 实际执行 pwd，exitCode=0，H5 收到目录输出和 `TOOL_PWD_OK_20261108_D`；证据 `/private/tmp/codex-stable31-tool-live.json`。问答表单已真实出现，但用户明确说明流程由其手动中断；本次归类为用户中断，既不记产品故障，也不记完整问答闭环通过。不再重复发起该问答。
+
+
 最新进度（stable30）：公网根页面和 JS 已切换到 `20261108-stable30`，均 HTTP 200、`cache-control: no-store`；回执 `/private/tmp/codex-stable30-public-check.json`。根 HTML SHA-256 为 `54e11eb624e179c601fd46bb230b557af41aab7f8f2a57e300037d4d2592acb0`，JS 为 `632e0aa5f4b2f0ee39e59f1e2d2a81ed34b5aa60b1ee3f74af897c138d72f5a3`。本机安装包来自 `/private/tmp/codex-phone-stable29-bounded.noindex/codex手机助手.app`，构建签名记录为 `/private/tmp/codex-stable29-bounded-build.log`。目录名 stable29 与公网 static30 是不同组件的版本记录，不将本机包改称 stable30。
 
 专用 D 已在同一网页文档内通过助手正常退出、重新打开后的自动恢复：connected=true、输入可用、`GPT-6.1-Sol · low`、恢复记录 clear；回执 `/private/tmp/codex-stable30-restart-recovery-live.json`。这覆盖 D 的同页重启路径，未证明所有旧 accepted 或 unknown 记录均已恢复。
