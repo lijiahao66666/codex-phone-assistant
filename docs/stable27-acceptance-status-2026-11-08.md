@@ -1,5 +1,7 @@
 # stable27 至 stable30 验收记录
 
+stable33 运行状态补验：2026-11-09 侧栏滚动到主任务后，其 DOM 为 `data-status=active`，转圈标记 `aria-label=进行中` 且未 hidden；同一轮原生 `read_thread` 为 active/inProgress。屏幕外未订阅时曾显示 unknown，滚入可见区域后恢复 active；本次仅验证运行中显示，尚未连续观察该回合结束后的 idle。
+
 stable33 同版本列表复验：53 个既有聊天逐条执行，每条等待最多 15 秒，51 个实时连接且输入可用；主任务在该窗口未连接，礼品卡已实时连接但 recovery locked、输入禁用。51 个成功项等待中位数 894 ms，最大 13603 ms，选中 ID 错位 0。最初有分组未展开，展开后对遗漏条目补测，结果分批取得而非一次连续遍历；原始记录 `/private/tmp/codex-stable33-all53-retest.json`。复验结束时助手和桌面进程均存在；结束时 RSS 不是过程峰值，也不能据此证明所有历史路径无内存问题。
 
 该记录的 `project` 只读取按钮文本，未检查控件可见性：其中 21 条无项目的最近聊天读取到了隐藏控件中的首个项目名称“清禾画画”，不能据此判断项目显示或项目归属。真实页面抽查无项目聊天时，项目 select 和按钮均为 hidden，按钮 CSS 为 `display:none`。模型/等级对照了各聊天最新 rollout 上下文，52 条已连接项一致；这不代替同时刻独立读取的 live snapshot 权威核验。
