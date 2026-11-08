@@ -117,6 +117,40 @@ test('accepted attempts wait for live state and a status query cannot release an
   assert.equal(f.removes.length,1);assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'),null);
 });
 
+test('accepted polling preserves the attachment session until live state clears the attempt',async()=>{
+  const f=await fixture(url=>url.includes('/recovery-attempt/')?response({status:'accepted',locked:false}):url.endsWith('/events')?{ok:true,status:200,body:{getReader:()=>({read:()=>new Promise(()=>{})})}}:response({locked:false}),{manualRecoveryTimers:true});
+  f.run("connect=fixtureConnect;recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-21000});recoveryStream={threadId:selectedId,controller:new AbortController()}");
+  try {
+    await f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');await tick();
+    const session=f.run('active');
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/events')).length,1);
+    for(let poll=0;poll<3;poll++){
+      f.run('recoveryState(currentDeviceId,selectedId).lastCheckedAt=Date.now()-6000;recoveryNoticeTick()');await tick();
+      assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'awaiting-state');
+      assert.equal(f.run('active'),session);assert.equal(session.signal.aborted,false);
+      assert.equal(f.requests.filter(r=>r.url.endsWith('/events')).length,1);
+      assert.equal(f.removes.length,0);assert.equal(f.run('recoveryBlocksWrite()'),true);
+    }
+    assert.equal(f.requests.filter(r=>r.url.includes('/recovery-attempt/')).length,4);
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,0);
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'),'22222222-2222-4222-8222-222222222222');
+    f.run("handleEvent('event: state\\ndata: '+JSON.stringify({conversation:{id:selectedId,title:'ready',turns:[],requests:[],history:{complete:true}}}))");await tick();await tick();
+    assert.equal(f.removes.length,1);assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'),null);
+  } finally { f.run('active?.abort()'); }
+});
+
+test('the first accepted confirmation retains an existing non-history attachment stream',async()=>{
+  const f=await fixture(url=>url.includes('/recovery-attempt/')?response({status:'accepted',locked:false}):url.endsWith('/events')?{ok:true,status:200,body:{getReader:()=>({read:()=>new Promise(()=>{})})}}:response({locked:false}),{manualRecoveryTimers:true});
+  f.run("connect=fixtureConnect;recoverableHistoryId=null;recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',since:Date.now()-21000});void connect(selectedId)");await tick();
+  try {
+    const session=f.run('active');
+    await f.run('checkRecoveryAttempt(selectedId,currentDeviceId,recoveryState(currentDeviceId,selectedId))');await tick();
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/events')).length,1);
+    assert.equal(f.run('active'),session);assert.equal(session.signal.aborted,false);
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'awaiting-state');assert.equal(f.removes.length,0);
+  } finally { f.run('active?.abort()'); }
+});
+
 test('history is editable without takeover and only the explicit send recovers before dispatch',async()=>{
   const f=await fixture((url)=>url.endsWith('/recover')?response({status:'accepted'},202):url.endsWith('/messages')?response({status:'accepted'},202):undefined);
   assert.equal(f.nodes.get('#message').disabled,false);assert.equal(f.nodes.get('#recover-chat').hidden,true);

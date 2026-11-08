@@ -557,7 +557,7 @@ function recoveryNoticeTick() {
   if (state && ['pending', 'awaiting-state', 'unknown'].includes(state.status)) {
     const since = state.since ?? (state.since = Date.now());
     if (Date.now() - since >= RECOVERY_NOTICE_DEADLINE_MS && !activeRecoveryAborts.has(key)) {
-      if (state.status !== 'unknown') Object.assign(state, { status: 'unknown', message: '正在核对连接结果' });
+      if (state.status === 'pending') Object.assign(state, { status: 'unknown', message: '正在核对连接结果' });
       if (Date.now() - (state.lastCheckedAt || 0) >= 5000) void checkRecoveryAttempt(id, deviceId, state);
       changed = true;
     }
@@ -645,9 +645,12 @@ async function checkRecoveryAttempt(id, deviceId, state) {
       recoveryChecks.delete(recoveryKey(deviceId, id));
       if (selectedId === id && currentDeviceId === deviceId) void connect(id);
     } else if (result?.locked === false && result.status === 'accepted') {
+      const firstAccepted = state.status !== 'awaiting-state';
       state.status = 'awaiting-state'; state.message = '正在连接任务';
-      recoveryChecks.delete(recoveryKey(deviceId, id));
-      if (selectedId === id && currentDeviceId === deviceId) void connect(id);
+      // Keep the attachment's own retry sequence alive after acceptance. A
+      // status poll must not cancel and restart that session every five seconds.
+      const attachedStream = recoveryStream?.threadId === id && !recoveryStream.controller.signal.aborted && (recoveryStream.liveState || recoverableHistoryId !== id);
+      if (firstAccepted && !attachedStream && selectedId === id && currentDeviceId === deviceId) void connect(id);
     } else { state.message = '恢复结果未知，请稍后重新检查'; }
   } catch {
     if (recoveries.get(recoveryKey(deviceId, id)) === state && state.status === 'unknown') state.message = '无法确认恢复结果，请稍后重新检查';

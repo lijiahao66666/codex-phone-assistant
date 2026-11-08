@@ -1,5 +1,11 @@
 # stable27 当前验收状态
 
+后续更新（stable28）：公网已更新至 `20261108-stable28`，根 HTML/JS/CSS 均 HTTP 200、no-store，与该次源码一致；回执 `/private/tmp/codex-stable28-public-check.json`。已修复 accepted 恢复结果反复查询时每 5 秒取消当前连接的回归，相关 UI 检查 41/41 PASS。真实 java 观察 55 秒仍未就绪，但请求监测显示首次确认后未再反复建立 events stream；它仍等待旧 accepted 恢复结果，不能记连接 PASS。记录 `/private/tmp/codex-stable28-java-live.json`。
+
+stable27 的同页重启恢复已实际通过专用 D：H5 未刷新，正常退出并重新打开助手后恢复 ready、Sol/low、输入可用；证据 `/private/tmp/codex-stable27-before-restart-live.json`、`/private/tmp/codex-stable27-after-restart-live.json`。该结果只覆盖这个专用聊天，不能覆盖遗留未知或 accepted 记录。
+
+Mac 已安装带异常退出诊断的 `codex-phone-stable27-diagnostics.noindex` 包并通过签名校验。stderr 只保留最多 64 KiB 的内存尾部，非授权退出才记录 exit status/reason/time；正常 quit/open 不产生异常记录。后续单独打开 java 的 65 秒采样中助手和 Desktop 均保留，RSS 峰值分别为 139.6 MiB 和 242.4 MiB，但未完成实时连接，不能代替大历史成功验收。
+
 当前不能作为稳定版通过。公网 H5 已更新到 `20261108-stable27`；本机最近安装的同步程序包含等级同步和 socket 退订修复，但在全列表连接检查中再次退出。未读跨端闭环、持有 writer 时的原生归档、大历史连接和资源占用仍未通过。
 
 | 用户要求 | 当前结论 | 证据与边界 |
