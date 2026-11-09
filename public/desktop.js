@@ -1498,6 +1498,7 @@ async function recoverSelectedChat({ preserveStream = null, isCurrent = () => tr
   // Let the relay's 60 s recovery budget settle before treating transport loss
   // as an unknown outcome; ordinary requests keep their existing deadlines.
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 70000);
+  const requestScope = historyScopeGeneration;
   activeRecoveryAborts.set(key, controller);
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recover`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
@@ -1506,7 +1507,8 @@ async function recoverSelectedChat({ preserveStream = null, isCurrent = () => tr
     let result; try { result = await response.json(); } catch { result = null; }
     if (response.status === 202 && result?.status === 'accepted') {
       state.status = 'awaiting-state'; state.message = '正在连接任务'; state.since = Date.now();
-      if (selectedId === id && currentDeviceId === deviceId && isCurrent() && !(preserveStream && recoveryStream === preserveStream && !preserveStream.controller.signal.aborted)) void connect(id);
+      const attached = recoveryStream?.threadId === id && !recoveryStream.controller.signal.aborted;
+      if (!controller.signal.aborted && selectedId === id && currentDeviceId === deviceId && historyScopeGeneration === requestScope && !connected && isCurrent() && !attached) void connect(id);
     } else if (response.status === 409 && result?.error === 'unavailable') {
       if (!(await clearRecoveryAttempt(deviceId, id, state))) throw new Error('storage');
       state.status = 'unavailable'; state.message = '暂时无法连接，请稍后再试'; state.since = Date.now();
@@ -2293,9 +2295,9 @@ function renderTask(task) {
   const indicator = element('span', 'task-active', ''); indicator.title = '进行中'; indicator.setAttribute('aria-label', '进行中');
   const observedStatus = sidebarStatusSnapshot?.get(task.id) ?? button.dataset.status;
   button.append(indicator);
-  if (task.unread === true && task.id !== selectedId) { const dot = element('span', 'task-unread', ''); dot.title = '未读'; dot.setAttribute('aria-label', '未读'); button.append(dot); }
+  // Unread indicators are deferred until H5 can acknowledge desktop read state.
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
-  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {

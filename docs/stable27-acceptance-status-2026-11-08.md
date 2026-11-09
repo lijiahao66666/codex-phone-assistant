@@ -1,5 +1,33 @@
 # stable27 至 stable30 验收记录
 
+2026-11-09 本版范围调整（用户明确决定）：桌面主动接管/持有 writer 时归档、礼品卡旧恢复锁，延后下一版；未读跨端同步也延后，本版 H5 隐藏小蓝点，不改桌面未读状态。这些项目不再作为本版发布阻断，但仍属于已知限制，不能标为修复通过。
+
+stable39 蓝点实际复测：只对专用 C 使用桌面原生工具标未读，H5 在 D 选中时显示 C 蓝点；从 H5 打开 C 后蓝点隐藏，等待 C 实时连接后再切 D，列表刷新时 C 蓝点重新出现，桌面持久化未读状态始终为 true。最终通过桌面原生工具还原 C 已读。此结果证明选中时隐藏不等于跨端已读；记录 `/private/tmp/codex-stable39-unread-retest-20261109.json`。根据上面的用户决定，本版移除 H5 未读标记的生成。
+
+stable40 候选：正常恢复返回 accepted 后保留同任务有效事件流，拦截取消、设备/历史范围变化和已连接后的迟到响应，避免重建有效连接。本机安装候选四个生产源文件与当前源码 SHA-256 一致，签名严格验证通过；IPC/恢复相关 63 项回归通过。真实 connect + SSE history→accepted→live 回归通过，同一流直到实时就绪才解除写入保护；本版 H5 定向回归 48/48 通过。静态事务隔离验证双目录发布、显式回滚、公网哈希异常自动回滚，数据库/relay 未变且没有服务重启。尚需公网发布及冷恢复实测，不能据此声称已提速。
+
+stable40 静态发布成功：服务器事务返回 `STATIC_DEPLOYED`，备份 `/opt/codex-hub-paired/backups/stable40-20261109-143240-2067572`，未重启服务、未修改数据库。公网 JS SHA-256 `0791d1b08812ea7e87a9f136648265d2868296997925661c8183a0a27e06c768`，HTML `c3f1f1c6beea68a9b3cfae6ab1fbea8b6eadbb600f9d4d82ca224997f8da2457`；H5 刷新后脚本版本为 stable40，当前渲染任务行没有 `.task-unread`。发布包 `/private/tmp/codex-stable40-static-v2-stage-20261109.tar.gz`，恢复实测另行记录。
+
+stable39 状态交接修复：运行中的聊天切走后，在重新取得状态前显示“状态更新中”，明确 active/idle 时更新，最多等待 30 秒。49 项 UI 回归通过。公网静态事务成功，未重启服务、未修改数据库；HTML SHA-256 `a7c8cd3c811edba010ea272cd163d7a19d029e9d5ac4261c10cccae5ed70dbd6`，JS `8ddedd5ccd9917de40159e026ec9304ce3e1b23f0c7d74af6bea34c94e5b5353`。真实 H5 从正在运行的主任务切至专用 C，主任务显示 checking、随后 active，标记保持可见；代码 `200304f` 已推送。该样本不代表所有断线和状态订阅场景通过。
+
+stable38 修复桌面宽屏侧栏运行状态漏订阅：原先仅在侧栏有 `open` class 时收集可见任务，宽屏常驻侧栏没有该 class，当前任务在 Desktop active 时 H5 为 unknown 且隐藏转圈。现按任务行与视口相交判断，手机关闭抽屉不订阅离屏任务；UI 回归 48/48 PASS。静态事务返回 `STATIC_DEPLOYED`，不重启服务、不改配对数据库，HTML SHA-256 `661d8f004e36dd1be20cda72037264926c0d312a5f4844b1323540e5ea864afd`，JS `aabad99b41e517ff8aa13c60d387ad369c455b0584d8ea39bceccb4de56c5c70`。公网刷新后，当前任务被纳入可见订阅并显示 active/进行中，约 15 秒后再次观察仍显示；不能据此保证所有切换及断网时无状态空窗。代码提交 `48a51b9` 已推送。
+
+stable37 静态发布及手势复验：事务返回 `STATIC_DEPLOYED`，两个静态目录和公网校验一致，未重启服务、未改配对数据库；HTML SHA-256 `20abbc41641c9e9f7c743f378e8a166729aa936882815c3a26532bdbfa694761`，JS `e37d03b811a57a0a6b050df8890991df1ec8605e1a58c6fe8c014d8b200e57f6`。真实浏览器按下专用 C 任务按钮，期间请求列表刷新，按钮仍是同一已连接节点，松开后正确选中；相关 UI 回归 47/47 通过。专用 C/D 实际鼠标连续切换 24 次约 3.5 秒，选中 ID 均正确，最终 D 已连接、输入可用且为 GPT-6.1-Sol/low，记录 `/private/tmp/codex-stable37-rapid-pointer.json`。同步 88 次约 90 秒进程采样中 Desktop、助手 UI、runtime、助手 app-server 均存在，RSS 峰值分别约 277.5、27.0、107.3、60.2 MiB；并非整棵桌面进程树或长期压力测试。
+
+stable36 真实慢恢复及取消补测：本机日志中 attempt `814fff46-4ac4-41f3-995e-ba283dfcea03` 从 recover request 至 accepted 为 10.149 秒，随后 session ready；只读 journal 为 accepted 且记录执行身份，当前该聊天无 recovery 写锁。另一个 attempt `8b8e6cbf-bec4-4593-b433-4df76b80c39e` 同样 accepted 并记录执行身份。切换期间 attempt `40b5089f-7a7e-47f8-a47f-d17f6d4678e6` 在流关闭后 rejected，journal 无执行身份，当前该聊天无写锁；此样本支持发现阶段取消，不能推广至所有取消时机。日志显示无 owner 冷连接可先等待约 10 秒发现，再等待约 10 秒恢复，15 秒窗口不能判定其最终失败。
+
+stable36 列表复验未完成：沿用 stable33 的 53 条 ID，最多等待每条 15 秒；6 条在窗口内连接且输入可用（595 至 3603 ms），16 条等待超时，31 条自动化点击失败（列表重绘、目标未显示），不能将点击失败归因于连接故障，也不能作为全量通过。运行中尝试中断客户端后，浏览器侧脚本仍继续执行直至 53 条处理完；停止后所选聊天恢复连接、输入可用，公网首页 HTTP 200，助手和桌面进程仍存在。结束时进程仍在不代表过程峰值或长时间稳定。结果 `/private/tmp/codex-stable36-list-check.json`。
+
+stable36 延长等待复验：上述 16 条超时中，除已知旧锁的礼品卡外，其余 15 条各等待最多 35 秒，均实时连接且输入可用；耗时 1.607 至 32.921 秒，多条约 22 至 25 秒。结果 `/private/tmp/codex-stable36-timeout-recheck.json`。这是分轮结果，不代表其余 31 条或整体速度通过。
+
+stable36 列表补测：展开两个显示更多控件后，对此前 31 条点击失败的聊天逐条重新选择并等待最多 35 秒，31 条均实时连接且输入可用；总耗时中位数 21.812 秒，最大 35.065 秒（包括点击耗时）。结果 `/private/tmp/codex-stable36-click-recheck.json`。结合首次 6 条和延长等待复验的 15 条，53 条中 52 条在 stable36 分轮曾就绪，礼品卡旧锁未解除；不是同一轮 53 条通过。测试结束时 Desktop、助手及其 runtime 进程均存在，未采集过程峰值，不能据此证明长期资源稳定。全局 IPC 查无 owner 的两次随机只读探测约 10.014 秒；原生 router 等待所有候选响应或超时，但目前未能将静默客户端映射到进程。
+
+stable36 转圈连续验收：专用 C 从 H5 发起一轮执行 `sleep 8` 的只读验收请求，桌面记录回合 `01a1be73-8adb-75d2-a1d9-b3a8a3e07fc2` 已完成，终端退出码 0，最终回复 `SPINNER_DONE_20261109`。200 ms 页面采样捕获到转圈从隐藏变为显示，随后状态为 active，回合完成后转圈隐藏并回到 idle；状态与图标之间有约 0.4 至 0.6 秒过渡。此项为选中聊天的一次真实回合，不代表后台未读蓝点同步通过。
+
+stable36 于 2026-11-09 发布：事务返回 `FULL_DEPLOYED`，relay 已重启，配对数据库未替换；公网 HTML SHA-256 `934f0b8e81aaee5c3714d8a0106115a69a0b1e9029f836119787ea96b1fcb743`，JS `57fdafe088d16090bf55bf6bda51f14dc6d7b1cb1ed44095e277319ec391302f`。服务器备份 `/opt/codex-hub-paired/backups/stable36-20261109-114628-2024158`。首次发布在重启后的公网检查遇到 502 并自动回滚，复核服务 active、relay 与 HTML 恢复 stable34；发布事务增加短暂网关错误的有限重试后重新发布成功。H5 刷新后本机助手显示已连接，专用 D 可显示历史、GPT-6.1-Sol/low 和可用输入框；该样本不能代表全部聊天通过。
+
+stable36 补测：专用 C 切换后显示已连接、历史和 GPT-6.1 Terra/medium，输入框可用。只读 IPC 对专用 D 的 owner discovery 在 D 选中时约 5 ms、切换到 C 后约 8 ms 均发现 owner；不满足无 owner 恢复测试的前置条件。现有隔离回归覆盖超时和取消，不能作为线上慢恢复与取消的通过证据。
+
 stable35 本机版本已安装：owner discovery 等待 native 10 秒窗口，已连接总线后的超时、断连或协议错误不再触发未知 owner 的竞争恢复；明确无 owner 和桌面离线路径保留，旧 recovery 锁不变。61 项定向回归通过，安装文件 hash 与源码一致。真实随机不存在聊天只读查询约 10006 ms 返回 `no-client-found`，pending=0。礼品卡实测也收到 `no-client-found` 而非 5 秒超时，但仍 locked、未实时连接，历史草稿可编辑不等于可发送。随后 D 约 300 ms 实时连接、551 ms 输入可用；不能扩展为全列表通过。
 
 stable34 礼品卡复测：2026-11-09 02:35:50 UTC 选择后 20 秒未实时连接，旧 recovery 仍 locked；历史草稿输入框曾可编辑，这不是实时连接或消息可发送的证明。匿名 stream ID `c71624ea-4dc0-4e34-89f4-d481972fe823`，本机日志反复出现 `thread-owner-discovery timed out`。独立只读 IPC 探测显示原生 client 定向查询 2 ms 返回 no-client-found，而全 client 查询约 10008 ms 才返回 no-client-found；助手默认等待 5 秒。已知至少一个候选没有及时回应，但未能确定其身份。此结果不能证明旧未知 resume 已结束，也不能安全清锁。

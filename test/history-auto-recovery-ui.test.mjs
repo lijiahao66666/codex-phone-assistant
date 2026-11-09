@@ -54,6 +54,71 @@ test('recovery waits through the relay 60 s budget and accepts a result after th
   f.advanceRequestTime(10000);assert.equal(signal.aborted,false,'settled request clears its timeout');
 });
 
+test('accepted recovery retains an active attachment and does not disturb a newer one',async()=>{
+  for (const replacement of [false,true]) {
+    let release;
+    const f=await fixture(url=>url.endsWith('/recover')?new Promise(resolve=>{release=()=>resolve(response({status:'accepted'},202));}):undefined);
+    f.run("let reconnects=0;connect=async()=>{reconnects++};recoveryStream={threadId:selectedId,controller:new AbortController()}");
+    const original=f.run('recoveryStream'), work=f.run('recoverSelectedChat()');await tick();
+    if(replacement) f.run('recoveryStream={threadId:selectedId,controller:new AbortController()}');
+    const current=f.run('recoveryStream');release();await work;
+    assert.equal(f.run('reconnects'),0);assert.equal(f.run('recoveryStream'),current);
+    assert.equal(original.controller.signal.aborted,false);assert.equal(current.controller.signal.aborted,false);
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,1);
+  }
+});
+
+test('automatic recovery reaches live state on the original history event stream',async()=>{
+  let releaseRecovery,deliver;
+  const f=await fixture(url=>{
+    if(url.endsWith('/events'))return {ok:true,status:200,body:{getReader:()=>({read:()=>new Promise(resolve=>{deliver=resolve;})})}};
+    if(url.endsWith('/recover'))return new Promise(resolve=>{releaseRecovery=()=>resolve(response({status:'accepted'},202));});
+    return response({locked:false});
+  },{manualRecoveryTimers:true});
+  const emit=(type,conversation)=>deliver({value:new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify({conversation})}\n\n`),done:false});
+  f.run('connect=fixtureConnect;void connect(selectedId)');await tick();await tick();
+  try {
+    const session=f.run('active'),stream=f.run('recoveryStream');
+    emit('history',{id,title:'history',turns:[],requests:[],history:{complete:true}});
+    await tick();await tick();
+    assert.equal(f.fireRecoveryTimer(),true);
+    await tick();await tick();
+    assert.equal(typeof releaseRecovery,'function');
+    releaseRecovery();await tick();await tick();
+    assert.equal(f.run('recoveryStream'),stream);
+    assert.equal(f.run('active'),session);assert.equal(session.signal.aborted,false);
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/events')).length,1);
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,1);
+    assert.equal(f.run('recoveryBlocksWrite()'),true);
+    assert.equal(f.removes.length,0);
+    emit('state',{id,title:'live',runtimeStatus:'idle',turns:[],requests:[],history:{complete:true}});
+    await tick();await tick();
+    assert.equal(f.run('connected'),true);
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'),null);
+    assert.equal(f.removes.length,1);
+    assert.equal(f.run('recoveryBlocksWrite()'),false);
+    assert.equal(f.nodes.get('#message').disabled,false);
+  } finally { f.run('active?.abort()'); }
+});
+
+test('accepted recovery reconnects only a still-current disconnected scope with no valid stream',async()=>{
+  for (const scenario of ['missing','aborted','connected','scope','selection','cancelled']) {
+    let release;
+    const f=await fixture(url=>url.endsWith('/recover')?new Promise(resolve=>{release=()=>resolve(response({status:'accepted'},202));}):undefined);
+    f.run("let reconnects=0;connect=async()=>{reconnects++};recoveryStream={threadId:selectedId,controller:new AbortController()}");
+    const work=f.run('recoverSelectedChat()');await tick();
+    if(scenario==='missing') f.run('recoveryStream=null');
+    if(scenario==='aborted') f.run('recoveryStream.controller.abort()');
+    if(scenario==='connected') f.run('connected=true;recoveryStream=null');
+    if(scenario==='scope') f.run('historyScopeGeneration++;recoveryStream=null');
+    if(scenario==='selection') f.run("selectedId='22222222-2222-4222-8222-222222222222';recoveryStream=null");
+    if(scenario==='cancelled') f.run('activeRecoveryAborts.get(recoveryKey(currentDeviceId,selectedId)).abort();recoveryStream=null');
+    release();await work;
+    assert.equal(f.run('reconnects'),['missing','aborted'].includes(scenario)?1:0,scenario);
+    assert.equal(f.requests.filter(r=>r.url.endsWith('/recover')).length,1);
+  }
+});
+
 test('the 70 s recovery client deadline retains the unknown attempt and never redispatches it',async()=>{
   let signal;
   const f=await fixture((url,options)=>url.endsWith('/recover')?new Promise((resolve,reject)=>{
