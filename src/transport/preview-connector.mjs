@@ -648,14 +648,19 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (msg.type === 'write') {
         const id = msg.conversationId;
         const answer = beginWrite(msg);
+        const rejectWrite = reason => { trace('write', 'rejected', { ...(typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id) ? { thread: id } : {}), reason }); return answer('unavailable'); };
         const attachmentIds = msg.attachmentIds ?? (msg.attachmentId ? [msg.attachmentId] : []);
-        if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) || typeof msg.text !== 'string' || !Array.isArray(attachmentIds) || attachmentIds.length > 4 || new Set(attachmentIds).size !== attachmentIds.length || attachmentIds.some(value => typeof value !== 'string' || !/^[0-9a-f-]{36}$/i.test(value)) || (!msg.text.trim() && !attachmentIds.length) || Buffer.byteLength(msg.text) > 32768) return answer('unavailable');
+        if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) || typeof msg.text !== 'string' || !Array.isArray(attachmentIds) || attachmentIds.length > 4 || new Set(attachmentIds).size !== attachmentIds.length || attachmentIds.some(value => typeof value !== 'string' || !/^[0-9a-f-]{36}$/i.test(value)) || (!msg.text.trim() && !attachmentIds.length) || Buffer.byteLength(msg.text) > 32768) return rejectWrite('invalid');
         const session = [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === msg.deviceId);
         const ownerId = session?.conversation?.ownerId, revision = session?.revision;
-        if (!session || typeof ownerId !== 'string' || !Number.isSafeInteger(revision) || writes.has(id) || models?.isLocked(id) || recoveryLocked(id)) return answer('unavailable');
+        if (!session) return rejectWrite('session-unavailable');
+        if (typeof ownerId !== 'string' || !Number.isSafeInteger(revision)) return rejectWrite('invalid-session');
+        if (writes.has(id)) return rejectWrite('write-pending');
+        if (models?.isLocked(id)) return rejectWrite('model-locked');
+        if (recoveryLocked(id)) return rejectWrite('recovery-locked');
         const previous = sentRevisions.get(id);
-        if (previous && previous.ownerId === ownerId && previous.revision >= revision) return answer('unavailable');
-        if (!previous && sentRevisions.size >= 1024) return answer('unavailable');
+        if (previous && previous.ownerId === ownerId && previous.revision >= revision) return rejectWrite('revision-guard');
+        if (!previous && sentRevisions.size >= 1024) return rejectWrite('guard-capacity');
         writes.add(id); sentRevisions.set(id, { ownerId, revision });
         const claimed = []; let submitted = false, finishClaims;
         try {
@@ -682,7 +687,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           } else { submitted = true; await session.sendText(msg.text); }
           answer('accepted');
         }
-        catch (error) { if (!submitted || ['unavailable', 'unsupported-state'].includes(error?.code)) { for (const item of claimed) await item.store.discardRejected(item.scope).catch(() => {}); sentRevisions.delete(id); answer('unavailable'); } else answer('unknown'); }
+        catch (error) { if (!submitted || ['unavailable', 'unsupported-state'].includes(error?.code)) { for (const item of claimed) await item.store.discardRejected(item.scope).catch(() => {}); sentRevisions.delete(id); rejectWrite(submitted ? 'session-rejected' : 'pre-dispatch'); } else answer('unknown'); }
         finally { finishClaims?.(); writes.delete(id); }
         return;
       }

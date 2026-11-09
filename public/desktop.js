@@ -2264,6 +2264,8 @@ async function loadDevices() {
   } catch { return false; /* Local development mode has no device endpoint. */ }
 }
 const liveTaskStatus = new Map();
+const projectStatusGroups = new Map();
+let projectStatusCursor = 0;
 let sidebarEvents, sidebarWatchdog, sidebarEventGeneration = 0, sidebarStatusSnapshot = null;
 function taskStatusIsActive(state) {
   return ['active', 'inProgress', 'running', 'busy', 'processing'].includes(state);
@@ -2291,9 +2293,23 @@ function applySidebarStatuses() {
     const observed = sidebarStatusSnapshot?.get(task.dataset.id) ?? task.dataset.status;
     setTaskIndicator(marker, liveTaskStatus.get(task.dataset.id) === 'active' ? 'active' : statusHandovers.has(task.dataset.id) ? 'checking' : observed);
   }
+  applyProjectStatuses();
+}
+function applyProjectStatuses() {
+  for (const { tasks, indicator } of projectStatusGroups.values()) {
+    const states = tasks.map(task => liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : sidebarStatusSnapshot?.get(task.id) ?? task.status?.type ?? task.status ?? 'unknown');
+    const state = states.some(taskStatusIsActive) ? 'active' : states.some(value => value !== 'idle') ? 'checking' : 'idle';
+    setTaskIndicator(indicator, state);
+    indicator.className += ' project-status';
+    indicator.title = state === 'active' ? '目录内有任务进行中' : state === 'checking' ? '目录任务状态更新中' : '';
+    indicator.setAttribute('aria-label', indicator.title);
+  }
+}
+function invalidateProjectStatuses() {
+  for (const group of projectStatusGroups.values()) for (const task of group.tasks) task.status = 'unknown';
 }
 function acceptSidebarStatuses(value) {
-  // The observer also retains running tasks outside the four visible slots.
+  // The observer also retains running tasks outside the visible slots.
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 1024 || Object.entries(value).some(([id, state]) => !uuid.test(id) || !['active', 'idle', 'unknown'].includes(state))) return;
   sidebarStatusSnapshot = new Map(Object.entries(value));
   for (const [id, state] of sidebarStatusSnapshot) if (state === 'active' || state === 'idle') clearStatusHandover(id);
@@ -2301,11 +2317,14 @@ function acceptSidebarStatuses(value) {
     const state = sidebarStatusSnapshot.get(task.dataset.id);
     if (state) task.dataset.status = state;
   }
+  for (const group of projectStatusGroups.values()) for (const task of group.tasks) task.status = value[task.id] ?? (liveTaskStatus.get(task.id) === 'active' ? 'active' : 'unknown');
   applySidebarStatuses();
 }
 function stopSidebarStatuses() {
   ++sidebarEventGeneration; clearTimeout(sidebarWatchdog); sidebarEvents?.abort(); sidebarEvents = undefined;
-  sidebarStatusSnapshot = new Map(); applySidebarStatuses();
+  sidebarStatusSnapshot = new Map();
+  invalidateProjectStatuses();
+  applySidebarStatuses();
 }
 function connectSidebarStatuses({ allowSelected = false, attempt = 0 } = {}) {
   stopSidebarStatuses();
@@ -2356,7 +2375,7 @@ function connectSidebarStatuses({ allowSelected = false, attempt = 0 } = {}) {
       }
     } catch {
       if (!isCurrent()) return;
-      sidebarStatusSnapshot = new Map(); applySidebarStatuses(); clearTimeout(sidebarWatchdog);
+      sidebarStatusSnapshot = new Map(); invalidateProjectStatuses(); applySidebarStatuses(); clearTimeout(sidebarWatchdog);
       sidebarWatchdog = setTimeout(reconnect, Math.min(30000, 1000 * 2 ** Math.min(retryAttempt, 5))); sidebarWatchdog?.unref?.();
     } finally {
       controller.signal.removeEventListener('abort', cancelReader);
@@ -2382,6 +2401,7 @@ function beginStatusHandover(id) {
   }
   const timer = setTimeout(() => { statusHandovers.delete(id); updateLiveTaskStatus(id, 'unknown'); }, 30000);
   timer?.unref?.(); statusHandovers.set(id, timer);
+  applyProjectStatuses();
 }
 function chevronIcon() {
   const icon = element('span', 'chevron-icon');
@@ -2398,6 +2418,8 @@ function updateLiveTaskStatus(id, status) {
     const marker = task.querySelector?.('.task-active');
     setTaskIndicator(marker, taskStatusIsActive(status) || taskStatusIsActive(sidebarStatusSnapshot?.get(id)) ? 'active' : 'idle');
   }
+  for (const group of projectStatusGroups.values()) for (const task of group.tasks) if (task.id === id) task.status = taskStatusIsActive(status) ? 'active' : status === 'idle' ? 'idle' : 'unknown';
+  applyProjectStatuses();
 }
 function renderTask(task) {
   if (!task || !uuid.test(task.id)) return null;
@@ -2428,7 +2450,8 @@ function renderGroup(key, name, tasks, recent = false, initialExpanded = recent)
   const icon = element('span', recent ? 'group-chevron' : 'folder-icon', '');
   icon.setAttribute('aria-hidden', 'true');
   if (!recent) icon.innerHTML = '<svg class="folder-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4l2 3h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/></svg><svg class="folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18V6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2"/><path d="M3 18l2-6a2 2 0 0 1 2-1.4h14a1 1 0 0 1 .9 1.4l-2.3 6.5A2 2 0 0 1 17.7 20H5a2 2 0 0 1-2-2Z"/></svg>';
-  heading.append(icon, element('span', 'project-name', name), chevronIcon());
+  const projectIndicator = element('span', 'task-active project-status');
+  heading.append(icon, element('span', 'project-name', name), projectIndicator, chevronIcon());
   const contents = element('div', 'project-contents');
   contents.hidden = collapsed;
   heading.addEventListener('click', () => {
@@ -2439,6 +2462,8 @@ function renderGroup(key, name, tasks, recent = false, initialExpanded = recent)
     scheduleVisibleStatusRefresh();
   });
   const valid = tasks.filter(task => task && uuid.test(task.id));
+  projectStatusGroups.set(key, { heading, tasks: valid.map(task => ({ ...task })), indicator: projectIndicator });
+  applyProjectStatuses();
   const more = element('button', 'show-more');
   more.type = 'button';
   function renderItems() {
@@ -2491,7 +2516,27 @@ function visibleStatusIds() {
     if (rect.width > 0 && rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom &&
         rect.right > 0 && rect.left < window.innerWidth && rect.bottom > 0 && rect.top < window.innerHeight && uuid.test(task.dataset.id)) ids.push(task.dataset.id);
   }
-  return [...new Set(ids)].slice(0, 4);
+  const visibleGroups = [...projectStatusGroups.values()].filter(({ heading }) => {
+    const rect = heading.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom && rect.right > 0 && rect.left < window.innerWidth && rect.bottom > 0 && rect.top < window.innerHeight;
+  });
+  const grouped = [...new Set(visibleGroups.flatMap(group => group.tasks.map(task => task.id)))];
+  const knownRunning = new Set(visibleGroups.flatMap(group => group.tasks.filter(task => taskStatusIsActive(task.status?.type ?? task.status)).map(task => task.id)));
+  const running = grouped.filter(id => liveTaskStatus.get(id) === 'active' || sidebarStatusSnapshot?.get(id) === 'active' || knownRunning.has(id));
+  const priority = [...new Set([...statusHandovers.keys(), ...running, ...(uuid.test(selectedId || '') ? [selectedId] : [])])];
+  const visible = [...new Set(ids)].filter(id => !priority.includes(id));
+  const hidden = grouped.filter(id => !priority.includes(id) && !visible.includes(id));
+  // Folded directories must keep observing their children. Reserve a bounded
+  // rotating share for hidden children while keeping confirmed running tasks.
+  const selected = [...priority, ...visible.slice(0, hidden.length ? Math.max(0, 24 - priority.length) : 32)];
+  const remaining = [...visible.filter(id => !selected.includes(id)), ...hidden];
+  const capacity = Math.max(0, 32 - selected.length);
+  if (remaining.length) {
+    const start = projectStatusCursor % remaining.length;
+    for (let index = 0; index < Math.min(capacity, remaining.length); index++) selected.push(remaining[(start + index) % remaining.length]);
+    if (remaining.length > capacity) projectStatusCursor = (start + capacity) % remaining.length;
+  }
+  return [...new Set(selected)].slice(0, 32);
 }
 let listRequestGeneration = 0;
 let listLoadInFlight = null;
@@ -2638,6 +2683,7 @@ function invalidateThreadList() {
   listLoadInFlight = null;
   lastVisibleStatusKey = '';
   pendingStatusRefreshes = 0;
+  projectStatusGroups.clear(); projectStatusCursor = 0;
   liveTaskStatus.clear();
   for (const id of statusHandovers.keys()) clearStatusHandover(id);
   projectList.replaceChildren(element('p', 'list-status', '正在加载任务'));
@@ -2664,6 +2710,7 @@ async function loadThreads() {
   return request.promise;
 }
 function renderThreadList(data) {
+  projectStatusGroups.clear();
   const fragment = document.createDocumentFragment();
   for (const project of data.projects) {
     if (!project || !Array.isArray(project.threads)) continue;
@@ -3661,7 +3708,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   if (currentDeviceId) recoveryChecks.delete(recoveryKey(currentDeviceId, id));
   let watchdog, assembler, receivedView = false, receivedModelState = false;
   const clearWatchdog = () => { clearTimeout(watchdog); watchdog = undefined; };
-  current.signal.addEventListener('abort', () => { diagnostic.close('cancelled'); if (currentConnectionDiagnostic === diagnostic) currentConnectionDiagnostic = null; clearWatchdog(); assembler?.cancel(); if (active === current) { sidebarStatusSnapshot = new Map(); applySidebarStatuses(); } }, { once: true });
+  current.signal.addEventListener('abort', () => { diagnostic.close('cancelled'); if (currentConnectionDiagnostic === diagnostic) currentConnectionDiagnostic = null; clearWatchdog(); assembler?.cancel(); if (active === current) { sidebarStatusSnapshot = new Map(); invalidateProjectStatuses(); applySidebarStatuses(); } }, { once: true });
   function disconnected() {
     if (current.signal.aborted || active !== current) return;
     diagnostic.close('disconnected');
@@ -3714,7 +3761,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   resetWatchdog();
   try {
     diagnostic.mark('fetch');
-    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1', 'x-codex-staged-preview': '1' } });
+    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1' } });
     if (current.signal.aborted || active !== current) return;
     diagnostic.mark('headers'); diagnostic.correlate(response.headers?.get?.('x-codex-stream-id'));
     if (response.status === 401 || response.status === 403) { const message = await responseError(response, '配对状态不可用'); if (active !== current || current.signal.aborted) return; clearRecentViews(); current.abort(); fail(message); return; }

@@ -1,5 +1,29 @@
 # Codex 手机助手 stable41 验收报告
 
+## stable45 最新进度
+
+398/398 完整隔离回归通过，日志 `/private/tmp/codex-stable45-full-tests.log`。已修复前 4 条观察限制、折叠目录汇总、恢复后 revision 回退导致的 409，以及未使用 preview 的重复传输。详细行为、实机样本和性能未结项见 [stable45 说明](stable45-release-notes-2026-11-09.md)。本节更新优先于下面历史阶段的待修描述。
+
+F 的 409 已通过实机诊断确定为 revision-guard，而非仅隔离推测：同 owner 释放后恢复，源 revision 重置；修复源头高水位后，两次真实发送分别成功，且原生用户请求各一条。未知回执仍不自动重发，不新增跨设备或跨重启幂等保证。
+
+stable45 静态备份 `/opt/codex-hub-paired/backups/stable45-20261109-195612-2147055`。JS SHA-256 `efdc6efbd1d63376363d7ed7bd8f9fd985b8987bfb7333b4bf501d5c519d85ed`；CSS `89c109fec370de497d7efdf10ea6e67683bbadc8d1e9f790e16cb60f1756998a`；HTML `673e3b6981418e518f1a372691a21eaa4ab55e416cc411a40017e005d3de4f0d`。本机备份 `/Applications/codex手机助手-before-stable45-20261109.app`。
+
+实机证据：`/private/tmp/codex-stable45-switch-samples.json`、`/private/tmp/codex-stable45-transfer-probe.json`、`/private/tmp/codex-stable45-folded-projects.png`。长会话最新约 7.7 秒样本仍未优化达标，不以早期约 0.4 秒热连接样本替代。
+
+## stable43 后续核对
+
+stable40 前端基线为 `07c2643`。到 stable43 的改动涉及连接时只读预览、设备作用域、后台状态流、停止和消息队列，以及消息身份与历史顺序。因此 stable40 的快速切换、转圈、停止、附件和双向消息实测不能直接作为 stable43 通过的证据。两版 CSS 未变，但动态控件和状态仍需在最终版本实测。
+
+后续隔离复跑 `test/stream-window.test.mjs`、`test/stream-diagnostics-transport.test.mjs` 和 `test/stream-diagnostics-ui.test.mjs`，15/15 通过，覆盖历史窗口、快速切换取消旧连接、分片校验以及预览不能提前开放写入。这些测试不能替代真实桌面和 H5 双向操作。stable43 新建聊天首发、桌面输入同步、后台转圈、停止、附件及模型控件仍需最终版本的对应实测。
+
+配对隔离补充核对：新版 H5 测试覆盖设备切换后的旧请求、草稿和迟到响应；两模拟电脑的 HTTP/WebSocket 探针覆盖列表、发送、事件流和错误设备等情况。服务端为兼容旧客户端，仅在请求携带 `x-codex-expected-device` 时检查该标识，不能把新版页面的保护结论推广到长期未刷新的旧标签页。真实两台电脑、多标签及上传或审批进行中的设备切换尚未完成端到端验证；以上边界不等同于已证实发生串消息。
+
+stable43 后续真实样本：H5 创建专用聊天 G（`01a1bfeb-8f29-73d0-b7d6-28b303e5fd7e`），首条消息与回复在 H5 显示，随后在桌面聊天列表及原生记录中核对一致；未测量列表出现的精确延迟。G 的第二条消息和回复也在两端记录一致，H5 DOM 中标题、列表、表格和代码块均存在，当前浏览器视口无整页横向溢出；不代表真实手机或所有消息类型已验收。
+
+专用 F 由只读历史恢复到已连接后，发送一次 Markdown 验收消息，H5 显示 `发送失败 (409)`，原生最近记录未见该消息；未自动重试。日志没有具体拒绝分支，原因未确认。隔离探针另行证实，同一 owner 的重连 revision 若回退，进程内旧 revision 保护可能拒绝后续发送；它与 F 的现象相符，但尚不能据此确定 F 的根因。修复需同时验证写入回执丢失时的防重复保护。
+
+LocalOwner 隔离测试已复现 follower 离开、收到 unsubscribe 确认并恢复后，同一 sourceClientId 的 revision 从大于 1 回到 1；另一个 H5 测试模拟远端接受后响应丢失，确认消息保留 unknown 且不自动重发。相关两文件 22/22 通过。G 两次后台短任务均在原生记录完成；第一次切走时观察到“状态更新中”，完成后标记消失，但未可靠采到中间运行标记，后台转圈完整过程不能记为通过。
+
 状态：**验收进行中，尚未宣布完整稳定版通过。**
 
 2026-11-09 stable43 消息和历史修复已上线：本机助手保留实时追加消息、按可信消息身份识别首条回声；H5 保持历史与实时消息的顺序并按 ID 合并。完整隔离回归 389/389 PASS，日志 `/private/tmp/codex-stable43-final-full-tests.log`；此前高负载完整测试两次为 388/389，均因测试子进程初始化被设置为 60 ms 超时，已将初始化预算单独设为 5 秒并保留被测请求的 60 ms 超时。静态事务及失败自动回滚演练通过，公网服务器未重启、未修改数据库，备份 `/opt/codex-hub-paired/backups/stable43-20261109-172350-2108006`；JS SHA-256 `58b4d005e268d1196b040526c4e35de3f93b1d5e1b1adbbf6faa8791c4d7a80b`，HTML `db1538c7f2f259069f98e4426777e6bdd632cfafb1ae0bd983f8a09953c57300`。本机助手严格签名校验通过，更新前版本备份 `/Applications/codex手机助手-before-stable43-20261109.app`，桌面 Codex 在该次受控更新中保持运行。

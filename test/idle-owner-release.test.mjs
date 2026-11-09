@@ -54,6 +54,26 @@ test('idle release gates new writes and follower controls, retaining ownership u
   }
 });
 
+test('acknowledged idle release and resume advance the same local owner stream revision', async () => {
+  const f = await fixture(page(), { graceMs: 30 });
+  try {
+    await f.resume();
+    await departed(f);
+    const before = f.snapshots().at(-1);
+    assert.ok(before.params.change.revision > 1);
+    await until(() => unsubscribe(f).length === 1, 'unsubscribe dispatch');
+    f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
+    await until(() => f.local.releasedThreads.has(threadId), 'acknowledged release');
+    const count = f.snapshots().length;
+    await f.local.resume(threadId);
+    await until(() => f.snapshots().length > count, 'resumed snapshot');
+    const after = f.snapshots().at(-1);
+    assert.equal(typeof before.sourceClientId, 'string');
+    assert.equal(after.sourceClientId, before.sourceClientId);
+    assert.equal(after.params.change.revision, before.params.change.revision + 1);
+  } finally { await f.close(); }
+});
+
 test('all physical followers must leave and a late follow cancels the grace period', async () => {
   const f = await fixture(page(), { graceMs: 50 });
   try {

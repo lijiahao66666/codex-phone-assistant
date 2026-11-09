@@ -202,6 +202,8 @@ function createDesktopIpcLiveOwner({
   // baseRevision matches their last-seen revision, and load-complete-history
   // waits for the snapshot carrying the returned revision.
   const streamRevisionsByThreadId = new Map();
+  // A released thread can later resume under the same owner identity.
+  let streamRevisionHighWater = 0;
   const followerClientIdsByThreadId = new Map();
   const idleReleaseCandidates = new Map();
   const releasingThreadIds = new Set();
@@ -1315,7 +1317,8 @@ function createDesktopIpcLiveOwner({
     if (shouldDelayInitialSnapshotForHistory(threadId)) {
       return false;
     }
-    const currentRevision = streamRevisionsByThreadId.get(threadId) ?? 0;
+    const currentRevision = streamRevisionsByThreadId.get(threadId) ?? streamRevisionHighWater;
+    if (!Number.isSafeInteger(currentRevision) || currentRevision >= Number.MAX_SAFE_INTEGER) return false;
     const previousState = lastBroadcastStatesByThreadId.get(threadId) || null;
     if (!forceSnapshot && previousState) {
       // Diff straight against the live state: every patch value is deep-cloned
@@ -1341,6 +1344,7 @@ function createDesktopIpcLiveOwner({
         },
       })) {
         streamRevisionsByThreadId.set(threadId, currentRevision + 1);
+        streamRevisionHighWater = Math.max(streamRevisionHighWater, currentRevision + 1);
         // The baseline advances by replaying the emitted patches (their values
         // are already private clones); a full clone happens only if that fails.
         if (!applyPatchesToBaselineState(previousState, patches)) {
@@ -1364,6 +1368,7 @@ function createDesktopIpcLiveOwner({
       },
     })) {
       streamRevisionsByThreadId.set(threadId, currentRevision + 1);
+      streamRevisionHighWater = Math.max(streamRevisionHighWater, currentRevision + 1);
       lastBroadcastStatesByThreadId.set(threadId, cloneJSON(conversationState));
       return true;
     }

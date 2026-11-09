@@ -545,12 +545,12 @@ test('new chats without older history do not show a paging button or partial-his
   assert.equal(f.run('historyCanLoad'),false);assert.equal(f.run('loadEarlier.hidden'),true);assert.equal(f.nodes.get('#history').textContent,'');
 });
 
-test('connecting negotiates recent history windows and staged preview before reading events',async()=>{
+test('connecting negotiates recent history windows without an unconsumed staged preview',async()=>{
   const f=await fixture(url=>url.endsWith('/events')?new Promise(()=>{}):undefined);
   f.run('connect=fixtureConnect');
   f.run('void connect(selectedId)');await tick();
   const request=f.requests.find(r=>r.url.endsWith('/events'));assert.ok(request);
-  assert.equal(request.options.headers['x-codex-history-window'],'1');assert.equal(request.options.headers['x-codex-staged-preview'],'1');
+  assert.equal(request.options.headers['x-codex-history-window'],'1');assert.equal(request.options.headers['x-codex-staged-preview'],undefined);
   f.run('active?.abort()');
 });
 
@@ -573,6 +573,80 @@ test('visible sidebar rows are observed on desktop and excluded when the mobile 
   f.run(`projectList.append(renderTask({id:'${other}',title:'active'}));window.innerWidth=375;projectList.rect={top:0,bottom:700,left:-300,right:0,width:300,height:700};projectList.querySelector('.task').rect={top:100,bottom:136,left:-300,right:0,width:300,height:36}`);
   await f.run('loadThreads()');
   assert.deepEqual(JSON.parse(f.requests.filter(r=>r.url.endsWith('/api/threads')).at(-1).options.body).visibleThreads,[]);
+});
+
+test('visible running tasks below the first four rows are included without observing offscreen tasks',async()=>{
+  const ids=Array.from({length:9},(_,index)=>`${String(index+2).padStart(8,'0')}-2222-4222-8222-222222222222`);
+  const f=await fixture(async()=>response({projects:[],recent:[]}),{stubLoadThreads:false});
+  f.run(`selectedId='${id}';projectList.rect={top:0,bottom:700,left:0,right:250,width:250,height:700};`);
+  for(let index=0;index<ids.length;index++) f.run(`{const row=renderTask({id:'${ids[index]}',title:'task ${index}',status:'unknown'});row.rect={top:${100+index*80},bottom:${136+index*80},left:0,right:250,width:250,height:36};projectList.append(row);}`);
+  await f.run('loadThreads()');
+  const visible=JSON.parse(f.requests.filter(r=>r.url.endsWith('/api/threads')).at(-1).options.body).visibleThreads;
+  assert.deepEqual(visible,[id,...ids.slice(0,8)]);
+  assert.ok(visible.includes(ids[6]),'lower visible running task is watched');
+  assert.equal(visible.includes(ids[8]),false,'below-viewport task is not subscribed');
+});
+
+test('sidebar observation remains bounded even when many task rows share the viewport',async()=>{
+  const f=await fixture();
+  f.run(`selectedId=null;projectList.rect={top:0,bottom:700,left:0,right:250,width:250,height:700};for(let index=0;index<100;index++){const row=renderTask({id:String(index+2).padStart(8,'0')+'-2222-4222-8222-222222222222',title:'task',status:'unknown'});row.rect={top:100,bottom:136,left:0,right:250,width:250,height:36};projectList.append(row);}`);
+  assert.equal(f.run('visibleStatusIds().length'),32);
+  assert.equal(f.run('new Set(visibleStatusIds()).size'),32);
+});
+
+test('folded directory summary includes hidden child statuses and distinguishes unknown from running',async()=>{
+  const ids=Array.from({length:6},(_,index)=>`${String(index+2).padStart(8,'0')}-3333-4333-8333-333333333333`);
+  const f=await fixture();
+  f.run(`selectedId=null;projectList.append(renderGroup('project:summary','project',${JSON.stringify(ids.map((id,index)=>({id,title:'task',status:index===5?'active':'idle'})))},false,false))`);
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.hidden"),false);
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.dataset.status"),'active');
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.title"),'目录内有任务进行中');
+  f.run(`acceptSidebarStatuses(${JSON.stringify(Object.fromEntries(ids.map(id=>[id,'idle'])))})`);
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.hidden"),true);
+  f.run(`acceptSidebarStatuses(${JSON.stringify({[ids[0]]:'unknown'})})`);
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.dataset.status"),'checking');
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.title"),'目录任务状态更新中');
+  f.run(`updateLiveTaskStatus('${ids[5]}','active')`);
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.dataset.status"),'active');
+});
+
+test('visible folded directories keep observing hidden children while offscreen directories are excluded',async()=>{
+  const ids=Array.from({length:8},(_,index)=>`${String(index+2).padStart(8,'0')}-4444-4444-8444-444444444444`);
+  const offscreen='99999999-4444-4444-8444-444444444444';
+  const f=await fixture();
+  f.run(`selectedId=null;projectList.rect={top:0,bottom:700,left:0,right:250,width:250,height:700};projectList.append(renderGroup('project:visible','visible',${JSON.stringify(ids.map(id=>({id,title:'task',status:'unknown'})))},false,false));projectList.append(renderGroup('project:outside','outside',[{id:'${offscreen}',title:'outside',status:'unknown'}],false,false));for(const task of projectList.querySelectorAll('.task'))task.rect={top:0,bottom:0,left:0,right:0,width:0,height:0};projectStatusGroups.get('project:visible').heading.rect={top:100,bottom:138,left:0,right:250,width:250,height:38};projectStatusGroups.get('project:outside').heading.rect={top:800,bottom:838,left:0,right:250,width:250,height:38}`);
+  assert.deepEqual(Array.from(f.run('visibleStatusIds()')),ids);
+  assert.equal(f.run(`visibleStatusIds().includes('${offscreen}')`),false);
+});
+
+test('large folded directories rotate a bounded budget while retaining confirmed active children',async()=>{
+  const ids=Array.from({length:80},(_,index)=>`${String(index+2).padStart(8,'0')}-5555-4555-8555-555555555555`);
+  const active=ids.at(-1),f=await fixture();
+  f.run(`selectedId=null;projectList.rect={top:0,bottom:700,left:0,right:250,width:250,height:700};projectList.append(renderGroup('project:large','large',${JSON.stringify(ids.map(id=>({id,title:'task',status:id===active?'active':'unknown'})))},false,false));for(const task of projectList.querySelectorAll('.task'))task.rect={top:0,bottom:0,left:0,right:0,width:0,height:0};projectStatusGroups.get('project:large').heading.rect={top:100,bottom:138,left:0,right:250,width:250,height:38}`);
+  const observed=new Set();
+  for(let attempt=0;attempt<3;attempt++) {
+    const batch=Array.from(f.run('visibleStatusIds()'));
+    assert.ok(batch.length<=32);assert.ok(batch.includes(active));
+    for(const id of batch)observed.add(id);
+  }
+  assert.equal(observed.size,80);
+});
+
+test('directory status survives list rerender without changing selection and becomes unknown on disconnect',async()=>{
+  const data={projects:[{id:'folder',name:'folder',threads:[{id,title:'running',status:'unknown'}]}],recent:[]};
+  const f=await fixture();
+  f.run(`renderThreadList(${JSON.stringify(data)});acceptSidebarStatuses({'${id}':'active'})`);
+  assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.dataset.status"),'active');
+  f.run(`renderThreadList(${JSON.stringify(data)})`);
+  assert.equal(f.run('selectedId'),id);
+  assert.equal(f.run('projectStatusGroups.size'),1);
+  assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.dataset.status"),'active');
+  f.run('stopSidebarStatuses()');
+  assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.dataset.status"),'checking');
+  f.run(`acceptSidebarStatuses({'${id}':'idle'})`);
+  assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.hidden"),true);
+  f.run('invalidateThreadList()');
+  assert.equal(f.run('projectStatusGroups.size'),0);
 });
 
 test('sidebar SSE updates running indicators when retained tasks exceed the visible window',async()=>{

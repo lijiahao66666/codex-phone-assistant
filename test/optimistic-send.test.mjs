@@ -101,6 +101,21 @@ test('unknown message outcome blocks its queued successor and never automaticall
   assert.match(flattened(f.run('outgoingList')).map(n=>n.textContent).join('\n'),/发送结果未知/);
 });
 
+test('a lost response after remote acceptance remains unknown and is not resent',async()=>{
+  let accepted=0;
+  const f=await fixture(url=>{
+    if(url.endsWith('/messages')) { accepted++; throw new TypeError('connection lost after acceptance'); }
+  });
+  f.run("messageInput.value='first'");await f.submit();
+  f.run("messageInput.value='second'");await f.submit();await tick();
+  f.run(`syncOutgoingWithView({id:selectedId,turns:[{items:[{id:'remote-echo',type:'userMessage',text:'first'}]}]})`);
+  await f.run('runOutgoingQueue(selectedId)');await tick();
+  assert.equal(accepted,1);
+  assert.equal(f.requests.filter(r=>r.url.endsWith('/messages')).length,1);
+  assert.equal(f.run("outgoingMessages.get(outgoingScopeKey())[0].state"),'unknown');
+  assert.equal(f.run("outgoingMessages.get(outgoingScopeKey())[1].state"),'queued');
+});
+
 test('changing task does not leak local bubbles or dispatch an attachment into the new task',async()=>{
   let resolveStart;
   const f=await fixture((url,options)=>{
