@@ -24,7 +24,7 @@ async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers =
     const timer={unref(){}};recoveryTimers.set(timer,()=>fn(...args));return timer;
   };
   const fixtureClearTimeout=timer=>{if(!recoveryTimers.delete(timer)&&!handoverTimers.delete(timer)&&!requestTimers.delete(timer))clearTimeout(timer);};
-  const document={querySelector(key){if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
+  const document={listeners:{},addEventListener(type,fn){this.listeners[type]=fn;},querySelector(key){if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
   const store={read:async()=>null,reserve:async(...args)=>{reserves.push(args);return true;},remove:async(...args)=>{removes.push(args);return true;}};
   const context=vm.createContext({document,store,crypto:webcrypto,AbortController,URLSearchParams,TextDecoder,TextEncoder,Date,setTimeout:fixtureTimeout,clearTimeout:fixtureClearTimeout,localStorage:{getItem(){return null;},removeItem(){}},sessionStorage:{removeItem(){}},window:{addEventListener(){}},fetch:async(url,options={})=>{
     requests.push({url,options});return await handler?.(url,options)||response({projects:[],recent:[]});
@@ -546,6 +546,51 @@ test('list refresh retains the selected task project and only fills a placeholde
   assert.equal(f.nodes.get('#current-project').hidden,true);assert.equal(f.nodes.get('#current-project').value,'');
   f.run("selectedId=null;newDraft={projectId:'phone',pending:false,uncertain:false,attachments:[]};updateNewProjectOptions()");
   assert.equal(f.nodes.get('#current-project').hidden,false);assert.equal(f.nodes.get('#current-project').value,'phone');
+});
+
+test('list refresh keeps the pressed task attached until its click and then renders the latest list',async()=>{
+  const next='22222222-2222-4222-8222-222222222222';
+  let title='old';
+  const f=await fixture(url=>url==='/api/threads'?response({projects:[],recent:[{id:next,title}]}):undefined,{stubLoadThreads:false});
+  await f.run('loadThreads()');
+  const list=f.run('projectList'), pressed=list.querySelector('.task');
+  list.listeners.pointerdown({pointerId:7});
+  title='new';await f.run('loadThreads()');
+  assert.equal(list.querySelector('.task'),pressed);
+  f.run('document.listeners.pointerup({pointerId:7});document.listeners.click()');
+  pressed.listeners.click();
+  assert.equal(f.run('selectedId'),next);
+  await new Promise(resolve=>setTimeout(resolve,10));
+  assert.notEqual(list.querySelector('.task'),pressed);
+  assert.equal(list.querySelector('.task-title').textContent,'new');
+  assert.equal(f.run('selectedId'),next);
+});
+
+test('cancelled pointer applies latest data and authorization failure discards deferred data',async()=>{
+  let status=200,title='old';
+  const f=await fixture(url=>url==='/api/threads'?response({projects:[],recent:[{id,title}]},status):undefined,{stubLoadThreads:false});
+  await f.run('loadThreads()');const list=f.run('projectList'),old=list.querySelector('.task');
+  list.listeners.pointerdown({pointerId:1});title='new';await f.run('loadThreads()');
+  f.run('document.listeners.pointercancel({pointerId:1})');
+  await new Promise(resolve=>setTimeout(resolve,10));
+  assert.notEqual(list.querySelector('.task'),old);assert.equal(list.querySelector('.task-title').textContent,'new');
+  list.listeners.pointerdown({pointerId:2});title='stale';await f.run('loadThreads()');
+  status=401;await f.run('loadThreads()');
+  f.run('document.listeners.pointerup({pointerId:2});document.listeners.click()');
+  await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(list.querySelector('.task'),null);assert.equal(list.querySelector('.list-error').textContent,'配对状态不可用，请重新配对');
+});
+
+test('a show-more click survives a concurrent list update and the expanded state is retained',async()=>{
+  const recent=Array.from({length:6},(_,i)=>({id:`${String(i+1).padStart(8,'0')}-1111-4111-8111-111111111111`,title:`task ${i}`}));
+  const f=await fixture(url=>url==='/api/threads'?response({projects:[],recent}):undefined,{stubLoadThreads:false});
+  await f.run('loadThreads()');const list=f.run('projectList'),more=list.querySelector('.show-more');
+  assert.equal(list.querySelectorAll('.task').length,5);
+  list.listeners.pointerdown({pointerId:4});await f.run('loadThreads()');
+  assert.equal(list.querySelector('.show-more'),more);
+  f.run('document.listeners.pointerup({pointerId:4});document.listeners.click()');more.listeners.click();
+  await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(list.querySelectorAll('.task').length,6);assert.equal(f.run("expandedGroups.has('recent')"),true);
 });
 
 test('retryable list failures retain working task buttons and one notice until recovery',async()=>{

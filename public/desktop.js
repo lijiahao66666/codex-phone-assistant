@@ -2365,6 +2365,44 @@ function visibleStatusIds() {
 }
 let listRequestGeneration = 0;
 let listLoadInFlight = null;
+const listPointers = new Set();
+let listGesturePending = false, listGestureTimer, listGestureWatchdog, deferredListRender;
+function discardDeferredListRender() {
+  clearTimeout(listGestureTimer); listGestureTimer = undefined;
+  clearTimeout(listGestureWatchdog); listGestureWatchdog = undefined;
+  listPointers.clear(); listGesturePending = false; deferredListRender = undefined;
+}
+function flushDeferredListRender() {
+  clearTimeout(listGestureTimer); listGestureTimer = undefined;
+  if (listPointers.size) return;
+  clearTimeout(listGestureWatchdog); listGestureWatchdog = undefined;
+  listGesturePending = false;
+  const pending = deferredListRender; deferredListRender = undefined;
+  if (pending && pending.generation === listRequestGeneration && !pageSuspended && document.hidden !== true) renderThreadList(pending.data);
+}
+function finishListPointer(event, cancelled = false) {
+  if (!listPointers.delete(event.pointerId)) return;
+  if (!listPointers.size) {
+    clearTimeout(listGestureTimer);
+    listGestureTimer = setTimeout(flushDeferredListRender, cancelled ? 0 : 400);
+  }
+}
+projectList.addEventListener('pointerdown', event => {
+  clearTimeout(listGestureTimer); listGestureTimer = undefined;
+  listPointers.add(event.pointerId); listGesturePending = true;
+  clearTimeout(listGestureWatchdog);
+  listGestureWatchdog = setTimeout(() => { listPointers.clear(); flushDeferredListRender(); }, 15000);
+  listGestureWatchdog?.unref?.();
+});
+document.addEventListener?.('pointerup', event => finishListPointer(event), true);
+document.addEventListener?.('pointercancel', event => finishListPointer(event, true), true);
+document.addEventListener?.('click', () => {
+  if (listGesturePending && !listPointers.size) {
+    clearTimeout(listGestureTimer);
+    listGestureTimer = setTimeout(flushDeferredListRender, 0);
+  }
+}, true);
+window.addEventListener('blur', () => { listPointers.clear(); flushDeferredListRender(); });
 // Back off when the desktop peer is down so a dead bridge is not hammered.
 let listFailureStreak = 0;
 let listChangeTimer;
@@ -2462,6 +2500,7 @@ async function refreshHostStatus() {
   if (generation === hostStatusGeneration) { hostStatusTimer = setTimeout(refreshHostStatus, 20000); hostStatusTimer?.unref?.(); }
 }
 function invalidateThreadList() {
+  discardDeferredListRender();
   stopSidebarStatuses();
   clearTimeout(listRetryTimer);
   listRetryTimer = undefined;
@@ -2494,6 +2533,19 @@ async function loadThreads() {
   })();
   return request.promise;
 }
+function renderThreadList(data) {
+  const fragment = document.createDocumentFragment();
+  for (const project of data.projects) {
+    if (!project || !Array.isArray(project.threads)) continue;
+    fragment.append(renderGroup(`project:${project.id}`, project.name || '未命名项目', project.threads, false, project.expanded));
+  }
+  if (data.recent.length) fragment.append(renderGroup('recent', '最近', data.recent, true));
+  if (data.truncated === true) fragment.append(element('p', 'list-status', '任务较多，仅显示最近的部分任务'));
+  if (!fragment.childNodes.length) fragment.append(element('p', 'list-status', '暂无任务'));
+  const previousScroll = projectList.scrollTop;
+  projectList.replaceChildren(fragment);
+  if (Number.isFinite(previousScroll)) projectList.scrollTop = previousScroll;
+}
 async function fetchThreadList() {
   if (document.hidden === true || pageSuspended) return false;
   clearTimeout(listRetryTimer);
@@ -2525,19 +2577,8 @@ async function fetchThreadList() {
       if (typeof selected?.title === 'string' && selected.title.trim()) { selectedTitle = selected.title; title.textContent = selectedTitle; }
     }
     updateNewProjectOptions();
-    const fragment = document.createDocumentFragment();
-    for (const project of data.projects) {
-      if (!project || !Array.isArray(project.threads)) continue;
-      fragment.append(renderGroup(`project:${project.id}`, project.name || '未命名项目', project.threads, false, project.expanded));
-    }
-    if (data.recent.length) {
-      fragment.append(renderGroup('recent', '最近', data.recent, true));
-    }
-    if (data.truncated === true) fragment.append(element('p', 'list-status', '任务较多，仅显示最近的部分任务'));
-    if (!fragment.childNodes.length) fragment.append(element('p', 'list-status', '暂无任务'));
-    const previousScroll = projectList.scrollTop;
-    projectList.replaceChildren(fragment);
-    if (Number.isFinite(previousScroll)) projectList.scrollTop = previousScroll;
+    if (listGesturePending) deferredListRender = { data, generation };
+    else renderThreadList(data);
     if (visibleKey !== lastVisibleStatusKey) {
       lastVisibleStatusKey = visibleKey;
       pendingStatusRefreshes = visibleKey ? 2 : 0;
@@ -2552,7 +2593,7 @@ async function fetchThreadList() {
     notice.textContent = retry && !message.includes('正在重试') ? `${message}，正在重试` : message;
     if (retry && projectList.querySelector('.task')) {
       if (!projectList.querySelector('.list-error')) projectList.append(notice);
-    } else projectList.replaceChildren(notice);
+    } else { discardDeferredListRender(); projectList.replaceChildren(notice); }
     if (!(e instanceof TypeError)) showHomeError('list', message);
     if (retry) {
       listFailureStreak = Math.min(listFailureStreak + 1, 4);
@@ -3564,6 +3605,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   }
 }
 function showUnpaired() {
+  discardDeferredListRender();
   pairingAvailable = false;
   resetHistoryScope(true);
   stopSidebarStatuses(); pauseBackgroundPolling({ includePairing: false }); ++listRequestGeneration; ++hostStatusGeneration;
@@ -3614,11 +3656,11 @@ if (window.pairingReady) { status('连接中', 'connecting'); showConversationLo
 else startPairedHome();
 document.addEventListener?.('visibilitychange', () => {
   if (document.hidden !== true && !pageSuspended && (pairingAvailable || pairingWasReplaced)) void refreshPairingStatus();
-  if (document.hidden === true) pauseBackgroundPolling();
+  if (document.hidden === true) { discardDeferredListRender(); pauseBackgroundPolling(); }
   else if (!pageSuspended && pairingAvailable) { void loadThreads(); void refreshHostStatus(); }
   else if (!pageSuspended && window.pairingReady) void checkPairingStatus();
 });
-window.addEventListener('pagehide', () => { cancelPendingRender(); pageSuspended = true; stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; pauseBackgroundPolling(); for (const id of statusHandovers.keys()) clearStatusHandover(id); active?.abort(); });
+window.addEventListener('pagehide', () => { discardDeferredListRender(); cancelPendingRender(); pageSuspended = true; stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; pauseBackgroundPolling(); for (const id of statusHandovers.keys()) clearStatusHandover(id); active?.abort(); });
 window.addEventListener('pageshow', event => {
   if (!event.persisted) return;
   pageSuspended = false;
