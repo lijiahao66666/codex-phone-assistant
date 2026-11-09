@@ -414,7 +414,7 @@ async function scopedFetch(url, options = {}) {
   return response;
 }
 function resetHistoryScope(clearStored = false) {
-  cancelOutgoingForScopeChange(); historyRequest?.abort(); historyRequest = null; recordedHistory = null; historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
+  cancelOutgoingForScopeChange(); clearToolOutputEntries(); historyRequest?.abort(); historyRequest = null; recordedHistory = null; historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
 }
 // Unknown writes remain bound to their original device; switching never retries them.
 const deviceCreationDrafts = new Map(), deviceSubmissionGuards = new Map(), deviceConversationDrafts = new Map();
@@ -1181,6 +1181,129 @@ const expandedThinking = new Set();
 const expandedChanges = new Set();
 const filePreviewCache = new Map();
 const expandedCommands = new Set();
+const toolOutputEntries = new Map();
+const toolOutputCharacterLimit = 2 * 1024 * 1024;
+const toolOutputKey = (threadId, turnKey, itemId) => JSON.stringify([currentDeviceId || '', historyScopeGeneration, threadId, turnKey, itemId]);
+function abortToolOutputEntry(entry) {
+  entry.controller?.abort(); entry.controller = null; entry.loading = null;
+}
+function clearToolOutputEntries() {
+  for (const entry of toolOutputEntries.values()) abortToolOutputEntry(entry);
+  toolOutputEntries.clear();
+}
+function outputRefValue(item) {
+  const ref = item?.outputRef;
+  return ref && typeof ref.hash === 'string' && /^[a-f0-9]{64}$/.test(ref.hash) && Number.isSafeInteger(ref.bytes) && ref.bytes > 4096 ? ref : null;
+}
+function reconcileToolOutputRefs(view) {
+  const seen = new Set();
+  const turnCounts = new Map();
+  for (const turn of view?.turns || []) { const key = turn?.viewKey ?? turn?.id; turnCounts.set(key, (turnCounts.get(key) || 0) + 1); }
+  for (const turn of view?.turns || []) {
+    const turnKey = turn?.viewKey ?? turn?.id;
+    if (typeof turnKey !== 'string' || !turnKey || turnCounts.get(turnKey) !== 1) continue;
+    const items = turn.items || [];
+    const itemCounts = new Map();
+    for (const item of items) itemCounts.set(item?.id, (itemCounts.get(item?.id) || 0) + 1);
+    for (const item of items) {
+      const ref = item?.type === 'commandExecution' && typeof item.id === 'string' && item.id && itemCounts.get(item.id) === 1 ? outputRefValue(item) : null;
+      const key = toolOutputKey(view.id, turnKey, item?.id);
+      if (!ref) { if (toolOutputEntries.has(key)) { abortToolOutputEntry(toolOutputEntries.get(key)); toolOutputEntries.delete(key); } continue; }
+      seen.add(key);
+      const old = toolOutputEntries.get(key);
+      if (!old || old.hash !== ref.hash || old.bytes !== ref.bytes) {
+        if (old) abortToolOutputEntry(old);
+        toolOutputEntries.set(key, { key, threadId: view.id, turnKey, itemId: item.id, hash: ref.hash, bytes: ref.bytes, text: '', nextOffset: 0, loading: null, controller: null, error: null, needsReload: Boolean(old), windowStart: 0, receivedBytes: 0, holders: new Set() });
+      } else old.holders.clear();
+    }
+  }
+  for (const [key, entry] of toolOutputEntries) if (!seen.has(key)) { abortToolOutputEntry(entry); toolOutputEntries.delete(key); }
+}
+function updateToolOutputHolders(entry) { for (const holder of entry.holders) holder(); }
+function toolOutputSourceMatches(entry) {
+  if (!streamView) return true;
+  if (streamView.id !== entry.threadId) return false;
+  const matchingTurns = (streamView.turns || []).filter(turn => (turn.viewKey ?? turn.id) === entry.turnKey);
+  if (matchingTurns.length !== 1) return false;
+  const items = (matchingTurns[0].items || []).filter(item => item?.id === entry.itemId);
+  return items.length === 1 && items[0].type === 'commandExecution' && outputRefValue(items[0])?.hash === entry.hash;
+}
+async function loadToolOutputPage(entry, offset = entry.nextOffset) {
+  if (!entry || toolOutputEntries.get(entry.key) !== entry || entry.threadId !== selectedId || entry.key !== toolOutputKey(entry.threadId, entry.turnKey, entry.itemId) || !toolOutputSourceMatches(entry) || entry.loading !== null || entry.nextOffset !== offset || offset === null) return;
+  const controller = new AbortController();
+  entry.controller = controller; entry.loading = offset; entry.error = null; entry.needsReload = false;
+  const scopeGeneration = historyScopeGeneration, deviceId = currentDeviceId, threadId = selectedId, hash = entry.hash;
+  const current = () => toolOutputEntries.get(entry.key) === entry && entry.hash === hash && toolOutputSourceMatches(entry) && historyScopeGeneration === scopeGeneration && currentDeviceId === deviceId && selectedId === threadId && !controller.signal.aborted;
+  updateToolOutputHolders(entry);
+  try {
+    const params = new URLSearchParams({ turn: entry.turnKey, item: entry.itemId, hash, offset: String(offset) });
+    const response = await scopedFetch(`/api/threads/${encodeURIComponent(entry.threadId)}/tool-output?${params}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+    if (!response.ok) throw new Error(`tool output ${response.status}`);
+    const page = await response.json();
+    if (!current() || page?.threadId !== entry.threadId || page?.turnKey !== entry.turnKey || page?.itemId !== entry.itemId || page?.hash !== hash || page?.offset !== offset || typeof page.text !== 'string' || page.text.length > 16384 || !(page.nextOffset === null || (Number.isSafeInteger(page.nextOffset) && page.nextOffset > offset && page.nextOffset === offset + page.text.length))) throw new Error('invalid tool output page');
+    const text = entry.text + page.text;
+    const receivedBytes = entry.receivedBytes + new TextEncoder().encode(page.text).length;
+    if (page.nextOffset === null && receivedBytes !== entry.bytes) {
+      entry.text = ''; entry.nextOffset = 0; entry.windowStart = 0; entry.receivedBytes = 0;
+      throw new Error('tool output byte length mismatch');
+    }
+    if (page.nextOffset === null && entry.windowStart === 0 && text.length <= toolOutputCharacterLimit) {
+      const encoded = new TextEncoder().encode(text);
+      const digest = await crypto.subtle.digest('SHA-256', encoded);
+      const actualHash = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+      if (!current()) return;
+      if (encoded.length !== entry.bytes || actualHash !== hash) {
+        entry.text = ''; entry.nextOffset = 0; entry.windowStart = 0; entry.receivedBytes = 0;
+        throw new Error('tool output integrity mismatch');
+      }
+    }
+    // Continue through the entire output while retaining only one bounded window.
+    if (text.length > toolOutputCharacterLimit) { entry.text = page.text; entry.windowStart = offset; }
+    else entry.text = text;
+    entry.receivedBytes = receivedBytes; entry.nextOffset = page.nextOffset; entry.error = null;
+    // Keep loaded output bounded; evicted commands can be expanded again.
+    let cachedCharacters = [...toolOutputEntries.values()].reduce((sum, candidate) => sum + candidate.text.length, 0);
+    let cachedEntries = [...toolOutputEntries.values()].filter(candidate => candidate.text).length;
+    for (const candidate of toolOutputEntries.values()) {
+      if (cachedCharacters <= 2 * 1024 * 1024 && cachedEntries <= 16) break;
+      if (candidate === entry || candidate.loading !== null || !candidate.text) continue;
+      cachedCharacters -= candidate.text.length; cachedEntries--;
+      candidate.text = ''; candidate.nextOffset = 0; candidate.error = null; candidate.windowStart = 0; candidate.receivedBytes = 0; candidate.needsReload = true;
+      updateToolOutputHolders(candidate);
+    }
+  } catch (error) { if (current() && error?.name !== 'AbortError') entry.error = error; }
+  finally { if (entry.controller === controller) { entry.controller = null; entry.loading = null; } if (current()) updateToolOutputHolders(entry); }
+}
+function renderToolOutput(details, item, entry) {
+  const holder = element('div', 'command-output'); details.append(holder);
+  const render = () => {
+    holder.replaceChildren();
+    if (!entry) { holder.append(element('p', 'file-change-empty', '请连接电脑后展开查看命令输出')); return; }
+    if (entry.text) holder.append(element('pre', 'item-code command-output-text', entry.text));
+    const message = entry.loading !== null ? '正在加载命令输出…' : entry.error ? '命令输出加载失败，请重试' : entry.needsReload ? '输出已更新或缓存已释放，点击重新加载' : !entry.text && entry.nextOffset !== null ? `展开后加载命令输出（${Math.ceil(entry.bytes / 1024)} KB）` : '';
+    if (entry.windowStart > 0) holder.append(element('p', 'file-change-empty command-output-range', `当前显示第 ${entry.windowStart + 1}～${entry.windowStart + entry.text.length} 个字符`));
+    if (message) holder.append(element('p', 'file-change-empty command-output-status', message));
+    if (entry.loading === null && entry.nextOffset !== null && (entry.error || entry.text || entry.needsReload)) {
+      const button = element('button', 'command-output-more', entry.error ? '重试加载' : entry.needsReload ? '重新加载输出' : entry.text.length + 16384 > toolOutputCharacterLimit ? '继续查看下一部分' : '加载更多输出'); button.type = 'button';
+      button.addEventListener('click', () => loadToolOutputPage(entry)); holder.append(button);
+    }
+    if (entry.windowStart > 0 && entry.loading === null) {
+      const restart = element('button', 'command-output-restart', '从头查看输出'); restart.type = 'button';
+      restart.addEventListener('click', () => {
+        if (toolOutputEntries.get(entry.key) !== entry || entry.threadId !== selectedId || entry.key !== toolOutputKey(entry.threadId, entry.turnKey, entry.itemId) || entry.loading !== null) return;
+        entry.text = ''; entry.nextOffset = 0; entry.windowStart = 0; entry.receivedBytes = 0;
+        return loadToolOutputPage(entry);
+      });
+      holder.append(restart);
+    }
+  };
+  if (entry) {
+    entry.holders.add(render);
+    details.addEventListener('toggle', () => { if (details.open && !entry.text && !entry.error && !entry.needsReload && entry.nextOffset === 0) void loadToolOutputPage(entry); });
+  }
+  render();
+  if (entry && details.open && !entry.text && !entry.error && !entry.needsReload && entry.nextOffset === 0) void loadToolOutputPage(entry);
+}
 const expandedWork = new Set();
 let priorWorkGroups = new Map(), nextWorkGroupId = 0;
 const transientWorkKeys = new Set();
@@ -1997,7 +2120,7 @@ async function responseError(response, fallback) {
   return fallback;
 }
 let displayedHistoryId = null, homeErrorSource = null;
-function clearConversation() { cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
+function clearConversation() { clearToolOutputEntries(); cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
 function diffStats(changes) {
   let added = 0, removed = 0;
   for (const change of changes || []) {
@@ -2940,6 +3063,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   recoveryGuardedControls = [];
   const viewThread = selectedId;
   const sourceView = view;
+  reconcileToolOutputRefs(live && view.id === selectedId ? view : null);
   const playingVideos = new Set();
   for (const entry of videoPreviews.values()) for (const video of entry.players.values()) if (!video.paused && !video.ended) playingVideos.add(video);
   const focusedWork = document.activeElement?.closest?.('details.work-activity[data-work-key]');
@@ -3273,6 +3397,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         details.append(heading);
         if (item.command) details.append(element('pre', 'item-code', item.command));
         if (item.output) details.append(element('pre', 'item-code', item.output));
+        else if (item.outputRef) renderToolOutput(details, item, live ? toolOutputEntries.get(toolOutputKey(selectedId, turn.viewKey ?? turn.id, item.id)) : null);
         destination.append(details);
         continue;
       }
@@ -3761,7 +3886,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   resetWatchdog();
   try {
     diagnostic.mark('fetch');
-    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1' } });
+    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1', 'x-codex-lazy-output': '1' } });
     if (current.signal.aborted || active !== current) return;
     diagnostic.mark('headers'); diagnostic.correlate(response.headers?.get?.('x-codex-stream-id'));
     if (response.status === 401 || response.status === 403) { const message = await responseError(response, '配对状态不可用'); if (active !== current || current.signal.aborted) return; clearRecentViews(); current.abort(); fail(message); return; }

@@ -550,7 +550,7 @@ test('connecting negotiates recent history windows without an unconsumed staged 
   f.run('connect=fixtureConnect');
   f.run('void connect(selectedId)');await tick();
   const request=f.requests.find(r=>r.url.endsWith('/events'));assert.ok(request);
-  assert.equal(request.options.headers['x-codex-history-window'],'1');assert.equal(request.options.headers['x-codex-staged-preview'],undefined);
+  assert.equal(request.options.headers['x-codex-history-window'],'1');assert.equal(request.options.headers['x-codex-lazy-output'],'1');assert.equal(request.options.headers['x-codex-staged-preview'],undefined);
   f.run('active?.abort()');
 });
 

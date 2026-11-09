@@ -362,6 +362,20 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         peer.send(JSON.stringify({ type: 'create-chat', id, deviceId: phone.deviceId, ...data }));
         return;
       }
+      const toolOutput = /^\/api\/threads\/([0-9a-f-]{36})\/tool-output\?(.+)$/i.exec(requested);
+      if (toolOutput) {
+        if (req.method !== 'GET' || !uuid.test(toolOutput[1])) return send(res, 404, { error: 'not-found' });
+        const params = new URLSearchParams(toolOutput[2]);
+        const turnKey = params.get('turn'), itemId = params.get('item'), hash = params.get('hash'), offsetText = params.get('offset');
+        if ([...params.keys()].length !== 4 || [...params.keys()].some(key => !['turn', 'item', 'hash', 'offset'].includes(key)) || !turnKey || turnKey.length > 4096 || !itemId || itemId.length > 4096 || !/^[0-9a-f]{64}$/.test(hash || '') || !/^(0|[1-9]\d{0,9})$/.test(offsetText || '') || !Number.isSafeInteger(Number(offsetText))) return send(res, 400, { error: 'invalid' });
+        const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (pairPendingCount([...pending.values()], phone) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: false, hostId: phone.hostId, deviceId: phone.deviceId });
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'tool-output', id, conversationId: toolOutput[1], deviceId: phone.deviceId, turnKey, itemId, hash, offset: Number(offsetText) }));
+        return;
+      }
       const historyPage = /^\/api\/threads\/([0-9a-f-]{36})\/(history-page|history-validate)\?(.+)$/i.exec(requested);
       if (historyPage) {
         if (req.method !== 'GET' || !uuid.test(historyPage[1])) return send(res, 404, { error: 'not-found' });
@@ -611,7 +625,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       res.once('close', () => { if (streaming && pending.has(id)) console.warn('stream client disconnected'); cancel(id); if (output !== res) output.destroy(); });
       if (write) peer.send(JSON.stringify({ type: stop ? 'stop' : approval ? 'approve' : userInput ? 'user-input' : modeUpdate ? 'mode' : modelUpdate ? 'model' : 'write', id, conversationId: match[2].split('/')[2], deviceId: phone.deviceId, ...(stop ? { turnId } : approval ? { requestId, kind, decision } : userInput ? { requestId, answers, ...(asyncQuestion ? { asyncQuestion: true } : {}) } : modeUpdate ? { mode } : modelUpdate ? { model, ...(effort ? { effort } : {}) } : { text, ...(attachmentId ? { attachmentId } : {}), ...(attachmentIds ? { attachmentIds } : {}) }) }));
       else {
-        peer.send(JSON.stringify({ type: 'request', id, deviceId: phone.deviceId, path: `/api${match[2]}`, ...(visibleThreads ? { visibleThreads } : {}), ...(typeof handoverThread === 'string' && visibleThreads?.includes(handoverThread) ? { handoverThread } : {}), ...(streaming && req.headers['x-codex-sidebar-status'] === '1' ? { sidebarStatus: true } : {}), ...(streaming && req.headers['x-codex-history-window'] === '1' ? { historyWindow: true } : {}), ...(streaming && req.headers['x-codex-staged-preview'] === '1' ? { stagedPreview: true } : {}), ...(streaming && ['1', '2', '3'].includes(req.headers['x-codex-view-delta']) ? { viewDelta: Number(req.headers['x-codex-view-delta']) } : {}) }));
+        peer.send(JSON.stringify({ type: 'request', id, deviceId: phone.deviceId, path: `/api${match[2]}`, ...(streaming && req.headers['x-codex-lazy-output'] === '1' ? { lazyOutput: true } : {}), ...(visibleThreads ? { visibleThreads } : {}), ...(typeof handoverThread === 'string' && visibleThreads?.includes(handoverThread) ? { handoverThread } : {}), ...(streaming && req.headers['x-codex-sidebar-status'] === '1' ? { sidebarStatus: true } : {}), ...(streaming && req.headers['x-codex-history-window'] === '1' ? { historyWindow: true } : {}), ...(streaming && req.headers['x-codex-staged-preview'] === '1' ? { stagedPreview: true } : {}), ...(streaming && ['1', '2', '3'].includes(req.headers['x-codex-view-delta']) ? { viewDelta: Number(req.headers['x-codex-view-delta']) } : {}) }));
       }
     } catch { if (!res.destroyed) send(res, 500, { error: 'unavailable' }); }
   });

@@ -2,7 +2,7 @@
 
 macOS 客户端使用 Swift、WKWebView 和菜单栏入口，随包 Node 后台通过本地 IPC 连接 Codex Desktop。当前安装包适用于 Apple 芯片，要求 macOS 12 或更新版本。
 
-[返回项目首页](../README.md) · [手机端能力说明](../docs/CODEX-CAPABILITIES.md) · [版本说明与已知限制](../docs/stable45-release-notes-2026-11-09.md)
+[返回项目首页](../README.md) · [手机端能力说明](../docs/CODEX-CAPABILITIES.md) · [版本说明与已知限制](../docs/stable46-release-notes-2026-11-09.md)
 
 ## 下载
 
@@ -65,7 +65,7 @@ Intel Mac 当前未提供安装包。
 
 ## 手机端限制
 
-手机端是电脑版 Codex 的伴生界面。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入，目标信息目前只能查看。H5 暂时隐藏未读蓝点；跨端已读同步、桌面主动接管与持有写入权时归档、礼品卡聊天旧恢复锁留到下一期。完整边界见 [版本说明](../docs/stable45-release-notes-2026-11-09.md) 和 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
+手机端是电脑版 Codex 的伴生界面。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入，目标信息目前只能查看。H5 暂时隐藏未读蓝点；跨端已读同步、桌面主动接管与持有写入权时归档、礼品卡聊天旧恢复锁留到下一期。完整边界见 [版本说明](../docs/stable46-release-notes-2026-11-09.md) 和 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
 
 ## 托盘与退出
 
@@ -100,4 +100,4 @@ npm run build:macos
 
 ## 验证状态
 
-本轮完整隔离自动化回归 398/398 通过，并有 Mac 助手与 H5 专用聊天实测；不同版本的验收样本不能合并为最终版本全场景通过。超长会话传输和多人长期负载仍需优化及验证。真实审批闭环、任务运行期间断线恢复，以及真实 iPhone 键盘、安全区及相机仍未充分验证。具体结果及限制见 [版本说明](../docs/stable45-release-notes-2026-11-09.md)。
+本轮完整隔离自动化回归 417/417 通过，并有 Mac 助手与 H5 专用聊天实测；不同版本的验收样本不能合并为最终版本全场景通过。超长会话传输和多人长期负载仍需优化及验证。真实审批闭环、任务运行期间断线恢复，以及真实 iPhone 键盘、安全区及相机仍未充分验证。具体结果及限制见 [版本说明](../docs/stable46-release-notes-2026-11-09.md)。

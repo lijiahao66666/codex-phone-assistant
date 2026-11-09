@@ -1,5 +1,11 @@
 # Codex 手机助手 stable41 验收报告
 
+## stable46 最新进度
+
+已上线大命令输出按需分页，最终完整隔离回归 417/417 PASS，日志 `/private/tmp/codex-stable46-final-full-tests.log`。同一长会话相邻探针的首包从 1,087,648 B 减为 331,884 B（约 69.5%），但对应耗时约 5.42、5.38 秒；后续实际切回为 10.06、2.38 秒，网络和单回合体积仍有影响，性能目标未全部达成。实现与覆盖边界见 [stable46 说明](stable46-release-notes-2026-11-09.md)。
+
+服务器备份 `/opt/codex-hub-paired/backups/stable46-20261109-203752-2156785`；本机备份 `/Applications/codex手机助手-before-stable46-20261109.app`。relay 已受控重启，数据库未修改。JS SHA-256 `7b539c78c467f31e137bb82c1faaf7e84778e5a0094211bea709675896e9b7b0`；HTML `10a3310eb8c37c43d0e76958d99bc4522af69e098482b4bcf78a15ab9af4cf0d`；CSS 沿用 stable45。证据 `/private/tmp/codex-stable46-payload-comparison.json`、`/private/tmp/codex-stable46-switch-samples.json`。
+
 ## stable45 最新进度
 
 398/398 完整隔离回归通过，日志 `/private/tmp/codex-stable45-full-tests.log`。已修复前 4 条观察限制、折叠目录汇总、恢复后 revision 回退导致的 409，以及未使用 preview 的重复传输。详细行为、实机样本和性能未结项见 [stable45 说明](stable45-release-notes-2026-11-09.md)。本节更新优先于下面历史阶段的待修描述。

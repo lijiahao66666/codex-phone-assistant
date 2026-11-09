@@ -17,6 +17,7 @@ import { SidebarStatus } from '../desktop/sidebar-status.mjs';
 import { StatusPriorities } from '../desktop/status-priorities.mjs';
 import { createWebSocketSendScheduler } from './ws-send-scheduler.mjs';
 import { makeWindow, makePage } from '../desktop/history-pagination.mjs';
+import { lazyToolOutputs, toolOutputPage } from '../desktop/tool-output.mjs';
 import { createRecordedHistoryPager } from '../desktop/recorded-history-page.mjs';
 import { BoundedSnapshotStream } from './bounded-snapshot-stream.mjs';
 import { payloadDigest } from '../media/payload-digest.mjs';
@@ -400,6 +401,18 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       }
       if (typeof msg.id !== 'string' || msg.id.length > 100) return;
       if (msg.type === 'cancel-reply') { const request = writeReplies.get(msg.id); if (request) { request.cancelled = true; writeReplies.delete(msg.id); } connectionScheduler.cancelRequest(msg.id); return; }
+      if (msg.type === 'tool-output') {
+        const answer = beginRead(msg);
+        try {
+          const session = [...streams.values()].find(s => s.status === 'ready' && s.value?.id === msg.conversationId && s.uploadDeviceId === msg.deviceId && s.historyWindow === true && s.lazyOutput === true);
+          if (!session || revoked.has(msg.deviceId)) return answer(false);
+          const value = session.value, revision = session.revision, owner = session.conversation?.ownerId;
+          const result = toolOutputPage(session.projectFull(value), msg);
+          if (answer.cancelled() || revoked.has(msg.deviceId) || ![...streams.values()].includes(session) || session.status !== 'ready' || session.value !== value || session.revision !== revision || session.conversation?.ownerId !== owner) return answer(false);
+          answer(true, result);
+        } catch { answer(false); }
+        return;
+      }
       if (msg.type === 'history-page') {
         const answer = beginRead(msg);
         try {
@@ -750,7 +763,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       // Version 3 clients understand keyed history windows; never stream their
       // entire loaded desktop history when a request omits the optional flag.
       const historyWindow = msg.historyWindow === true || msg.viewDelta === 3;
-      const session = createSession({ conversationId: m[1], hostId: 'local' }); session.uploadDeviceId = msg.deviceId; session.historyWindow = historyWindow; streams.set(msg.id, session);
+      const session = createSession({ conversationId: m[1], hostId: 'local' }); session.uploadDeviceId = msg.deviceId; session.historyWindow = historyWindow; session.lazyOutput = msg.lazyOutput === true && historyWindow; streams.set(msg.id, session);
       const connectionDiagnostic = session.connectionDiagnostic = createStreamDiagnostics(msg.id, entry => trace('stream', 'timing', entry));
       connectionDiagnostic.mark('open');
       if (sidebarStatus && msg.sidebarStatus === true && !revoked.has(msg.deviceId)) addSidebarStream(msg.id, msg.deviceId);
@@ -773,7 +786,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       const project = (value, issued = lastIssued) => {
         const view = session.projectFull(value, issued);
         if (!historyWindow) return view;
-        try { return makeWindow(view); }
+        try { const window = makeWindow(view); return session.lazyOutput ? lazyToolOutputs(window, view) : window; }
         catch (error) { if (error.message !== 'unstable turn keys') throw error; return view; }
       };
       // Any oversized state must go through the chunked transfer, not the 8 MiB
