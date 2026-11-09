@@ -1,5 +1,11 @@
 # stable27 至 stable30 验收记录
 
+stable41 发布及首屏实测：无有效短期缓存的冷连接，在原生 owner discovery 等待期间并行读取现有有界只读历史，不触发恢复、不启用发送、不覆盖已到达的 SSE 视图。独立评审及 70 项定向 UI 回归通过，完整隔离回归 341/341 PASS，无失败/取消/跳过，日志 `/private/tmp/codex-history-preview-full-tests.log`。服务器事务返回 `STATIC_DEPLOYED`，备份 `/opt/codex-hub-paired/backups/stable41-20261109-145448-2072964`；没有重启服务或修改数据库。公网 JS SHA-256 `42b1121a583fac52b66554a1b303b2d808534d06c548319669a5f8a96aa01021`，HTML `71fc9180f103c8e17f544d5691e1d0ab301f03ae76c86ae31d823fcad71b50bc`。
+
+同一冷聊天 `01a1b961-3195-7af1-b905-4ecde973eb66`，stable41 实际约 1446 毫秒显示只读历史，当时状态仍“连接中”且输入禁用；约 21.7 秒实时就绪。连接阶段仍有原生两段 discovery 等待，不能将首屏时间称为连接时间。20 毫秒采样和单流诊断 `/private/tmp/codex-stable41-cold-preview.json`，计算实时连接必须过滤选中 ID，首页尚未选择聊天时的 connected=true 不是该聊天就绪。
+
+stable40 停止复验：C 回合 `01a1bf10-c5ab-7f63-b430-3e8d19faa914` 从 H5 点击停止后，原生 `read_thread` 状态为 interrupted，H5 回 idle、输入可用。`Network.emulateNetworkConditions` 虽改变 navigator.onLine，但持续 55 秒没有使既有 SSE 断开，不能把该模拟记为真实断线恢复通过；网络条件已还原，回执 `/private/tmp/codex-stable40-real-disconnect.json`。后续以实际助手断开/恢复补测。
+
 2026-11-09 本版范围调整（用户明确决定）：桌面主动接管/持有 writer 时归档、礼品卡旧恢复锁，延后下一版；未读跨端同步也延后，本版 H5 隐藏小蓝点，不改桌面未读状态。这些项目不再作为本版发布阻断，但仍属于已知限制，不能标为修复通过。
 
 stable39 蓝点实际复测：只对专用 C 使用桌面原生工具标未读，H5 在 D 选中时显示 C 蓝点；从 H5 打开 C 后蓝点隐藏，等待 C 实时连接后再切 D，列表刷新时 C 蓝点重新出现，桌面持久化未读状态始终为 true。最终通过桌面原生工具还原 C 已读。此结果证明选中时隐藏不等于跨端已读；记录 `/private/tmp/codex-stable39-unread-retest-20261109.json`。根据上面的用户决定，本版移除 H5 未读标记的生成。
@@ -7,6 +13,18 @@ stable39 蓝点实际复测：只对专用 C 使用桌面原生工具标未读�
 stable40 候选：正常恢复返回 accepted 后保留同任务有效事件流，拦截取消、设备/历史范围变化和已连接后的迟到响应，避免重建有效连接。本机安装候选四个生产源文件与当前源码 SHA-256 一致，签名严格验证通过；IPC/恢复相关 63 项回归通过。真实 connect + SSE history→accepted→live 回归通过，同一流直到实时就绪才解除写入保护；本版 H5 定向回归 48/48 通过。静态事务隔离验证双目录发布、显式回滚、公网哈希异常自动回滚，数据库/relay 未变且没有服务重启。尚需公网发布及冷恢复实测，不能据此声称已提速。
 
 stable40 静态发布成功：服务器事务返回 `STATIC_DEPLOYED`，备份 `/opt/codex-hub-paired/backups/stable40-20261109-143240-2067572`，未重启服务、未修改数据库。公网 JS SHA-256 `0791d1b08812ea7e87a9f136648265d2868296997925661c8183a0a27e06c768`，HTML `c3f1f1c6beea68a9b3cfae6ab1fbea8b6eadbb600f9d4d82ca224997f8da2457`；H5 刷新后脚本版本为 stable40，当前渲染任务行没有 `.task-unread`。发布包 `/private/tmp/codex-stable40-static-v2-stage-20261109.tar.gz`，恢复实测另行记录。
+
+stable40 完整自动化回归 336/336 PASS，无失败/取消/跳过；日志 `/private/tmp/codex-stable40-full-tests.log`。测试使用临时 home/socket 和诊断目录，CLI 集成使用 loopback 模型模拟器，不替代真实桌面 UI。
+
+stable40 冷恢复实测：聊天 `01a1b961-3195-7af1-b905-4ecde973eb66` 从选择到实时连接且输入可用约 21.54 秒；首事件流 `bc304fe6-c556-44d4-a44b-6db11cdbcd26` 未更换，日志显示最初 discovery 约 10 秒、恢复请求到 accepted 约 10.5 秒，accepted 到 session ready 约 13 毫秒。相比之前该聊天一次约 35 秒样本，本次没有 accepted 后的第三段等待，但单样本不能证明分布整体提升，冷连接仍偏慢。回执 `/private/tmp/codex-stable40-cold-sample.json`。
+
+stable40 快速切换：专用 C/D 实际点击 360 次，约 53.27 秒，选中 ID 错位/点击失败均为 0，每 12 次等待最后一条实时连接；接着另做 120 次逐次等待实时连接和输入可用的交替切换，约 83.74 秒，均成功，单次中位数 531 毫秒、P95 842 毫秒、最大 21.44 秒（包含一次冷恢复，不能将其排除后声称全程亚秒）。原始记录 `/private/tmp/codex-stable40-stress.json`、`/private/tmp/codex-stable40-settled-stress.json`。360 次中大部分被 220 毫秒防抖合并，不等同 360 次物理重连。
+
+同期整树采样 06:34:20–06:46:21 UTC 共 720 个每秒样本、零错误；Desktop/助手根 PID 全程未退出或更换，完整后代树 RSS 峰值分别约 2.90 GiB/584 MiB，结束约 2.13 GiB/271 MiB。Desktop CPU 峰值包含其他任务 Java/Node 负载，不能归因于 H5；采样器子进程单独计数。此项结合快速切换正确响应，支持该 12 分钟窗口未导致应用退出，不能保证长期不死机。记录 `/private/tmp/codex-stable40-process-samples-2026-11-09T06-34-20-845Z.jsonl`、同名 `-summary.json`、`-analysis.json`。
+
+stable40 真实附件及后台转圈：C 经 H5 同时上传文本和 PNG 后发起回合 `01a1bf0c-fbc0-7103-b25b-81143a7f5efb`，桌面 `read_thread` 确认文本 `cat`、`sleep 8` 均退出 0，最终回复 `H5_ATTACHMENT_STABLE40_20261109 蓝色` 与 H5 一致；H5 图片详情实际解码为 160×100。执行中切到 D，200 毫秒采样观察 C 标记从 checking→active→idle（idle 时隐藏），记录 `/private/tmp/codex-stable40-background-spinner.json`；本轮未覆盖断线时刻。
+
+stable40 手机视口 UI：390×844，页面 scrollWidth=390，无水平溢出；加号、模型、发送按钮中心 Y 均为 803，截图 `/private/tmp/codex-stable40-mobile-layout.png`，几何记录同名 `.json`。这是桌面浏览器设备模拟，不是实际 iPhone 键盘或安全区验收。
 
 stable39 状态交接修复：运行中的聊天切走后，在重新取得状态前显示“状态更新中”，明确 active/idle 时更新，最多等待 30 秒。49 项 UI 回归通过。公网静态事务成功，未重启服务、未修改数据库；HTML SHA-256 `a7c8cd3c811edba010ea272cd163d7a19d029e9d5ac4261c10cccae5ed70dbd6`，JS `8ddedd5ccd9917de40159e026ec9304ce3e1b23f0c7d74af6bea34c94e5b5353`。真实 H5 从正在运行的主任务切至专用 C，主任务显示 checking、随后 active，标记保持可见；代码 `200304f` 已推送。该样本不代表所有断线和状态订阅场景通过。
 

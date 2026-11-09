@@ -2690,12 +2690,12 @@ function updateHistoryControl() {
   loadEarlier.disabled = Boolean(historyRequest);
   loadEarlier.textContent = historyRequest ? '加载中...' : historyIsStale() ? '历史已变化，刷新' : historyAutoBlocked ? '重新加载更早消息' : '加载更早消息';
 }
-async function readHistoryPage(response, signal) {
+async function readHistoryPage(response, signal, limits = {}) {
   if (!response.ok) throw new Error('history unavailable');
   if (!response.headers?.get?.('content-type')?.includes('application/x-ndjson')) return response.json();
   if (!response.body) throw new Error('history unavailable');
   const { StateChunkAssembler } = await import('/state-chunks.mjs');
-  const assembler = new StateChunkAssembler(), reader = response.body.getReader(), decoder = new TextDecoder();
+  const assembler = new StateChunkAssembler(limits), reader = response.body.getReader(), decoder = new TextDecoder();
   let pending = '', result = null, complete = false;
   try {
     while (true) {
@@ -3550,6 +3550,24 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
     if ((response.status === 401 || response.status === 403) && active === current) clearRecentViews();
     if (response.ok && active === current && !current.signal.aborted && !connected && !receivedView) { showState(cached, false); status('连接中', 'connecting'); }
   }).catch(() => {});
+  if (!cached && !preserveView && currentDeviceId && historyScope?.deviceId === currentDeviceId) {
+    const deviceId = currentDeviceId, scopeGeneration = historyScopeGeneration;
+    const canPreview = () => active === current && !current.signal.aborted && selectedId === id && currentDeviceId === deviceId && historyScopeGeneration === scopeGeneration && !newDraft && !connected && !receivedView;
+    // Indexed history can be read while owner discovery is pending. It is only
+    // a preview: the stream alone may establish attachment or request recovery.
+    void (async () => {
+      try {
+        const response = await fetch(`/api/threads/${encodeURIComponent(id)}/recorded-history`, { credentials: 'same-origin', cache: 'no-store', signal: current.signal,
+          headers: { 'x-codex-expected-device': deviceId, 'x-codex-history-chunks': '1' } });
+        if (!response.ok || !canPreview()) { await response.body?.cancel(); return; }
+        const page = await readHistoryPage(response, current.signal, { maxBytes: 4 * 1024 * 1024 });
+        if (!canPreview()) return;
+        validateRecordedPage(page, id);
+        showState(page, false); receivedView = true;
+        status('连接中', 'connecting');
+      } catch { /* The live stream and its normal history fallback remain authoritative. */ }
+    })();
+  }
   resetWatchdog();
   try {
     diagnostic.mark('fetch');
