@@ -1495,7 +1495,9 @@ async function recoverSelectedChat({ preserveStream = null, isCurrent = () => tr
     return;
   }
   activeRecoveryAborts.get(key)?.abort();
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30000);
+  // Let the relay's 60 s recovery budget settle before treating transport loss
+  // as an unknown outcome; ordinary requests keep their existing deadlines.
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 70000);
   activeRecoveryAborts.set(key, controller);
   try {
     const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recover`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,

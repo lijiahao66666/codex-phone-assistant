@@ -13,10 +13,11 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const decompressUploadChunk = promisify(gunzip);
 
 // Experimental relay. TLS must terminate at a trusted loopback-only proxy.
-export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, uploadResponseTimeoutMs = 30000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
+export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, recoveryResponseTimeoutMs = 60000, uploadResponseTimeoutMs = 30000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
   const base = new URL(origin);
   if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash || base.username || base.password) throw new TypeError('HTTPS origin required');
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1) throw new TypeError('Invalid timeout');
+  if (!Number.isSafeInteger(recoveryResponseTimeoutMs) || recoveryResponseTimeoutMs < 1 || recoveryResponseTimeoutMs > 120000) throw new TypeError('Invalid recovery response timeout');
   if (!Number.isSafeInteger(uploadResponseTimeoutMs) || uploadResponseTimeoutMs < 1 || uploadResponseTimeoutMs > 120000) throw new TypeError('Invalid upload response timeout');
   if (!Number.isSafeInteger(historyMaxDurationMs) || historyMaxDurationMs < 1) throw new TypeError('Invalid history timeout');
   if (production && database === ':memory:') throw new TypeError('Persistent database required in production');
@@ -450,7 +451,9 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
         const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
         if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
-        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        // Owner discovery alone may take 11 s; recovery can also resume and
+        // recheck ownership before it can report a definite result.
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), recoveryResponseTimeoutMs);
         pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
         if (reserved.reservation) bodyReads.delete(reserved.reservation);
         res.once('close', () => cancel(id));

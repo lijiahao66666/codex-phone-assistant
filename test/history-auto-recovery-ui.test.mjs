@@ -6,7 +6,7 @@ import { webcrypto } from 'node:crypto';
 const id='11111111-1111-4111-8111-111111111111';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const response=(value={},status=200)=>({ok:status>=200&&status<300,status,json:async()=>value,clone:()=>({json:async()=>value})});
-async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers = false, manualHandoverTimers = false } = {}) {
+async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers = false, manualHandoverTimers = false, manualRequestTimers = false } = {}) {
   class Element {
     constructor(){this.children=[];this.listeners={};this.dataset={};this.value='';this.style={};this.classList={toggle(){},contains(){return false;}};this.scrollHeight=300;this.clientHeight=500;this.scrollTop=0;}
     addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}after(){}before(){}
@@ -15,13 +15,15 @@ async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers =
     cloneNode(){const copy=new Element();copy.value=this.value;copy.textContent=this.textContent;return copy;}
   }
   const nodes=new Map(),requests=[],reserves=[],removes=[];
-  const recoveryTimers=new Map(),handoverTimers=new Map();
+  const recoveryTimers=new Map(),handoverTimers=new Map(),requestTimers=new Map();
+  let requestClock=0;
   const fixtureTimeout=(fn,ms,...args)=>{
+    if(manualRequestTimers&&ms>=10000){const timer={unref(){}};requestTimers.set(timer,{at:requestClock+ms,run:()=>fn(...args)});return timer;}
     if(manualHandoverTimers&&ms===1500){const timer={unref(){}};handoverTimers.set(timer,()=>fn(...args));return timer;}
     if(!manualRecoveryTimers||ms!==500)return setTimeout(fn,ms,...args);
     const timer={unref(){}};recoveryTimers.set(timer,()=>fn(...args));return timer;
   };
-  const fixtureClearTimeout=timer=>{if(!recoveryTimers.delete(timer)&&!handoverTimers.delete(timer))clearTimeout(timer);};
+  const fixtureClearTimeout=timer=>{if(!recoveryTimers.delete(timer)&&!handoverTimers.delete(timer)&&!requestTimers.delete(timer))clearTimeout(timer);};
   const document={querySelector(key){if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
   const store={read:async()=>null,reserve:async(...args)=>{reserves.push(args);return true;},remove:async(...args)=>{removes.push(args);return true;}};
   const context=vm.createContext({document,store,crypto:webcrypto,AbortController,URLSearchParams,TextDecoder,TextEncoder,Date,setTimeout:fixtureTimeout,clearTimeout:fixtureClearTimeout,localStorage:{getItem(){return null;},removeItem(){}},sessionStorage:{removeItem(){}},window:{addEventListener(){}},fetch:async(url,options={})=>{
@@ -31,8 +33,39 @@ async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers =
   source=source.replace("import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore())",'Promise.resolve(store)');
   const run=code=>vm.runInContext(code,context);run(source);run('const fixtureConnect=connect');await tick();
   run(`selectedId='${id}';currentDeviceId='device';historyScope={hostId:'host',deviceId:'device'};connected=false;recoverableHistoryId=selectedId;recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});${stubLoadThreads ? 'loadThreads=async()=>{};' : ''}connect=async()=>{};updateComposer();`);
-  return {run,nodes,requests,reserves,removes,store,recoveryTimers,handoverTimers,fireRecoveryTimer(){const entry=recoveryTimers.entries().next().value;if(!entry)return false;recoveryTimers.delete(entry[0]);entry[1]();return true;},submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
+  return {run,nodes,requests,reserves,removes,store,recoveryTimers,handoverTimers,advanceRequestTime(ms){requestClock+=ms;for(const [timer,entry] of requestTimers)if(entry.at<=requestClock){requestTimers.delete(timer);entry.run();}},fireRecoveryTimer(){const entry=recoveryTimers.entries().next().value;if(!entry)return false;recoveryTimers.delete(entry[0]);entry[1]();return true;},submit:()=>nodes.get('#composer-form').listeners.submit({preventDefault(){}})};
 }
+
+test('recovery waits through the relay 60 s budget and accepts a result after the old 30 s deadline',async()=>{
+  let release,signal;
+  const f=await fixture((url,options)=>url.endsWith('/recover')?new Promise((resolve,reject)=>{
+    signal=options.signal;release=()=>resolve(response({status:'accepted'},202));
+    signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'})),{once:true});
+  }):undefined,{manualRequestTimers:true});
+  const work=f.run('recoverSelectedChat()');await tick();
+  for(const elapsed of [31000,29000]){
+    f.advanceRequestTime(elapsed);await tick();
+    assert.equal(signal.aborted,false);assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'pending');
+    assert.equal(f.removes.length,0);assert.equal(f.requests.filter(request=>request.url.endsWith('/recover')).length,1);
+  }
+  release();await work;
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'awaiting-state');
+  f.advanceRequestTime(10000);assert.equal(signal.aborted,false,'settled request clears its timeout');
+});
+
+test('the 70 s recovery client deadline retains the unknown attempt and never redispatches it',async()=>{
+  let signal;
+  const f=await fixture((url,options)=>url.endsWith('/recover')?new Promise((resolve,reject)=>{
+    signal=options.signal;signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'})),{once:true});
+  }):url.includes('/recovery-attempt/')?response({status:'pending',locked:true}):undefined,{manualRequestTimers:true});
+  const work=f.run('recoverSelectedChat()');await tick();
+  f.advanceRequestTime(69999);assert.equal(signal.aborted,false);
+  f.advanceRequestTime(1);await work;
+  assert.equal(signal.aborted,true);assert.equal(f.run('recoveryState(currentDeviceId,selectedId).status'),'unknown');
+  await f.run('runHistoryRecovery(selectedId,currentDeviceId)');
+  assert.equal(f.removes.length,0);assert.equal(f.reserves.length,1);
+  assert.equal(f.requests.filter(request=>request.url.endsWith('/recover')).length,1);
+});
 
 test('live attachment renews the history recovery budget across helper restarts',async()=>{
   const f=await fixture(url=>url.endsWith('/recover')?response({status:'accepted'},202):undefined,{manualRecoveryTimers:true});
