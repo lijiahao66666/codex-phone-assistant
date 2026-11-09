@@ -1,5 +1,7 @@
 # stable27 至 stable30 验收记录
 
+stable35 本机版本已安装：owner discovery 等待 native 10 秒窗口，已连接总线后的超时、断连或协议错误不再触发未知 owner 的竞争恢复；明确无 owner 和桌面离线路径保留，旧 recovery 锁不变。61 项定向回归通过，安装文件 hash 与源码一致。真实随机不存在聊天只读查询约 10006 ms 返回 `no-client-found`，pending=0。礼品卡实测也收到 `no-client-found` 而非 5 秒超时，但仍 locked、未实时连接，历史草稿可编辑不等于可发送。随后 D 约 300 ms 实时连接、551 ms 输入可用；不能扩展为全列表通过。
+
 stable34 礼品卡复测：2026-11-09 02:35:50 UTC 选择后 20 秒未实时连接，旧 recovery 仍 locked；历史草稿输入框曾可编辑，这不是实时连接或消息可发送的证明。匿名 stream ID `c71624ea-4dc0-4e34-89f4-d481972fe823`，本机日志反复出现 `thread-owner-discovery timed out`。独立只读 IPC 探测显示原生 client 定向查询 2 ms 返回 no-client-found，而全 client 查询约 10008 ms 才返回 no-client-found；助手默认等待 5 秒。已知至少一个候选没有及时回应，但未能确定其身份。此结果不能证明旧未知 resume 已结束，也不能安全清锁。
 
 stable34 已于 2026-11-09 发布连接诊断：服务器事务返回 FULL_DEPLOYED，配对数据库未替换，服务已重启；本机助手候选包已安装并重新连接，原生桌面进程保持运行。公网 HTML SHA-256 `cc6c8cd2bd2bc864f3aadac1cd0a3836f13c2c62b4d191c9b4b8a9683466b2da`，JS `a19b540f31c06dc35061d6a9f163a8cbbd4a4c6e37b54600776a0eb45ebaa837`。服务器备份 `/opt/codex-hub-paired/backups/stable34-20261109-100824-2000741`，本机旧包 `/Applications/codex手机助手-stable33-backup-20261109.app`。最初静态发布因只更新根目录、实际读取 release 目录而校验失败并回滚，后改为双目录事务成功。
