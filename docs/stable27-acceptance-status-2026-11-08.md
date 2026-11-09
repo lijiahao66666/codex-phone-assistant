@@ -1,5 +1,7 @@
 # stable27 至 stable30 验收记录
 
+stable34 礼品卡复测：2026-11-09 02:35:50 UTC 选择后 20 秒未实时连接，旧 recovery 仍 locked；历史草稿输入框曾可编辑，这不是实时连接或消息可发送的证明。匿名 stream ID `c71624ea-4dc0-4e34-89f4-d481972fe823`，本机日志反复出现 `thread-owner-discovery timed out`。独立只读 IPC 探测显示原生 client 定向查询 2 ms 返回 no-client-found，而全 client 查询约 10008 ms 才返回 no-client-found；助手默认等待 5 秒。已知至少一个候选没有及时回应，但未能确定其身份。此结果不能证明旧未知 resume 已结束，也不能安全清锁。
+
 stable34 已于 2026-11-09 发布连接诊断：服务器事务返回 FULL_DEPLOYED，配对数据库未替换，服务已重启；本机助手候选包已安装并重新连接，原生桌面进程保持运行。公网 HTML SHA-256 `cc6c8cd2bd2bc864f3aadac1cd0a3836f13c2c62b4d191c9b4b8a9683466b2da`，JS `a19b540f31c06dc35061d6a9f163a8cbbd4a4c6e37b54600776a0eb45ebaa837`。服务器备份 `/opt/codex-hub-paired/backups/stable34-20261109-100824-2000741`，本机旧包 `/Applications/codex手机助手-stable33-backup-20261109.app`。最初静态发布因只更新根目录、实际读取 release 目录而校验失败并回滚，后改为双目录事务成功。
 
 发布后专用 D H5 只读连接实测：页面从选择至 live connected 约 295 ms、输入可编辑约 302 ms；同一匿名 stream ID `a9920dd1-8b17-4fb6-9371-5dcc95d1d8f1` 在本机日志记录 first-ready 12.33 ms、first-encoded 20.08 ms，服务器日志记录 first-received 35.46 ms、first-written 35.63 ms。各端时间为各自进程内耗时；这是一次热连接，不能代表全部聊天或解决旧慢样本原因。未读蓝点与礼品卡锁仍未解决。
