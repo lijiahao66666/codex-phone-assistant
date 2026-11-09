@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { AppServerClient } from './app-server-client.mjs';
 import { identityNet } from './identity-net.mjs';
 import { createOwnerSettingsObserver } from './owner-settings-observer.mjs';
@@ -125,7 +126,7 @@ export class LocalOwner extends EventEmitter {
     const input = [];
     if (formatted.trim()) input.push({ type: 'text', text: formatted, text_elements: [] });
     for (const image of attachments.filter(file => file.kind === 'image')) input.push({ type: 'localImage', path: image.path });
-    return this.write('turn/start', { threadId, input,
+    return this.write('turn/start', { threadId, input, clientUserMessageId: randomUUID(),
       ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
   }
   async resume(threadId, { attemptId } = {}) {

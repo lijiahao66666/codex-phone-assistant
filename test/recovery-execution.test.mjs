@@ -86,7 +86,9 @@ test('runtime observes its isolated app-server exit and settles only that instan
   let runtime;
   try {
     runtime = await createOwnerRuntime({ hostId: host, codexHome: directory, dataDir: directory, projects: async () => [],
-      ownerOptions: { binary: process.execPath, args: ['-e', source], cwd: directory, timeout: 60, socketPath: join(directory, 'isolated.sock') } });
+      ownerOptions: { binary: process.execPath, args: ['-e', source], cwd: directory, timeout: 5000, socketPath: join(directory, 'isolated.sock') } });
+    // Child startup needs its own budget; the simulated resume must still time out quickly.
+    runtime.owner.client.timeout = 60;
     runtime.router.discover = async () => ({ kind: 'unknown' });
     const threadId = randomUUID(), requestId = randomUUID();
     runtime.router.journal.beginRecoveryAttempt(host, device, threadId, requestId);

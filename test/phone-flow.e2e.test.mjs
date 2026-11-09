@@ -30,6 +30,7 @@ async function until(check, label, timeout = 15000) {
 test('paired phone creates, switches model, sends and recovers a completed chat', { timeout: 60000, skip: !existsSync(binary) && 'Set CODEX_PHONE_TEST_BIN to run the isolated CLI integration' }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'codex-phone-flow-'));
   const requestBodies = [];
+  const nativeUserMessages = [], nativeStarts = [];
   let releaseFirstModel, enteredFirstModel;
   const firstModelEntered = new Promise(resolve => { enteredFirstModel = resolve; });
   const firstModelGate = new Promise(resolve => { releaseFirstModel = resolve; });
@@ -82,6 +83,8 @@ test('paired phone creates, switches model, sends and recovers a completed chat'
     const start = async () => {
       runtime = await createOwnerRuntime({ hostId: host.hostId, codexHome: dir, dataDir: join(dir, 'assistant'),
         ownerOptions: { binary, cwd: dir, socketPath, startRouterWhenMissing: true, args: [...config, 'app-server'], env: { ...process.env, HOME: dir, CODEX_HOME: dir, PHONE_TEST_KEY: 'test' } } });
+      runtime.owner.client.on('inbound', (_raw, message) => { if (message.method === 'turn/start') nativeStarts.push(message.params); });
+      runtime.owner.client.on('outbound', (_raw, message) => { if (message.method === 'item/completed' && message.params?.item?.type === 'userMessage') nativeUserMessages.push(message.params.item); });
       connector = await createPairedDesktopConnector({ credentialPath: credential, allowInsecureForTests: true, retryMs: 25,
         ownerRouter: runtime.router, modelJournal: runtime.modelJournal, modelRequest: (method, params) => runtime.owner.request(method, params),
         listThreads: options => listDesktopThreads({ ...options, codexHome: dir }), readHistory: (id, options) => readRolloutHistory(id, { ...options, codexHome: dir }),
@@ -110,6 +113,9 @@ test('paired phone creates, switches model, sends and recovers a completed chat'
     assert.equal(createdResponse.status, 202, await createdResponse.clone().text());
     const { threadId } = await createdResponse.json();
     await firstModelEntered;
+    assert.match(nativeStarts[0].clientUserMessageId, /^[a-f0-9-]{36}$/);
+    assert.equal(nativeUserMessages.find(item => JSON.stringify(item.content).includes('first isolated prompt'))?.clientId,
+      nativeStarts[0].clientUserMessageId, 'real CLI preserves the initial client identity in its completed user item');
     await assert.rejects(runtime.close(), { code: 'tasks-active' });
     assert.equal(runtime.owner.state, 'ready', 'normal quit preserves an active phone-owned task');
     assert.equal(runtime.router.stopping, false, 'blocked quit restores normal routing');

@@ -29,6 +29,22 @@ requiring a full `thread/read` baseline. It keeps `nextCursor` as the older-turn
 continuation; the response's different `backwardsCursor` is not substituted.
 Responses without a supported page retain the existing legacy baseline path.
 
+Partial turn summaries retain user and steering items already observed live,
+in their original order and keyed by item ID. A final-answer-only completion
+summary must not erase a mid-turn user input. Initial prompt echoes are still
+normalized before merging, work output remains summary-bounded, and an explicit
+full turn still replaces the previous item list authoritatively.
+
+Initial prompt echoes are correlated only by their server/client identity.
+LocalOwner supplies a unique clientUserMessageId on turn/start. Adopting the first
+historical user item records its server identity, including image-only input;
+snapshot rebuilds retain that identity. Later input with the same text or a
+different image must not overwrite the prompt or be removed as an echo.
+Legacy events without a server ID use their client ID when present. Without
+either ID, each event is retained with a local identity because a replay cannot
+be distinguished from a new message. An uncorrelated legacy snapshot may thus
+show a duplicate prompt; content equality alone never authorizes deletion.
+
 The page's cursor and turn completeness are stored separately from conversation
 contents. After compatibility normalization, before building a snapshot or its
 patch baseline, the owner projects truthful turn pagination and canonical

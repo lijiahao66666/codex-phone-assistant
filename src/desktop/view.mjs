@@ -92,14 +92,23 @@ function turnDisplayItems(turn, index) {
   const items = Array.isArray(turn.items) ? turn.items : [];
   const input = turn.params?.input;
   if (!Array.isArray(input) || inputIdentity(input) === '[]') return items;
-  // Desktop renders the initial bubble from params.input. Its app-server echo
-  // can briefly coexist as the first user item; do not duplicate that bubble.
-  // A later identical input after work or an answer remains a genuine message.
-  const prePromptTypes = new Set(['automaticApprovalReview', 'forkedFromConversation', 'modelChanged', 'modelRerouted', 'personalityChanged', 'remoteTaskCreated', 'worktreeInit']);
-  const first = items.findIndex(item => !prePromptTypes.has(item?.type));
-  const duplicate = items[first]?.type === 'userMessage' && inputIdentity(items[first].content) === inputIdentity(input);
-  const prompt = { type: 'userMessage', id: `initial-user:${turn.turnId ?? index}`, content: input };
-  return [prompt, ...items.filter((_, itemIndex) => !duplicate || itemIndex !== first)];
+  // Equal content can be a genuine follow-up. Only a confirmed server/client
+  // identity authorizes removing the echo of the prompt rendered from params.
+  const initialClientId = turn.params?.clientUserMessageId;
+  const nativeId = turn.remodexInitialUserMessageId;
+  const initialId = typeof nativeId === 'string' && nativeId.length > 0 && nativeId.length <= 1024 &&
+    !/[\x00-\x20\x7f]/.test(nativeId) && !items.some(item => item?.id === nativeId && item.type !== 'userMessage') ? nativeId : null;
+  const isEcho = item => item?.type === 'userMessage' && (
+    (initialId && item.id === initialId) ||
+    (typeof initialClientId === 'string' && initialClientId && (item.clientId ?? item.client_id) === initialClientId)
+  );
+  let promptId = initialId || `initial-user:${turn.turnId ?? index}`;
+  if (!initialId) {
+    const ids = new Set(items.map(item => item?.id));
+    while (ids.has(promptId)) promptId += ':prompt';
+  }
+  const prompt = { type: 'userMessage', id: promptId, content: input };
+  return [prompt, ...items.filter(item => !isEcho(item))];
 }
 
 function emptyCompletedWait(item) {

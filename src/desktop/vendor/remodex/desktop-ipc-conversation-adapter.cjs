@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025-2026 Emanuele Di Pietro
-// Modified 2026-11-08: bounded resume and truthful pagination. See README.md.
+// Modified 2026-11-09: bounded history and live user-message retention. See README.md.
 // FILE: desktop-ipc-conversation-adapter.js
 // Purpose: Translates app-server JSON-RPC traffic into Codex Desktop's conversationState shape.
 // Layer: CLI helper
@@ -848,6 +848,7 @@ function buildConversationTurn(turn, {
     diff: previousTurn?.diff || null,
     hookRuns: cloneJSON(previousTurn?.hookRuns || []),
     commandExecutionStartedAtMsById: cloneJSON(previousTurn?.commandExecutionStartedAtMsById || {}),
+    ...(previousTurn?.remodexInitialUserMessageId ? { remodexInitialUserMessageId: previousTurn.remodexInitialUserMessageId } : {}),
     items: Array.isArray(turn?.items) && (turn.items.length > 0 || turn.itemsView === "full")
       ? cloneJSON(turn.items)
       : cloneJSON(previousTurn?.items || []),
@@ -869,6 +870,26 @@ function buildConversationTurn(turn, {
   // Hydrated turns from thread/read carry the prompt as an item with empty
   // params.input; adopt it into params so Desktop renders a normal bubble.
   normalizeTurnInitialPrompt(builtTurn);
+  if ((turn?.itemsView === "summary" || turn?.itemsView === "notLoaded")
+    && Array.isArray(turn.items) && turn.items.length > 0) {
+    // A completion summary can contain only the final answer. Keep user input
+    // already observed live; otherwise a successful steer disappears as soon
+    // as the summary replaces the turn. Work output remains summary-bounded.
+    const summaryById = new Map(builtTurn.items.map((item) => [item.id, item]));
+    const retained = (previousTurn?.items || []).filter((item) => (
+      isUserMessageItem(item) || item?.type === "steeringUserMessage" || summaryById.has(item?.id)
+    )).map((item) => cloneJSON(summaryById.get(item.id) || item));
+    const retainedIds = new Set(retained.map((item) => item.id));
+    for (let index = 0; index < builtTurn.items.length; index += 1) {
+      const item = builtTurn.items[index];
+      if (retainedIds.has(item.id)) continue;
+      const next = builtTurn.items.slice(index + 1).find((candidate) => retainedIds.has(candidate.id));
+      const position = next ? retained.findIndex((candidate) => candidate.id === next.id) : retained.length;
+      retained.splice(position, 0, item);
+      retainedIds.add(item.id);
+    }
+    builtTurn.items = retained;
+  }
   return builtTurn;
 }
 
@@ -1012,7 +1033,9 @@ function normalizeDesktopItemCompatibility(item) {
 
   if (item.type === "userMessage" || item.type === "steeringUserMessage") {
     const inputKey = item.type === "userMessage" ? "content" : "input";
-    return { ...item, [inputKey]: normalizeDesktopInputEntries(item[inputKey]) };
+    const clientId = readString(item.clientId) || readString(item.client_id);
+    const id = readString(item.id) || (clientId ? `remodex-client-user:${clientId}` : `remodex-unidentified-user:${randomUUID()}`);
+    return { ...item, id, [inputKey]: normalizeDesktopInputEntries(item[inputKey]) };
   }
   if (normalizeToken(item.type) !== "collabagenttoolcall") {
     return item;
@@ -1039,15 +1062,21 @@ function normalizeDesktopItemCompatibility(item) {
   };
 }
 
-function isInitialPromptUserMessageItem(turn, item) {
-  if (!isUserMessageItem(item)) {
-    return false;
-  }
-  const promptText = extractUserText(turn?.params?.input);
-  if (!promptText) {
-    return false;
-  }
-  return extractUserText(item?.content) === promptText;
+function consumeInitialPromptUserMessage(turn, item, { allowAdoption = true } = {}) {
+  const id = readString(item?.id);
+  const initialClientId = readString(turn.params?.clientUserMessageId);
+  const clientId = readString(item?.clientId) || readString(item?.client_id);
+  const known = (id && id === turn.remodexInitialUserMessageId)
+    || (initialClientId && clientId === initialClientId);
+  const input = sanitizeUserInputEntries(turn.params?.input);
+  const adopted = !input.length && !turn.remodexInitialUserMessageId && allowAdoption
+    && adoptInitialPromptUserMessage(turn, item);
+  // Event order and content cannot prove an echo: the initial event may have
+  // been missed. Only an identity match or adoption into an empty prompt can
+  // remove an item; uncorrelated legacy events remain visible.
+  if (!known && !adopted) return false;
+  if (id) turn.remodexInitialUserMessageId = id;
+  return true;
 }
 
 function isContextualUserMessageItem(item) {
@@ -1068,7 +1097,6 @@ function normalizeTurnInitialPrompt(turn) {
       input: sanitizeUserInputEntries(turn.params.input),
     };
   }
-  const promptText = extractUserText(turn?.params?.input);
   for (let index = 0; index < turn.items.length; index += 1) {
     let item = turn.items[index];
     const sanitizedItem = sanitizeUserMessageItem(item);
@@ -1089,17 +1117,7 @@ function normalizeTurnInitialPrompt(turn) {
       continue;
     }
     if (isUserMessageItem(item)) {
-      const itemText = extractUserText(item?.content);
-      if (!itemText) {
-        return;
-      }
-      if (!promptText) {
-        if (adoptInitialPromptUserMessage(turn, item)) {
-          turn.items.splice(index, 1);
-        }
-        return;
-      }
-      if (itemText === promptText) {
+      if (consumeInitialPromptUserMessage(turn, item)) {
         turn.items.splice(index, 1);
       }
       return;
@@ -1213,7 +1231,8 @@ function ensureTurn(conversation, turnId, {
 }
 
 function upsertItem(turn, item) {
-  const itemId = readString(item?.id);
+  const compatibleItem = normalizeDesktopItemCompatibility(item);
+  const itemId = readString(compatibleItem?.id);
   if (!itemId) {
     return;
   }
@@ -1221,7 +1240,7 @@ function upsertItem(turn, item) {
   // user items too; no Codex UI renders it, so it must not reach the stream.
   // Also evict any copy that slipped into the state before this filter existed.
   const index = turn.items.findIndex((candidate) => readString(candidate?.id) === itemId);
-  const sanitizedItem = sanitizeUserMessageItem(normalizeDesktopItemCompatibility(item));
+  const sanitizedItem = sanitizeUserMessageItem(compatibleItem);
   const existingItem = index >= 0
     ? sanitizeUserMessageItem(normalizeDesktopItemCompatibility(turn.items[index]))
     : null;
@@ -1238,16 +1257,10 @@ function upsertItem(turn, item) {
     };
     return;
   }
-  // The app-server echoes the initial prompt as a userMessage item; Desktop
-  // already renders it from turn.params.input and would label the duplicate as
-  // "Steered conversation". Only later user messages are genuine steers.
-  if (isUserMessageItem(sanitizedItem) && !turnHasUserMessageItem(turn)) {
-    if (isInitialPromptUserMessageItem(turn, sanitizedItem)) {
-      return;
-    }
-    if (!extractUserText(turn?.params?.input) && adoptInitialPromptUserMessage(turn, sanitizedItem)) {
-      return;
-    }
+  if (isUserMessageItem(sanitizedItem) && consumeInitialPromptUserMessage(turn, sanitizedItem, {
+    allowAdoption: !turnHasUserMessageItem(turn),
+  })) {
+    return;
   }
   turn.items.push(cloneJSON(sanitizedItem));
 }

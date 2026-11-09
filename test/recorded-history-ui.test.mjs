@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
+import { desktopView } from '../src/desktop/view.mjs';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const other = '22222222-2222-4222-8222-222222222222';
@@ -93,4 +94,88 @@ test('expired cursors keep loaded history until explicit refresh and refresh rep
   assert.equal(f.run('recordedHistory.stale'),true);assert.equal(f.run('loadEarlier.hidden'),false);assert.equal(f.run('loadEarlier.textContent'),'历史已变化，刷新');assert.ok(rendered(f).includes('stale text'));
   await f.load();assert.equal(f.requests.filter(r=>r.url.includes('/recorded-history'))[1].url,`/api/threads/${id}/recorded-history`);
   assert.ok(rendered(f).includes('fresh current'));assert.equal(rendered(f).includes('stale text'),false);assert.equal(f.run('recordedHistory.stale'),false);
+});
+
+test('recorded history and a live prompt share native identity without collapsing genuine repeated input', async () => {
+  const content = [{ type: 'text', text: 'repeat' }];
+  const initial = { type: 'userMessage', id: 'server-initial', text: 'repeat' };
+  const followup = { type: 'userMessage', id: 'server-followup', text: 'repeat' };
+  const answer = { type: 'agentMessage', id: 'answer', text: 'done' };
+  const recorded = page([turn('shared', [initial, followup, answer])]);
+  const liveTurn = { turnId: 'shared', status: 'completed', remodexInitialUserMessageId: initial.id,
+    params: { input: content }, items: [{ ...followup, content }, answer] };
+  const live = desktopView({ id, turns: [liveTurn] });
+  const f = await fixture(() => response(recorded));
+  const showLive = value => f.run(`streamView=${JSON.stringify(value)};showState(streamView)`);
+  f.show(recorded); showLive(live);
+  assert.deepEqual(rendered(f).filter(value => value === 'repeat'), ['repeat', 'repeat']);
+  assert.equal(f.run('streamView.turns[0].items[0].id'), initial.id);
+  // Retained canonical history and a fresh recorded page must keep the same
+  // identity, rather than reintroducing a synthetic copy during refresh.
+  const canonical = desktopView({ id, turnHistory: { kind: 'canonical', history: { isComplete: true,
+    islands: [{ entries: [{ value: 'turn' }] }], entitiesByKey: { turn: liveTurn } } } });
+  f.show(recorded); showLive(canonical); showLive(canonical);
+  assert.deepEqual(rendered(f).filter(value => value === 'repeat'), ['repeat', 'repeat']);
+});
+
+test('live summaries update shared messages in recorded order and retain distinct repeated text and live image data', async () => {
+  const f = await fixture(() => response(page([])));
+  f.run(`const recordedMessages=[{id:'first',type:'userMessage',text:'repeat',images:['stale-image']},{id:'second',type:'userMessage',text:'repeat'},{id:'reasoning',type:'reasoning',text:'thinking'},{id:'answer',type:'agentMessage',text:'old answer'}];const liveFirst={id:'first',type:'userMessage',text:'repeat',images:['live-image'],attachments:[{name:'photo.png'}]};const liveAnswer={id:'answer',type:'agentMessage',text:'updated answer'};const orderedMerge=mergeHistoryTurns([{id:'shared',items:recordedMessages}],[{id:'shared',items:[liveFirst,liveAnswer]}])`);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(orderedMerge[0].items.map(item=>item.id))')), ['first','second','reasoning','answer']);
+  assert.equal(f.run('orderedMerge[0].items[0]===liveFirst'), true);
+  assert.equal(f.run('orderedMerge[0].items[3]===liveAnswer'), true);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(orderedMerge[0].items[0].images)')), ['live-image']);
+  assert.equal(f.run("orderedMerge[0].items.filter(item=>item.text==='repeat').length"), 2);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(recordedMessages.map(item=>item.id))')), ['first','second','reasoning','answer']);
+});
+
+test('turn and item merges insert live-only entries beside anchors while preserving all recorded positions', async () => {
+  const f = await fixture(() => response(page([])));
+  f.run(`const baseTurns=['first','queued','repeat','pictures'].map(id=>({id,items:[{id:id+'-old',text:id}]}));const summaryTurns=[{id:'first',items:[{id:'first-old',text:'live first'}]},{id:'between',items:[]},{id:'repeat',items:[]},{id:'newest',items:[]}];const turnMerge=mergeHistoryTurns(baseTurns,summaryTurns);const itemMerge=mergeHistoryTurns([{id:'shared',items:['a','recorded-b','c','recorded-tail'].map(id=>({id}))}],[{id:'shared',items:['prefix','a','between','c','suffix'].map(id=>({id}))}])`);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(turnMerge.map(turn=>turn.id))')), ['first','queued','between','repeat','pictures','newest']);
+  assert.equal(f.run('turnMerge[0].items[0].text'), 'live first');
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(itemMerge[0].items.map(item=>item.id))')), ['prefix','a','recorded-b','between','c','recorded-tail','suffix']);
+  assert.deepEqual(JSON.parse(f.run(`JSON.stringify(mergeHistoryTurns([{id:'older',items:[]}],[{id:'newer',items:[]}]).map(turn=>turn.id))`)), ['older','newer']);
+});
+
+test('a live summary keeps recorded-only turns at their chronological positions and older pages prepend without reordering', async () => {
+  const older = page([turn('before',[item(0)])]);
+  const f = await fixture(() => response(older));
+  f.show(page([turn('first',[item(1)]),turn('second',[item(2)]),turn('pictures',[item(3)])], 'earlier'));
+  f.run(`streamView={id:selectedId,title:'Live',runtimeStatus:'idle',requests:[],history:{complete:false},turns:[{id:'first',items:[{id:'item-1',type:'userMessage',text:'live first'}]},{id:'second',items:[{id:'item-2',type:'userMessage',text:'live second'}]}]};showState(streamView)`);
+  assert.deepEqual(rendered(f).filter(text=>['live first','live second','message 3'].includes(text)), ['live first','live second','message 3']);
+  await f.load();
+  assert.deepEqual(rendered(f).filter(text=>['message 0','live first','live second','message 3'].includes(text)), ['message 0','live first','live second','message 3']);
+});
+
+test('large overlapping histories retain ordered identity and pagination flags without quadratic scans', {timeout:2000}, async () => {
+  const f = await fixture(() => response(page([])));
+  f.run(`const largeItems=Array.from({length:30000},(_,n)=>({id:'large-'+n,text:'recorded'}));const largeLive=largeItems.filter((_,n)=>n%2===0).map(item=>({...item,text:'live'}));const largeMerge=mergeHistoryTurns([{id:'large',items:largeItems,itemsPagination:{hasLoadedOldest:true,hasLoadedNewest:false}}],[{id:'large',items:largeLive,itemsPagination:{hasLoadedOldest:false,hasLoadedNewest:true}}])`);
+  assert.equal(f.run('largeMerge[0].items.length'), 30000);
+  assert.equal(f.run("largeMerge[0].items.every((item,index)=>item.id==='large-'+index && item.text===(index%2===0?'live':'recorded'))"), true);
+  assert.equal(f.run('largeMerge[0].itemsPagination.hasLoadedOldest'), true);
+  assert.equal(f.run('largeMerge[0].itemsPagination.hasLoadedNewest'), true);
+});
+
+test('recorded anchors win conflicting summary order and repeated merges keep stable IDs without text-based inference', async () => {
+  const f = await fixture(() => response(page([])));
+  f.run(`const anchorBase=[{id:'a',items:[{id:'first',text:'repeat'},{id:'steer',text:'repeat'},{id:'reasoning',type:'reasoning',text:'reason'},{id:'answer',text:'answer'}]},{id:'b',items:[]},{id:'c',items:[]}];const anchorLive=[{id:'c',items:[]},{id:'live-between-conflicting',items:[]},{id:'a',items:[{id:'first',text:'repeat'},{id:'steer',text:'repeat'},{id:'answer',text:'live answer'}]}];const anchorMerged=mergeHistoryTurns(anchorBase,anchorLive);const anchorAgain=mergeHistoryTurns(anchorMerged,anchorLive)`);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(anchorMerged.map(turn=>turn.id))')), ['live-between-conflicting','a','b','c']);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(anchorAgain)')), JSON.parse(f.run('JSON.stringify(anchorMerged)')));
+  assert.deepEqual(JSON.parse(f.run("JSON.stringify(anchorMerged.find(turn=>turn.id==='a').items.map(item=>item.id))")), ['first','steer','reasoning','answer']);
+  f.run(`const anonymousMerge=mergeHistoryTurns([{items:[{text:'same'}]},{id:'shared',items:[{text:'same'}]}],[{items:[{text:'same'}]},{id:'shared',items:[{text:'same'}]}])`);
+  assert.equal(f.run('anonymousMerge.length'), 3);
+  assert.equal(f.run("anonymousMerge.find(turn=>turn.id==='shared').items.length"), 2);
+});
+
+test('duplicate shared anchors retain every live-only segment once and use the latest live object', async () => {
+  const f = await fixture(() => response(page([])));
+  f.run(`const duplicateOld=[{id:'a'},{id:'b'}];const latestA={id:'a',text:'latest'};const duplicateLive=[{id:'x'},{id:'a',text:'earlier'},{id:'y'},latestA,{id:'b'}];const duplicateMerge=mergeHistoryTurns([{id:'shared',items:duplicateOld}],[{id:'shared',items:duplicateLive}]);const repeatedOld=mergeHistoryTurns([{id:'shared',items:[{id:'a'},{text:'anonymous old'},{id:'b'},{id:'a'}]}],[{id:'shared',items:[{id:'x'},{text:'anonymous live'},{id:'a',text:'latest'},{id:'b'}]}])`);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(duplicateMerge[0].items.map(item=>item.id))')), ['x','y','a','b']);
+  assert.equal(f.run('duplicateMerge[0].items[2]===latestA'), true);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(repeatedOld[0].items.map(item=>item.id||item.text))')), ['x','anonymous live','a','anonymous old','b','a']);
+  assert.equal(f.run("repeatedOld[0].items.filter(item=>item.id==='x').length"), 1);
+  assert.equal(f.run("repeatedOld[0].items.filter(item=>item.id==='a' && item.text==='latest').length"), 2);
+  f.run(`const duplicateTurns=mergeHistoryTurns([{id:'a',items:[]},{id:'b',items:[]}],[{id:'x',items:[]},{id:'a',items:[]},{id:'y',items:[]},{id:'a',items:[]},{id:'b',items:[]}])`);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(duplicateTurns.map(turn=>turn.id))')), ['x','y','a','b']);
 });

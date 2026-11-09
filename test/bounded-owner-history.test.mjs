@@ -145,3 +145,44 @@ test('live updates, native approval and queued follow-ups retain the partial bas
     assert.equal(f.reads.length, 0);
   } finally { await f.close(); }
 });
+
+test('completion summaries retain live mid-turn user messages in order without repeating echoes', async () => {
+  const f = await fixture({ data: [], nextCursor: null });
+  const text = value => [{ type: 'text', text: value }];
+  const user = (id, value) => ({ type: 'userMessage', id, content: text(value) });
+  const messages = state => desktopView(state).turns.find(t => t.id === 'active').items
+    .filter(item => ['userMessage', 'agentMessage'].includes(item.type)).map(item => [item.type, item.text]);
+  try {
+    await f.resume();
+    await f.local.startTurn(threadId, 'first');
+    const initialClientId = f.requests.find(r => r.method === 'turn/start').params.clientUserMessageId;
+    f.notify({ method: 'turn/started', params: { threadId, turn: { id: 'active', status: 'inProgress', items: [] } } });
+    for (const item of [{ ...user('initial-echo', 'first'), clientId: initialClientId }, user('steer-one', 'second'),
+      { type: 'reasoning', id: 'reasoning', summary: [] }, user('steer-two', 'second'),
+      { type: 'agentMessage', id: 'answer', text: 'partial answer' }]) {
+      f.notify({ method: 'item/completed', params: { threadId, turnId: 'active', item } });
+    }
+    await until(() => f.state().turns.some(t => t.turnId === 'active' && t.items.some(i => i.id === 'answer')), 'live items');
+    const expected = [['userMessage', 'first'], ['userMessage', 'second'], ['userMessage', 'second'], ['agentMessage', 'final answer']];
+    const summary = { id: 'active', status: 'completed', itemsView: 'summary', items: [
+      { type: 'agentMessage', id: 'answer', text: 'final answer' },
+    ] };
+    f.notify({ method: 'turn/completed', params: { threadId, turn: summary } });
+    await until(() => f.state().turns.find(t => t.turnId === 'active')?.status === 'completed', 'completion summary');
+    assert.deepEqual(messages(f.state()), expected);
+    assert.equal(f.state().turns.find(t => t.turnId === 'active').itemsPagination.hasLoadedOldest, false);
+    assert.equal(f.state().turns.find(t => t.turnId === 'active').items.some(item => item.id === 'reasoning'), false, 'summary still trims non-summary work');
+    await until(() => f.state().turnHistory?.history.entitiesByKey['turn:active']?.status === 'completed', 'canonical completion');
+    assert.deepEqual(messages({ ...f.state(), turns: [] }), expected, 'canonical snapshot retains the same messages');
+    // Replaying the same summary updates known IDs; an empty partial summary
+    // must not erase the items already observed from this owner.
+    f.notify({ method: 'turn/completed', params: { threadId, turn: { ...summary, items: [user('initial-echo', 'first'), ...summary.items] } } });
+    f.notify({ method: 'turn/completed', params: { threadId, turn: { ...summary, itemsView: 'notLoaded', items: [] } } });
+    await until(() => f.state().turns.find(t => t.turnId === 'active')?.itemsPagination.summaryItemIds.length === 0, 'empty partial summary');
+    assert.deepEqual(messages(f.state()), expected);
+    assert.equal(f.reads.length, 0, 'retaining live items does not load complete history');
+    f.notify({ method: 'turn/completed', params: { threadId, turn: { ...summary, itemsView: 'full', items: [] } } });
+    await until(() => f.state().turns.find(t => t.turnId === 'active')?.itemsPagination.hasLoadedOldest === true, 'authoritative full turn');
+    assert.deepEqual(messages(f.state()), [['userMessage', 'first']], 'an explicit full turn remains authoritative');
+  } finally { await f.close(); }
+});

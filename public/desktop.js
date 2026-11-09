@@ -2736,20 +2736,44 @@ async function fetchThreadList() {
 }
 let loadedHistory = null, historyRequest = null, recordedHistory = null;
 function historyIsStale() { return Boolean(loadedHistory?.stale || recordedHistory?.stale); }
+function mergeHistoryOrder(older, newer, key, update = (old, latest) => latest) {
+  const previous = new Map(older.map(value => [key(value), value]).filter(([id]) => id));
+  const latest = new Map(), before = new Map();
+  let pending = [];
+  for (const value of newer) {
+    const id = key(value);
+    if (id && previous.has(id)) {
+      latest.set(id, value);
+      if (pending.length) {
+        if (before.has(id)) for (const inserted of pending) before.get(id).push(inserted);
+        else before.set(id, pending);
+        pending = [];
+      }
+    } else pending.push(value);
+  }
+  // Recorded order is authoritative. Live-only entries precede their next
+  // shared anchor; entries without a later anchor append to the newest edge.
+  const merged = [];
+  for (const value of older) {
+    const id = key(value);
+    if (before.has(id)) {
+      for (const inserted of before.get(id)) merged.push(inserted);
+      before.delete(id); // A repeated recorded anchor must not duplicate its inserted segment.
+    }
+    merged.push(latest.has(id) ? update(value, latest.get(id)) : value);
+  }
+  for (const value of pending) merged.push(value);
+  return merged;
+}
 function mergeHistoryTurns(older, newer) {
   const key = turn => typeof turn.id === 'string' && turn.id ? `id:${turn.id}` : typeof turn.viewKey === 'string' && turn.viewKey ? `view:${turn.viewKey}` : null;
-  const previous = new Map(older.filter(turn => key(turn)).map(turn => [key(turn), turn]));
-  const recent = new Set(newer.map(key).filter(Boolean));
-  return [...older.filter(turn => !key(turn) || !recent.has(key(turn))), ...newer.map(turn => {
-    const old = previous.get(key(turn));
-    if (!old) return turn;
-    const latest = new Map((turn.items || []).map(item => [item.id, item]));
-    const items = [...(old.items || []).filter(item => !latest.has(item.id)), ...(turn.items || [])];
+  return mergeHistoryOrder(older, newer, key, (old, turn) => {
+    const items = mergeHistoryOrder(old.items || [], turn.items || [], item => typeof item.id === 'string' && item.id ? item.id : null);
     const pagination = old.itemsPagination || turn.itemsPagination;
     return { ...old, ...turn, items, ...(pagination ? { itemsPagination: { ...pagination,
       hasLoadedNewest: Boolean(old.itemsPagination?.hasLoadedNewest || turn.itemsPagination?.hasLoadedNewest),
       hasLoadedOldest: Boolean(old.itemsPagination?.hasLoadedOldest || turn.itemsPagination?.hasLoadedOldest) } } : {}) };
-  })];
+  });
 }
 function validateRecordedPage(page, id) {
   if (page?.id !== id || page.history?.readOnly !== true || !Array.isArray(page.turns) || page.turns.length > 50 ||

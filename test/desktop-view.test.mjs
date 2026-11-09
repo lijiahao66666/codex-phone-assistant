@@ -25,13 +25,35 @@ test('projects the initial owner prompt from turn params before the assistant re
 
 test('deduplicates the initial prompt echo while preserving subsequent identical steering', () => {
   const content = [{ type: 'text', text: 'continue' }];
-  const view = desktopView({ id: 'thread', turns: [{ turnId: 'turn', params: { input: [{ type: 'input_text', text: 'continue' }] }, items: [
+  const view = desktopView({ id: 'thread', turns: [{ turnId: 'turn', remodexInitialUserMessageId: 'echo', params: { input: [{ type: 'input_text', text: 'continue' }] }, items: [
     { type: 'userMessage', id: 'echo', content },
     { type: 'agentMessage', id: 'answer', text: 'done' },
     { type: 'steeringUserMessage', id: 'steer', input: content },
   ] }] });
   assert.deepEqual(view.turns[0].items.map(item => item.text), ['continue', 'done', 'continue']);
   assert.equal(view.turns[0].items.at(-1).id, 'steer');
+});
+
+test('initial client identity removes only its echo and retains identical uncorrelated input', () => {
+  const content = [{ type: 'text', text: 'repeat' }];
+  const view = desktopView({ id: 'thread', turns: [{ turnId: 'turn', params: { input: content, clientUserMessageId: 'initial-client' }, items: [
+    { type: 'userMessage', id: 'real-repeat', clientId: 'follow-up-client', content },
+    { type: 'agentMessage', id: 'answer', text: 'done' },
+    { type: 'userMessage', id: 'late-echo', clientId: 'initial-client', content },
+  ] }] });
+  assert.deepEqual(view.turns[0].items.map(item => item.id), ['initial-user:turn', 'real-repeat', 'answer']);
+});
+
+test('native initial IDs preserve recorded identity while invalid or colliding identities remain synthetic', () => {
+  const content = [{ type: 'text', text: 'repeat' }];
+  const project = (nativeId, items = []) => desktopView({ id: 'thread', turns: [{ turnId: 'turn',
+    remodexInitialUserMessageId: nativeId, params: { input: content }, items }] }).turns[0].items;
+  assert.equal(project('native-initial')[0].id, 'native-initial');
+  for (const invalid of ['', ' ', 'bad\nidentity', 'a'.repeat(1025), null]) assert.equal(project(invalid)[0].id, 'initial-user:turn');
+  const collision = project('answer', [{ type: 'agentMessage', id: 'answer', text: 'done' }]);
+  assert.deepEqual(collision.map(item => item.id), ['initial-user:turn', 'answer']);
+  const unknown = project(null, [{ type: 'userMessage', id: 'initial-user:turn', content }]);
+  assert.deepEqual(unknown.map(item => item.id), ['initial-user:turn:prompt', 'initial-user:turn']);
 });
 
 test('initial image prompts use scoped handles and authorize only structured local image references', () => {
