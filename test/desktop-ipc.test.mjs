@@ -7,6 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DesktopIpc } from '../src/desktop/ipc.mjs';
 import { DesktopSession } from '../src/desktop/session.mjs';
+import { DesktopIpcPool } from '../src/desktop/ipc-pool.mjs';
+import { discoverDesktopOwner } from '../src/desktop/owner-runtime.mjs';
+import { OwnerRouter } from '../src/desktop/owner-router.mjs';
+import { CreationJournal } from '../src/desktop/creation-journal.mjs';
 
 function frame(message) {
   const body = Buffer.from(JSON.stringify(message));
@@ -599,4 +603,98 @@ test('rejects changed or missing owner before sending a write frame', async () =
     await assert.rejects(client.interruptTurn('thread', 'turn'), /expectedOwnerId required/);
     assert.equal(calls.filter(msg => msg.method.startsWith('thread-follower-')).length, 0);
   } finally { await client.close(); await f.close(); }
+});
+
+test('native ten-second discovery completes without clearing a legacy recovery lock', async () => {
+  const journal = new CreationJournal(':memory:');
+  let resumes = 0, replies = 0;
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'test' } }));
+    else if (msg.method === 'thread-owner-discovery') {
+      // Native waits ten seconds when no client claims a thread and one peer
+      // remains silent. Its final response must survive our own deadline.
+      setTimeout(() => { replies++; socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'error', error: 'no-client-found' })); }, 10020);
+    } else assert.fail(`unexpected write ${msg.method}`);
+  });
+  const router = new OwnerRouter({
+    discover: id => discoverDesktopOwner(id, () => new DesktopIpc({ socketPath: f.socketPath })),
+    localOwner: { async resume() { resumes++; } }, projects: async () => [], journal, hostId: 'host', competeUnknown: true,
+  });
+  try {
+    journal.beginRecovery('host', 'legacy', 'old-attempt');
+    await assert.rejects(router.route('legacy'), { code: 'resume-unknown' });
+    assert.equal(replies, 1);
+    assert.equal(resumes, 0);
+    assert.equal(journal.recoveryPending('host', 'legacy'), true);
+    assert.equal(journal.db.prepare('SELECT attempt_id FROM recovery_writes').get().attempt_id, 'old-attempt');
+  } finally { router.close(); journal.close(); await f.close(); }
+});
+
+test('connected discovery silence, transport loss and protocol errors cannot trigger competing resume', async () => {
+  for (const failure of ['handshake', 'silent', 'disconnect', 'protocol']) {
+    const journal = new CreationJournal(':memory:');
+    let resumes = 0;
+    const f = await fixture((socket, msg) => {
+      if (msg.method === 'initialize') {
+        if (failure !== 'handshake') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'test' } }));
+      }
+      else if (msg.method === 'thread-owner-discovery') {
+        if (failure === 'disconnect') socket.destroy();
+        if (failure === 'protocol') socket.write(frame(null));
+      } else assert.fail(`unexpected write ${msg.method}`);
+    });
+    const router = new OwnerRouter({
+      discover: id => discoverDesktopOwner(id, () => new DesktopIpc({ socketPath: f.socketPath, timeout: 40, discoveryTimeout: 70 })),
+      localOwner: { async resume() { resumes++; } }, projects: async () => [], journal, hostId: 'host', competeUnknown: true,
+    });
+    try {
+      await assert.rejects(router.route('thread'), /timed out|disconnect|Invalid IPC message/);
+      assert.equal(resumes, 0);
+      assert.equal(journal.recoveryPending('host', 'thread'), false);
+    } finally { router.close(); journal.close(); await f.close(); }
+  }
+});
+
+test('cancelling one delayed discovery preserves shared stream, ignores its late result and leaves controls bounded', async () => {
+  let connection, delayed, discoveryEntered;
+  const entered = new Promise(resolve => { discoveryEntered = resolve; });
+  const f = await fixture((socket, msg) => {
+    connection = socket;
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'test' } }));
+    else if (msg.method === 'thread-owner-discovery') {
+      if (msg.params.conversationId === 'delayed') { delayed = msg; discoveryEntered(); return; }
+      socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: {} }));
+    } else if (msg.method === 'thread-follower-interrupt-turn') { /* control remains unanswered */ }
+  });
+  const client = new DesktopIpc({ socketPath: f.socketPath, timeout: 40, discoveryTimeout: 500 });
+  const pool = new DesktopIpcPool({ createClient: () => client, idleMs: 10000 });
+  const main = pool.acquire(), caller = pool.acquire();
+  try {
+    await Promise.all([main.connect(), caller.connect()]);
+    const received = [];
+    await main.subscribe('main', change => received.push(change.revision));
+    const pending = caller.discover('delayed');
+    const cancelled = assert.rejects(pending, { code: 'unavailable' });
+    await entered; await caller.close(); await cancelled;
+    assert.equal(client.pending.size, 0);
+    connection.write(frame({ type: 'response', requestId: delayed.requestId, resultType: 'success', handledByClientId: 'stale-owner', result: {} }));
+    connection.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'owner', params: { hostId: 'local', conversationId: 'main', change: { type: 'snapshot', revision: 7 } } }));
+    await main.discover('flush');
+    assert.deepEqual(received, [7]);
+    assert.equal(client.state, 'ready');
+    assert.equal(client.subscriptions.size, 1);
+    await assert.rejects(main.interruptTurn('main', 'turn', { expectedOwnerId: 'owner' }), /timed out/);
+    assert.equal(client.pending.size, 0);
+    assert.equal(client.timeout, 40);
+    assert.equal(client.discoveryTimeout, 500);
+  } finally { await pool.close(); await f.close(); }
+});
+
+test('desktop offline discovery retains the existing local-owner fallback', async () => {
+  let closed = false;
+  assert.deepEqual(await discoverDesktopOwner('thread', () => ({
+    async connect() { throw Object.assign(new Error('desktop closed'), { code: 'ENOENT' }); },
+    async close() { closed = true; },
+  })), { kind: 'unknown' });
+  assert.equal(closed, true);
 });

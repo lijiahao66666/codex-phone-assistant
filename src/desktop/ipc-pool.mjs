@@ -192,9 +192,14 @@ class IpcLease extends EventEmitter {
   }
   async close() { this.pool.release(this); }
 }
-for (const method of ['discover']) {
-  IpcLease.prototype[method] = async function (...args) { this.assertReady(); return this.transport[method](...args); };
-}
+IpcLease.prototype.discover = async function (id, host = 'local', options = {}) {
+  this.assertReady();
+  const result = await this.transport.discover(id, host, {
+    ...options, signal: options.signal ? AbortSignal.any([this.abort.signal, options.signal]) : this.abort.signal,
+  });
+  this.assertReady();
+  return result;
+};
 for (const [method, optionsIndex] of Object.entries({ startTurn: 2, steerTurn: 2, interruptTurn: 2, setCollaborationMode: 3, replyCommandApproval: 3, replyFileApproval: 3, replyUserInput: 3 })) {
   IpcLease.prototype[method] = async function (...args) {
     this.assertReady();

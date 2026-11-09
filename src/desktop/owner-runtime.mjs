@@ -36,6 +36,22 @@ export async function localProjects(codexHome = join(homedir(), '.codex')) {
   });
 }
 
+export async function discoverDesktopOwner(threadId, createClient) {
+  const ipc = createClient();
+  let connected = false;
+  try {
+    await ipc.connect(); connected = true;
+    const { ownerId } = await ipc.discover(threadId);
+    return { kind: 'owner', ownerId };
+  } catch (error) {
+    // An absent/refused local socket preserves the desktop-offline path. A
+    // handshake timeout, unanswered discovery or broken bus proves no absence.
+    const offline = !connected && ['ENOENT', 'ECONNREFUSED'].includes(error?.code);
+    if (!offline && !(connected && error?.code === 'no-client-found')) throw error;
+    return { kind: 'unknown' };
+  } finally { await ipc.close(); }
+}
+
 // A bridge that dies without reaping its app-server leaves an orphan holding the
 // thread writers. Every later resume then fails with "already has an active
 // writer" and the phone can never take a task over again.
@@ -84,12 +100,7 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
     journal = new CreationJournal(join(dataDir, 'creations.sqlite'));
     await reconcileExitedRecoveryExecutions(journal, hostId);
     modelJournal = new ModelJournal(join(dataDir, 'creations.sqlite'));
-    const discover = async threadId => {
-      const ipc = sharedClient();
-      try { await ipc.connect(); const { ownerId } = await ipc.discover(threadId); return { kind: 'owner', ownerId }; }
-      catch { return { kind: 'unknown' }; }
-      finally { ipc.close(); }
-    };
+    const discover = threadId => discoverDesktopOwner(threadId, sharedClient);
     const verifyOwner = async (threadId, ownerId) => {
       const ipc = sharedClient();
       try { await ipc.connect(); return Boolean(await ipc.probeOwner(threadId, ownerId, { timeout: 2500 })); }

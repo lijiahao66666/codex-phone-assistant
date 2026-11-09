@@ -12,10 +12,13 @@ const defaultSocketPath = process.platform === 'win32'
 // This private desktop protocol is version-specific; writes require explicit methods.
 export class DesktopIpc extends EventEmitter {
   #socket;
-  constructor({ socketPath = defaultSocketPath, timeout = 5000, maxFrame = 64 * 1024 * 1024 } = {}) {
+  constructor({ socketPath = defaultSocketPath, timeout, discoveryTimeout = timeout ?? 11000, maxFrame = 64 * 1024 * 1024 } = {}) {
     super();
     this.socketPath = socketPath;
-    this.timeout = timeout;
+    this.timeout = timeout ?? 5000;
+    // Native router discovery can wait ten seconds for a silent peer. Allow its
+    // final response to arrive without extending control or connection timers.
+    this.discoveryTimeout = discoveryTimeout;
     this.maxFrame = maxFrame;
     this.frameHeader = Buffer.alloc(4);
     this.frameHeaderBytes = 0;
@@ -57,25 +60,33 @@ export class DesktopIpc extends EventEmitter {
     this.#socket.write(Buffer.concat([header, body]));
   }
 
-  #request(method, params, { sourceClientId = this.clientId, version = 1, targetClientId, timeout = this.timeout } = {}) {
+  #request(method, params, { sourceClientId = this.clientId, version = 1, targetClientId, timeout = this.timeout, signal } = {}) {
     const versions = { initialize: 1, 'thread-owner-discovery': 1, 'thread-follower-start-turn': 2,
       'thread-follower-steer-turn': 1, 'thread-follower-interrupt-turn': 4, 'thread-follower-update-thread-settings': 2,
       'thread-follower-command-approval-decision': 1, 'thread-follower-file-approval-decision': 1,
       'thread-follower-submit-user-input': 1, 'thread-follower-load-complete-history': 1 };
     if (versions[method] !== version) throw new Error('Unsupported IPC method or version');
+    if (signal?.aborted) return Promise.reject(Object.assign(new Error('IPC request cancelled'), { code: 'unavailable' }));
     const requestId = randomUUID();
+    let cancel;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(requestId); reject(new Error(`${method} timed out`)); }, timeout);
       this.pending.set(requestId, { resolve, reject, timer });
+      cancel = () => {
+        if (!this.pending.delete(requestId)) return;
+        clearTimeout(timer);
+        reject(Object.assign(new Error('IPC request cancelled'), { code: 'unavailable' }));
+      };
+      signal?.addEventListener('abort', cancel, { once: true });
       try { this.#send({ type: 'request', requestId, sourceClientId, version, method, params, ...(targetClientId ? { targetClientId } : {}) }); }
       catch (error) { clearTimeout(timer); this.pending.delete(requestId); reject(error); }
-    });
+    }).finally(() => signal?.removeEventListener('abort', cancel));
   }
 
-  async discover(conversationId, hostId = 'local') {
+  async discover(conversationId, hostId = 'local', { signal } = {}) {
     if (this.state !== 'ready') throw new Error('IPC not ready');
     if (!conversationId || !hostId) throw new Error('conversationId and hostId required');
-    const response = await this.#request('thread-owner-discovery', { hostId, conversationId });
+    const response = await this.#request('thread-owner-discovery', { hostId, conversationId }, { timeout: this.discoveryTimeout, signal });
     if (!response.handledByClientId) throw new Error('Thread owner not found');
     return { ownerId: response.handledByClientId, result: response.result };
   }
@@ -95,7 +106,7 @@ export class DesktopIpc extends EventEmitter {
     if (typeof conversationId !== 'string' || !conversationId.trim()) throw new TypeError('conversationId required');
     if (typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw new TypeError('expectedOwnerId required');
     if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
-    const { ownerId } = await this.discover(conversationId, 'local');
+    const { ownerId } = await this.discover(conversationId, 'local', { signal });
     if (ownerId !== expectedOwnerId) throw Object.assign(new Error('Thread owner changed'), { code: 'unavailable' });
     if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
     if (this.state !== 'ready') throw new Error('IPC not ready');
