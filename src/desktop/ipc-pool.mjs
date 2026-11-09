@@ -52,7 +52,9 @@ export class DesktopIpcPool {
   }
   disconnected(client, detail) {
     if (this.client !== client) return;
-    this.client = null; this.connecting = null; this.entries.clear();
+    this.client = null; this.connecting = null;
+    for (const entry of this.entries.values()) if (!entry.off) entry.reject(unavailable());
+    this.entries.clear();
     const leases = [...this.leases]; this.leases.clear();
     for (const lease of leases) {
       lease.abort.abort();
@@ -76,23 +78,13 @@ export class DesktopIpcPool {
       const client = lease.transport;
       let entry = this.entries.get(key), existing = Boolean(entry);
       if (!entry) {
-        entry = { id, host, consumers: new Set(), client, off: null, pending: null };
+        entry = { id, host, consumers: new Set(), client, off: null, pending: null, generation: 0, beforeSnapshotRequest };
         this.entries.set(key, entry);
       }
       entry.consumers.add(consumer); consumer.entry = entry;
       if (!existing) {
-        entry.pending = client.subscribe(id, (change, source) => {
-          if (this.entries.get(key) !== entry || this.client !== client) return;
-          for (const item of [...entry.consumers]) {
-            if (item.lease.state !== 'ready' || item.lease.subscriptions.get(key) !== item) continue;
-            if (item.awaitingSnapshot && change?.type !== 'snapshot') continue;
-            if (change?.type === 'snapshot') item.awaitingSnapshot = false;
-            try { item.listener(change, source); }
-            catch (error) { item.lease.emit('listenerError', error); }
-          }
-        }, host, { beforeSnapshotRequest }).then(off => {
-          if (this.entries.get(key) !== entry) off(); else entry.off = off;
-        });
+        entry.pending = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
+        this.startSubscription(key, entry);
       }
       await entry.pending;
       lease.assertReady();
@@ -106,6 +98,35 @@ export class DesktopIpcPool {
       throw error;
     }
   }
+  startSubscription(key, entry) {
+    const { id, host, client } = entry, generation = ++entry.generation;
+    void client.subscribe(id, (change, source) => {
+      if (this.entries.get(key) !== entry || this.client !== client || entry.generation !== generation) return;
+      for (const item of [...entry.consumers]) {
+        if (item.lease.state !== 'ready' || item.lease.subscriptions.get(key) !== item) continue;
+        if (item.awaitingSnapshot && change?.type !== 'snapshot') continue;
+        if (change?.type === 'snapshot') item.awaitingSnapshot = false;
+        try { item.listener(change, source); }
+        catch (error) { item.lease.emit('listenerError', error); }
+      }
+    }, host, { beforeSnapshotRequest: entry.beforeSnapshotRequest }).then(off => {
+      if (this.entries.get(key) !== entry || entry.generation !== generation) { off(); return; }
+      entry.off = off; entry.resolve();
+    }, error => {
+      if (this.entries.get(key) === entry && entry.generation === generation) entry.reject(error);
+    });
+  }
+  refreshRecoveryDiscovery(lease, id, host, token) {
+    lease.assertReady();
+    const key = keyFor(id, host), entry = this.entries.get(key);
+    if (!entry || !entry.consumers.size || !lease.subscriptions.has(key)) return false;
+    if (entry.off) return true;
+    if (token != null && entry.recoveryToken === token) return true;
+    entry.recoveryToken = token ?? Symbol('recovery');
+    entry.client.unsubscribe(id, host);
+    this.startSubscription(key, entry);
+    return true;
+  }
   unsubscribe(lease, id, host) {
     const key = keyFor(id, host), consumer = lease.subscriptions.get(key);
     if (!consumer) return false;
@@ -115,8 +136,10 @@ export class DesktopIpcPool {
       entry.consumers.delete(consumer);
       if (!entry.consumers.size && this.entries.get(key) === entry) {
         this.entries.delete(key);
+        entry.generation++;
         try { if (entry.off) entry.off(); else entry.client.unsubscribe(id, host); }
         catch { /* Local removal still completes if the socket is closing. */ }
+        if (!entry.off) entry.reject(unavailable());
       }
     }
     return true;
@@ -154,6 +177,7 @@ class IpcLease extends EventEmitter {
   }
   connect() { return this.pool.connect(this); }
   subscribe(id, listener, host = 'local', options) { return this.pool.subscribe(this, id, listener, host, options); }
+  refreshRecoveryDiscovery(id, host, token) { return this.pool.refreshRecoveryDiscovery(this, id, host, token); }
   unsubscribe(id, host = 'local') { return this.pool.unsubscribe(this, id, host); }
   async probeOwner(id, expectedOwnerId, { timeout = 2000 } = {}) {
     this.assertReady();

@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createPairRelay } from '../src/relay/server.mjs';
 import { createPreviewConnector } from '../src/transport/preview-connector.mjs';
 import { DesktopIpc } from '../src/desktop/ipc.mjs';
+import { DesktopSession } from '../src/desktop/session.mjs';
 import { discoverDesktopOwner } from '../src/desktop/owner-runtime.mjs';
 import { OwnerRouter } from '../src/desktop/owner-router.mjs';
 import { CreationJournal } from '../src/desktop/creation-journal.mjs';
@@ -34,12 +35,15 @@ function frame(value) {
 
 // All three transports are real sockets; both journals and the simulated
 // desktop owner are isolated from the user's Codex data and native IPC bus.
-async function fixture({ recoveryResponseTimeoutMs, requestTimeoutMs, discovery = async () => {}, resume = async () => {}, listThreads = async () => ({ projects: [], recent: [] }) } = {}) {
+async function fixture({ recoveryResponseTimeoutMs, requestTimeoutMs, discovery = async () => {}, resume = async () => {}, listThreads = async () => ({ projects: [], recent: [] }), liveSession = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'recovery-timeout-'));
   const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\recovery-${randomUUID()}` : join(directory, 'ipc.sock');
-  let owned = false, discoveries = 0, resumes = 0;
-  const ipcSockets = new Set();
+  let owned = false, discoveries = 0, resumes = 0, sessionWakeups = 0;
+  const fakeSessions = [], extraStreams = [];
+  const ipcSockets = new Set(), staleDiscovery = deferred(), sessionReady = deferred();
+  let firstIpcSocket;
   const ipcServer = createServer(socket => {
+    if (!firstIpcSocket) firstIpcSocket = socket;
     ipcSockets.add(socket); socket.once('close', () => ipcSockets.delete(socket));
     let buffer = Buffer.alloc(0);
     socket.on('data', chunk => {
@@ -50,12 +54,17 @@ async function fixture({ recoveryResponseTimeoutMs, requestTimeoutMs, discovery 
         if (message.method === 'initialize') socket.write(frame({ type: 'response', requestId: message.requestId, resultType: 'success', result: { clientId: 'follower' } }));
         else if (message.method === 'thread-owner-discovery') {
           discoveries++;
+          if (liveSession && socket === firstIpcSocket && !owned) { staleDiscovery.resolve(); continue; }
           void (async () => {
             if (!owned) await discovery();
             if (!socket.destroyed) socket.write(frame(owned
               ? { type: 'response', requestId: message.requestId, resultType: 'success', handledByClientId: 'local-owner', result: {} }
               : { type: 'response', requestId: message.requestId, resultType: 'error', error: 'no-client-found' }));
           })();
+        } else if (liveSession && message.method === 'thread-stream-following-changed' && message.params.following) {
+          socket.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'local-owner', params: {
+            conversationId: message.params.conversationId, hostId: 'local', change: { type: 'snapshot', revision: 1, conversationState: { id: message.params.conversationId, turns: [] } },
+          } }));
         }
       }
     });
@@ -82,7 +91,19 @@ async function fixture({ recoveryResponseTimeoutMs, requestTimeoutMs, discovery 
   const started = deferred(), streamAbort = new AbortController();
   const connector = createPreviewConnector({ url: `ws://127.0.0.1:${port}/connector`, hostId: host.hostId, secret: host.secret,
     ownerRouter: router, allowInsecureForTests: true, listThreads, readHistory: async id => ({ id, title: 'Isolated', turns: [], requests: [] }),
-    createSession: ({ conversationId }) => Object.assign(new EventEmitter(), { conversationId, start() { started.resolve(); }, async close() {} }),
+    createSession: ({ conversationId }) => {
+      if (!liveSession) {
+        const session = Object.assign(new EventEmitter(), { conversationId, wakeups: 0, start() { started.resolve(); }, recoveryAccepted() { sessionWakeups++; this.wakeups++; }, async close() {} });
+        fakeSessions.push(session);
+        return session;
+      }
+      const session = new DesktopSession({ conversationId, retryBaseMs: 1, createClient: () => new DesktopIpc({ socketPath }) });
+      session.on('state', event => { if (event.status === 'ready') sessionReady.resolve(); });
+      const start = session.start.bind(session), wake = session.recoveryAccepted.bind(session);
+      session.start = () => { started.resolve(); return start(); };
+      session.recoveryAccepted = () => { sessionWakeups++; return wake(); };
+      return session;
+    },
   });
   connector.start();
   for (let attempt = 0; attempt < 200; attempt++) {
@@ -93,12 +114,19 @@ async function fixture({ recoveryResponseTimeoutMs, requestTimeoutMs, discovery 
   const stream = await fetch(base + `/api/threads/${threadId}/events`, { headers: { cookie, 'sec-fetch-site': 'same-origin' }, signal: streamAbort.signal });
   await started.promise;
   return { router, journal, threadId, hostId: host.hostId, deviceId: phone.deviceId,
-    discoveries: () => discoveries, resumes: () => resumes,
+    discoveries: () => discoveries, resumes: () => resumes, sessionWakeups: () => sessionWakeups, fakeSessions, staleDiscovery: staleDiscovery.promise, sessionReady: sessionReady.promise,
+    async openStream() {
+      const controller = new AbortController();
+      const response = await fetch(base + `/api/threads/${threadId}/events`, { headers: { cookie, 'sec-fetch-site': 'same-origin' }, signal: controller.signal });
+      extraStreams.push({ controller, response });
+      return response;
+    },
     isCancelled: () => isCancelled(),
     list: () => fetch(base + '/api/threads', { headers: { cookie, 'sec-fetch-site': 'same-origin' } }),
     recover: (requestId, signal) => post(`/api/threads/${threadId}/recover`, { requestId }, { headers: { cookie }, signal }),
     attempt: requestId => journal.recoveryAttempt(host.hostId, phone.deviceId, threadId, requestId),
     async close() {
+      for (const extra of extraStreams) { extra.controller.abort(); await extra.response.body.cancel().catch(() => {}); }
       streamAbort.abort(); await stream.body.cancel().catch(() => {});
       await connector.close(); await relay.close(); router.close(); journal.close();
       for (const socket of ipcSockets) socket.destroy();
@@ -106,6 +134,32 @@ async function fixture({ recoveryResponseTimeoutMs, requestTimeoutMs, discovery 
     },
   };
 }
+
+test('accepted recovery wakes a stale discovery across relay, connector and IPC', { timeout: 5000 }, async () => {
+  const f = await fixture({ liveSession: true });
+  try {
+    await f.staleDiscovery;
+    const response = await f.recover(randomUUID());
+    assert.equal(response.status, 202);
+    await Promise.race([f.sessionReady, delay(1000).then(() => { throw new Error('session remained on stale discovery'); })]);
+    assert.equal(f.sessionWakeups(), 1);
+    assert.equal(f.resumes(), 1);
+  } finally { await f.close(); }
+});
+
+test('accepted and repeated recovery notify all current same-device streams', { timeout: 5000 }, async () => {
+  const f = await fixture();
+  try {
+    await f.openStream();
+    await until(() => f.fakeSessions.length === 2);
+    const requestId = randomUUID();
+    assert.equal((await f.recover(requestId)).status, 202);
+    assert.deepEqual(f.fakeSessions.map(session => session.wakeups), [1, 1]);
+    assert.equal((await f.recover(requestId)).status, 202);
+    assert.deepEqual(f.fakeSessions.map(session => session.wakeups), [2, 2]);
+    assert.equal(f.resumes(), 1);
+  } finally { await f.close(); }
+});
 
 test('recovery completes after native-style discovery exceeds the ordinary 10 s relay deadline', { timeout: 20000 }, async () => {
   const f = await fixture({ discovery: () => delay(10020) });
@@ -115,6 +169,7 @@ test('recovery completes after native-style discovery exceeds the ordinary 10 s 
     assert.ok(Date.now() - began >= 10000);
     assert.equal(f.discoveries(), 2, 'successful resume also rechecks ownership');
     assert.equal(f.resumes(), 1); assert.equal(f.attempt(requestId), 'accepted');
+    assert.equal(f.sessionWakeups(), 1);
     assert.equal(f.router.isRecoveryLocked(f.threadId), false);
   } finally { await f.close(); }
 });
@@ -144,6 +199,7 @@ for (const cancellation of ['relay-timeout', 'selection-abort']) {
         await until(() => f.router.inFlight === 0 && f.attempt(requestId) === status);
         assert.equal(f.resumes(), phase.startsWith('resume') ? 1 : 0);
         assert.equal(f.attempt(requestId), status);
+        assert.equal(f.sessionWakeups(), 0, 'cancelled recovery cannot restart the detached session');
         assert.equal(f.router.isRecoveryLocked(f.threadId), phase === 'resume-unknown');
         if (phase === 'resume-unknown') {
           const retry = await f.recover(randomUUID());

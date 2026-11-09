@@ -85,6 +85,145 @@ function discoveryRequest(requestId, method = 'thread-owner-discovery') {
   } };
 }
 
+test('accepted recovery wakes a pending follower without accepting its stale discovery', async () => {
+  let discoveries = 0, staleSocket, staleRequest;
+  let observedFirst;
+  const first = new Promise(resolve => { observedFirst = resolve; });
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'follower' } }));
+    else if (msg.method === 'thread-owner-discovery') {
+      if (++discoveries === 1) { staleSocket = socket; staleRequest = msg.requestId; observedFirst(); }
+      else socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: {} }));
+    } else if (msg.method === 'thread-stream-following-changed' && msg.params.following) {
+      socket.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'owner', params: {
+        conversationId: 'thread', hostId: 'local', change: { type: 'snapshot', revision: 1, conversationState: { id: 'thread', turns: [] } },
+      } }));
+    }
+  });
+  const pool = new DesktopIpcPool({ createClient: () => new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 }), idleMs: 10000 });
+  const session = new DesktopSession({ conversationId: 'thread', createClient: () => pool.acquire(), retryBaseMs: 1 });
+  try {
+    const ready = new Promise(resolve => session.on('state', event => { if (event.status === 'ready') resolve(); }));
+    session.start();
+    await first;
+    session.recoveryAccepted();
+    await Promise.race([ready, new Promise((_, reject) => setTimeout(() => reject(new Error('session did not wake')), 500))]);
+    assert.equal(discoveries, 2);
+    assert.equal(session.conversation.ownerId, 'owner');
+    staleSocket.write(frame({ type: 'response', requestId: staleRequest, resultType: 'error', error: 'no-client-found' }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(session.status, 'ready');
+    session.recoveryAccepted();
+    assert.equal(session.status, 'ready');
+    assert.equal(discoveries, 2);
+    await session.close();
+    session.recoveryAccepted();
+    assert.equal(session.status, 'closed');
+  } finally { await session.close(); await pool.close(); await f.close(); }
+});
+
+test('accepted recovery refreshes a shared pending discovery for all followers', async () => {
+  let discoveries = 0, staleSocket, staleRequest;
+  let observedFirst;
+  const first = new Promise(resolve => { observedFirst = resolve; });
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'follower' } }));
+    else if (msg.method === 'thread-owner-discovery') {
+      if (++discoveries === 1) { staleSocket = socket; staleRequest = msg.requestId; observedFirst(); }
+      else socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: {} }));
+    } else if (msg.method === 'thread-stream-following-changed' && msg.params.following) {
+      socket.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'owner', params: {
+        conversationId: 'thread', hostId: 'local', change: { type: 'snapshot', revision: 1, conversationState: { id: 'thread', turns: [] } },
+      } }));
+    }
+  });
+  const pool = new DesktopIpcPool({ createClient: () => new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 }), idleMs: 10000 });
+  const observer = pool.acquire();
+  const session = new DesktopSession({ conversationId: 'thread', createClient: () => pool.acquire(), retryBaseMs: 1 });
+  try {
+    await observer.connect();
+    const snapshots = [];
+    const subscribed = observer.subscribe('thread', change => snapshots.push(change));
+    await first;
+    const ready = new Promise(resolve => session.on('state', event => { if (event.status === 'ready') resolve(); }));
+    session.start();
+    while ([...pool.entries.values()][0]?.consumers.size !== 2) await new Promise(resolve => setTimeout(resolve, 1));
+    session.recoveryAccepted();
+    await Promise.race([ready, new Promise((_, reject) => setTimeout(() => reject(new Error('shared session did not wake')), 500))]);
+    const off = await subscribed;
+    assert.equal(discoveries, 2);
+    assert.ok(snapshots.length >= 1);
+    staleSocket.write(frame({ type: 'response', requestId: staleRequest, resultType: 'error', error: 'no-client-found' }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(session.status, 'ready');
+    assert.equal(pool.entries.size, 1);
+    off();
+  } finally { await session.close(); await observer.close(); await pool.close(); await f.close(); }
+});
+
+test('accepted recovery keeps an established follow while its snapshot is in flight', async () => {
+  let discoveries = 0, follows = 0, socket, followed;
+  const follow = new Promise(resolve => { followed = resolve; });
+  const f = await fixture((peer, msg) => {
+    if (msg.method === 'initialize') peer.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'follower' } }));
+    else if (msg.method === 'thread-owner-discovery') {
+      discoveries++;
+      peer.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', handledByClientId: 'owner', result: {} }));
+    } else if (msg.method === 'thread-stream-following-changed') {
+      if (msg.params.following) { follows++; socket = peer; followed(); }
+      else follows--;
+    }
+  });
+  const pool = new DesktopIpcPool({ createClient: () => new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 }), idleMs: 10000 });
+  const session = new DesktopSession({ conversationId: 'thread', createClient: () => pool.acquire(), retryBaseMs: 1 });
+  try {
+    const ready = new Promise(resolve => session.on('state', event => { if (event.status === 'ready') resolve(); }));
+    session.start();
+    await follow;
+    session.recoveryAccepted('request');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(follows, 1);
+    assert.equal(discoveries, 1);
+    assert.equal(socket.destroyed, false);
+    socket.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'owner', params: {
+      conversationId: 'thread', hostId: 'local', change: { type: 'snapshot', revision: 1, conversationState: { id: 'thread', turns: [] } },
+    } }));
+    await ready;
+    assert.equal(session.status, 'ready');
+  } finally { await session.close(); await pool.close(); await f.close(); }
+});
+
+test('recovery wakeups deduplicate shared requests and release superseded pending discoveries', async () => {
+  let discoveries = 0;
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'follower' } }));
+    else if (msg.method === 'thread-owner-discovery') discoveries++;
+  });
+  const pool = new DesktopIpcPool({ createClient: () => new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 }), idleMs: 10000 });
+  const observer = pool.acquire();
+  const session = new DesktopSession({ conversationId: 'thread', createClient: () => pool.acquire(), retryBaseMs: 1 });
+  const until = async check => { for (let n = 0; n < 200 && !check(); n++) await new Promise(resolve => setTimeout(resolve, 1)); assert.ok(check()); };
+  try {
+    await observer.connect();
+    const pending = observer.subscribe('thread', () => {}).catch(() => {});
+    await until(() => discoveries === 1);
+    session.start();
+    await until(() => [...pool.entries.values()][0]?.consumers.size === 2);
+    session.recoveryAccepted('first');
+    session.recoveryAccepted('first');
+    await until(() => discoveries === 2);
+    assert.equal(pool.client.pending.size, 1);
+    session.recoveryAccepted('second');
+    await until(() => discoveries === 3);
+    assert.equal(pool.client.pending.size, 1);
+    await session.close();
+    await observer.close();
+    await pending;
+    assert.equal(pool.client.pending.size, 0);
+    assert.equal(pool.entries.size, 0);
+  } finally { await session.close(); await observer.close(); await pool.close(); await f.close(); }
+});
+
 test('a read-only follower promptly declines router discovery without claiming or executing a request', async () => {
   const answers = []; let original;
   const f = await fixture((socket, msg) => {

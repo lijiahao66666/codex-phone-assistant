@@ -170,14 +170,14 @@ export class DesktopIpc extends EventEmitter {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     const key = JSON.stringify([hostId, conversationId]);
     if (this.subscriptions.has(key)) throw new Error('Thread already subscribed');
-    const subscription = { conversationId, hostId, listener, ownerId: null };
+    const subscription = { conversationId, hostId, listener, ownerId: null, abort: new AbortController() };
     this.subscriptions.set(key, subscription);
     try {
-      const { ownerId } = await this.discover(conversationId, hostId);
+      const { ownerId } = await this.discover(conversationId, hostId, { signal: subscription.abort.signal });
       if (this.state !== 'ready' || this.subscriptions.get(key) !== subscription) throw new Error('Subscription cancelled');
       if (beforeFollow) await beforeFollow();
       if (this.state !== 'ready' || this.subscriptions.get(key) !== subscription) throw new Error('Subscription cancelled');
-      if (beforeFollow && (await this.discover(conversationId, hostId)).ownerId !== ownerId) throw new Error('Thread owner changed');
+      if (beforeFollow && (await this.discover(conversationId, hostId, { signal: subscription.abort.signal })).ownerId !== ownerId) throw new Error('Thread owner changed');
       if (this.state !== 'ready' || this.subscriptions.get(key) !== subscription) throw new Error('Subscription cancelled');
       subscription.ownerId = ownerId;
       beforeSnapshotRequest?.();
@@ -203,6 +203,7 @@ export class DesktopIpc extends EventEmitter {
     const subscription = this.subscriptions.get(key);
     if (!subscription) return false;
     this.subscriptions.delete(key);
+    subscription.abort.abort();
     if (subscription.ownerId && this.state === 'ready') {
       try { this.#follow(subscription, false); }
       catch (error) {

@@ -28,6 +28,7 @@ export class DesktopSession extends EventEmitter {
     this.client = null;
     this.timer = null;
     this.snapshotTimer = null;
+    this.followingGeneration = null;
   }
 
   get value() { return this.conversation.value; }
@@ -163,6 +164,16 @@ export class DesktopSession extends EventEmitter {
     return this;
   }
 
+  recoveryAccepted(token) {
+    if (!['connecting', 'syncing', 'unavailable'].includes(this.status)) return;
+    if (this.followingGeneration === this.generation) return;
+    try { if (this.client?.refreshRecoveryDiscovery?.(this.conversationId, this.hostId, token)) return; }
+    catch { /* Fall back to a new lease if the pool is no longer usable. */ }
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.#retry('recovery-accepted');
+  }
+
   #invalidate(reason) {
     this.conversation.invalidate(reason);
     this.status = 'unavailable';
@@ -196,7 +207,7 @@ export class DesktopSession extends EventEmitter {
         this.status = 'ready';
         trace('session', 'ready', { thread: this.conversationId, owner: source?.ownerId || null });
         this.emit('state', result);
-      }, this.hostId);
+      }, this.hostId, { beforeSnapshotRequest: () => { if (generation === this.generation) this.followingGeneration = generation; } });
       if (generation !== this.generation) await client.close();
     } catch (error) {
       trace('session', 'connect-failed', { thread: this.conversationId, code: error?.code || null, message: String(error?.message || error).slice(0, 160) });
@@ -208,6 +219,7 @@ export class DesktopSession extends EventEmitter {
     if (this.status === 'closed') return;
     trace('session', 'retry', { thread: this.conversationId, reason, attempt: this.attempt });
     ++this.generation;
+    this.followingGeneration = null;
     clearTimeout(this.snapshotTimer);
     this.snapshotTimer = null;
     this.#invalidate(reason);

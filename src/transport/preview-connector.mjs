@@ -291,12 +291,21 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         writeReplies.set(msg.id, request);
         trace('recover', 'request', { thread: msg.conversationId, requestId: msg.requestId });
         const cancelled = () => request.cancelled || revoked.has(msg.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN;
+        const wakeSessions = () => {
+          for (const session of streams.values()) {
+            if (session.conversationId !== msg.conversationId || session.uploadDeviceId !== msg.deviceId) continue;
+            try { session.recoveryAccepted?.(msg.requestId); } catch { /* Normal session retries remain available. */ }
+          }
+        };
         let locked = false, dispatched = false, registered = false;
         try {
           if (!ownerRouter || cancelled() || !/^[0-9a-f-]{36}$/i.test(msg.requestId || '')) throw new Error('unavailable');
           const attempt = ownerRouter.journal.beginRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId);
           if (!attempt.inserted) {
-            if (!cancelled()) send({ type: 'response', id: msg.id, status: attempt.status === 'accepted' ? 'accepted' : ['rejected', 'cancelled', 'released'].includes(attempt.status) ? 'unavailable' : 'unknown' }, connection, { request, cancellable: true });
+            if (!cancelled()) {
+              if (attempt.status === 'accepted') wakeSessions();
+              send({ type: 'response', id: msg.id, status: attempt.status === 'accepted' ? 'accepted' : ['rejected', 'cancelled', 'released'].includes(attempt.status) ? 'unavailable' : 'unknown' }, connection, { request, cancellable: true });
+            }
             return;
           }
           registered = true;
@@ -309,7 +318,10 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           await ownerRouter.route(msg.conversationId, { isCancelled: cancelled, deviceId: msg.deviceId, requestId: msg.requestId });
           trace('recover', 'accepted', { thread: msg.conversationId });
           if (!ownerRouter.journal.finishRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId, 'accepted') && ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId) !== 'accepted') throw new Error('recovery outcome unknown');
-          if (!cancelled()) send({ type: 'response', id: msg.id, status: 'accepted' }, connection, { request, cancellable: true });
+          if (!cancelled()) {
+            wakeSessions();
+            send({ type: 'response', id: msg.id, status: 'accepted' }, connection, { request, cancellable: true });
+          }
         } catch (error) {
           trace('recover', 'failed', { thread: msg.conversationId, code: error?.code || null, message: String(error?.message || error).slice(0, 160), dispatched });
           let noRecoveryWrite = false;
