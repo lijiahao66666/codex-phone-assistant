@@ -1,5 +1,9 @@
 # stable27 至 stable30 验收记录
 
+stable34 已于 2026-11-09 发布连接诊断：服务器事务返回 FULL_DEPLOYED，配对数据库未替换，服务已重启；本机助手候选包已安装并重新连接，原生桌面进程保持运行。公网 HTML SHA-256 `cc6c8cd2bd2bc864f3aadac1cd0a3836f13c2c62b4d191c9b4b8a9683466b2da`，JS `a19b540f31c06dc35061d6a9f163a8cbbd4a4c6e37b54600776a0eb45ebaa837`。服务器备份 `/opt/codex-hub-paired/backups/stable34-20261109-100824-2000741`，本机旧包 `/Applications/codex手机助手-stable33-backup-20261109.app`。最初静态发布因只更新根目录、实际读取 release 目录而校验失败并回滚，后改为双目录事务成功。
+
+发布后专用 D H5 只读连接实测：页面从选择至 live connected 约 295 ms、输入可编辑约 302 ms；同一匿名 stream ID `a9920dd1-8b17-4fb6-9371-5dcc95d1d8f1` 在本机日志记录 first-ready 12.33 ms、first-encoded 20.08 ms，服务器日志记录 first-received 35.46 ms、first-written 35.63 ms。各端时间为各自进程内耗时；这是一次热连接，不能代表全部聊天或解决旧慢样本原因。未读蓝点与礼品卡锁仍未解决。
+
 原生归档入口复核：专用 B 的原生日志显示 `source=recent_tasks_menu` 归档在 08:41:26 UTC 返回 `-32600`，10:08:34 同入口成功，10:09:40 桌面删除工具成功。专用 E 在 13:52:38 归档返回 `-32600`，13:54:27 成功，后续数据库 archived=1、H5 列表移除；E 两次归档入口均为 `source=dynamic_tool`，不能表述为侧栏按钮验收。两者均不证明助手仍持有 writer 时原生归档或删除成功。日志 `/Users/lijiahao/Library/Logs/com.openai.codex/2026/11/08/codex-desktop-ff9f4375-ae77-4f49-9fbe-b4caec6018c0-40360-t0-i1-064950-0.log`，对应 B 2592、3599、3651 行和 E 7610、7637 行。
 
 stable33 运行状态补验：2026-11-09 侧栏滚动到主任务后，其 DOM 为 `data-status=active`，转圈标记 `aria-label=进行中` 且未 hidden；同一轮原生 `read_thread` 为 active/inProgress。屏幕外未订阅时曾显示 unknown，滚入可见区域后恢复 active；本次仅验证运行中显示，尚未连续观察该回合结束后的 idle。
