@@ -2,9 +2,10 @@
 set -eu
 cd "$(dirname "$0")/.."
 root=$(pwd)
+export MACOSX_DEPLOYMENT_TARGET=12.0
 output="${1:-$root/build/codex手机助手.app}"
 if [ -e "$output" ]; then printf '%s\n' 'Output already exists; choose a new path.' >&2; exit 1; fi
-case "$(uname -m)" in arm64) arch=arm64 ;; x86_64) arch=x64 ;; *) exit 1 ;; esac
+case "$(uname -m)" in arm64) arch=arm64; swift_arch=arm64 ;; x86_64) arch=x64; swift_arch=x86_64 ;; *) exit 1 ;; esac
 version=22.17.1
 archive="node-v${version}-darwin-${arch}.tar.gz"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/codex-hub-build.XXXXXXXX")
@@ -33,12 +34,12 @@ ditto "$root/src" "$output/Contents/Resources/runtime/src"
 ditto "$root/public" "$output/Contents/Resources/runtime/public"
 ditto "$root/node_modules" "$output/Contents/Resources/runtime/node_modules"
 cp "$root/package.json" "$output/Contents/Resources/runtime/"
-swiftc "$root/macos/CodexHub.swift" -o "$output/Contents/MacOS/CodexHub" -framework Cocoa -framework WebKit
+swiftc -target "${swift_arch}-apple-macosx${MACOSX_DEPLOYMENT_TARGET}" "$root/macos/CodexHub.swift" -o "$output/Contents/MacOS/CodexHub" -framework Cocoa -framework WebKit
 cc "$root/macos/validate-image.c" -o "$output/Contents/Resources/runtime/validate-image" -framework CoreFoundation -framework CoreGraphics -framework ImageIO
 cc "$root/macos/safe-media-open.c" -o "$output/Contents/Resources/runtime/safe-media-open"
 swift "$root/macos/icon.swift" "$tmp/CodexHelper.iconset" "$root/macos/chatgpt-icon.png"
 iconutil -c icns "$tmp/CodexHelper.iconset" -o "$output/Contents/Resources/AppIcon.icns"
-/usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string local.codex-hub.preview' -c 'Add :CFBundleName string codex手机助手' -c 'Add :CFBundleDisplayName string codex手机助手' -c 'Add :CFBundleShortVersionString string 0.2.0' -c 'Add :CFBundleVersion string 2' -c 'Add :CFBundleExecutable string CodexHub' -c 'Add :CFBundlePackageType string APPL' -c 'Add :CFBundleIconFile string AppIcon' -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' "$output/Contents/Info.plist" >/dev/null
+/usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string local.codex-hub.preview' -c 'Add :CFBundleName string codex手机助手' -c 'Add :CFBundleDisplayName string codex手机助手' -c 'Add :CFBundleShortVersionString string 0.2.0' -c 'Add :CFBundleVersion string 2' -c 'Add :CFBundleExecutable string CodexHub' -c 'Add :CFBundlePackageType string APPL' -c 'Add :CFBundleIconFile string AppIcon' -c 'Add :LSMinimumSystemVersion string 12.0' -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' "$output/Contents/Info.plist" >/dev/null
 for executable in "$output/Contents/Resources/node" "$output/Contents/Resources/runtime/safe-media-open" "$output/Contents/Resources/runtime/validate-image"; do
   codesign --force --sign - --timestamp=none "$executable"
 done

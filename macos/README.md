@@ -2,16 +2,11 @@
 
 macOS 客户端使用 Swift、WKWebView 和菜单栏入口，随包 Node 后台通过本地 IPC 连接 Codex Desktop。当前安装包适用于 Apple 芯片，要求 macOS 12 或更新版本。
 
-[返回项目首页](../README.md) · [手机端能力说明](../docs/CODEX-CAPABILITIES.md)
+[返回项目首页](../README.md) · [手机端能力说明](../docs/CODEX-CAPABILITIES.md) · [版本说明与已知限制](../docs/stable43-release-notes-2026-11-09.md)
 
 ## 下载
 
-稳定版 v0.2.0 发布后从 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v0.2.0) 下载：
-
-- [macOS Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/codex-phone-assistant-macos-arm64.dmg)
-- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/SHA256SUMS.txt)
-
-也可以从[项目下载页](https://codex.air-inc.top/download/)获取同一安装包。
+从[项目下载页](https://codex.air-inc.top/download/)或 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)获取 macOS Apple Silicon 安装包和对应的 SHA-256 校验值。
 
 ## 系统要求
 
@@ -21,7 +16,7 @@ macOS 客户端使用 Swift、WKWebView 和菜单栏入口，随包 Node 后台�
 
 Intel Mac 当前未提供安装包。
 
-> 安装包尚未经过 Apple 公证。只有在确认来源可信、SHA-256 正确时才继续打开；无法验证来源时应停止安装。
+> 本版使用本地 ad-hoc 签名，未经过 Apple 公证，也没有 Developer ID 签名。只有在确认来源可信、SHA-256 正确时才继续打开；无法验证来源时应停止安装。
 
 ## 安装与首次打开
 
@@ -63,14 +58,14 @@ Intel Mac 当前未提供安装包。
 ## 新聊天、历史恢复和模型
 
 - 在项目列表或顶部选择项目后，可创建手机助手持有的新聊天；首次发送时才创建任务。
-- 无 owner 的历史聊天先以只读方式打开。点击“继续聊天”后，助手会重新确认归属；发现电脑或其他手机已占用时停止写入。
+- 历史聊天在连接期间可先以只读方式显示；助手确认归属并恢复实时状态后，才能发送消息。已有 owner 或写入结果不明时会保留相应保护。
 - 模型和推理强度使用电脑返回的可用列表，只能在任务空闲且没有待确认写入时切换。
 
-这些能力属于当前稳定版候选代码。v0.2.0 公网发布前仍需完成服务器切换和真机逐项验收。
+部分冷连接实测约需 20–32 秒；显示只读历史不等于实时连接完成。冷连接速度优化留到下一期。
 
 ## 手机端限制
 
-手机端是电脑版 Codex 的伴生界面。当前稳定版候选代码已接入项目选择、新聊天、无 owner 历史恢复、模型和推理强度；既有 v0.1.1 Release 不包含本轮改动。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入。目标信息目前只能查看。既有发布版本对照见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
+手机端是电脑版 Codex 的伴生界面。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入，目标信息目前只能查看。H5 暂时隐藏未读蓝点；跨端已读同步、桌面主动接管与持有写入权时归档、礼品卡聊天旧恢复锁留到下一期。完整边界见 [版本说明](../docs/stable43-release-notes-2026-11-09.md) 和 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
 
 ## 托盘与退出
 
@@ -105,4 +100,4 @@ npm run build:macos
 
 ## 验证状态
 
-当前组合自动化测试和浏览器模拟已通过。iPhone 真机和服务器切换后的公网流程仍需复验。Mac 安装后的配对、消息和停止也要在发布前复验。
+本轮完整隔离自动化回归 389/389 通过，并有 Mac 助手与 H5 专用聊天实测；不同版本的验收样本不能合并为最终版本全场景通过。多人长期负载、真实审批闭环、任务运行期间断线恢复和真实 iPhone 键盘、安全区及相机仍未充分验证。具体结果及限制见 [版本说明](../docs/stable43-release-notes-2026-11-09.md)。

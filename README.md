@@ -4,7 +4,7 @@
 
 > 这不是 OpenAI 官方产品。桌面端依赖未公开、可能随 Codex 版本变化的 IPC 协议。
 >
-> 手机端是电脑版 Codex 的伴生界面。目标模式、插件和应用仍未接入；当前稳定版代码已接入新聊天、历史恢复、模型和推理强度。v0.2.0 安装包和公网切换将在稳定版验收后发布。
+> 手机端是电脑版 Codex 的伴生界面。目标编辑、插件和应用仍未接入；支持新聊天、历史恢复、模型和推理强度选择。已知限制和验收范围见 [stable43 版本说明](docs/stable43-release-notes-2026-11-09.md)。
 >
 > 仓库目前为私有。图片、GIF 和 Release 附件需要登录有访问权限的 GitHub 账号；第三方 Markdown 阅读器可能无法加载私有仓库媒体。
 
@@ -18,14 +18,12 @@
 
 ## 下载
 
-稳定版 v0.2.0 尚未发布。发布后，macOS 安装包将使用 v0.2.0；Windows 继续使用已发布的 v0.1.1：
+从下载页获取当前安装包，或在 GitHub Releases 查看版本和校验文件：
 
-| 平台 | 安装包 | 说明 |
-| --- | --- | --- |
-| Windows | [安装器](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64-setup.exe) · [便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.1.1/codex-phone-assistant-windows-x64.zip) | Windows 10/11 x64，支持高 DPI |
-| macOS（待发布） | [Apple Silicon DMG](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/codex-phone-assistant-macos-arm64.dmg) · [ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/codex-phone-assistant-macos-arm64.zip) | macOS 12+，Apple 芯片 |
+- [手机助手下载页](https://codex.air-inc.top/download/)
+- [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)
 
-校验文件（v0.2.0 发布后更新）：[SHA256SUMS.txt](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.2.0/SHA256SUMS.txt)
+本次验收针对 macOS 助手与 H5；Windows 的功能和安装包以其对应版本说明为准。
 
 安装步骤：
 
@@ -45,7 +43,7 @@
 
 目标信息仍是只读展示：手机端可以看到已有目标的状态、内容和计时，但不能创建、修改、暂停、恢复或清除目标。
 
-当前稳定版候选代码提供项目选择、新聊天、无 owner 历史聊天恢复，以及模型和推理强度选择。首条消息发送时才创建聊天；桌面持有的聊天继续通过桌面 IPC 操作。助手持有的聊天由独立 app-server 运行，遇到 active writer 冲突会拒绝恢复；运行中和写入结果未知时拒绝普通退出。桌面新任务通过列表变化通知触发手机刷新。上述能力已通过隔离流程、协议测试和浏览器模拟验收；公网切换、iPhone 真机和 Windows 新能力仍需稳定版发布前逐项复核。
+首条消息发送时才创建聊天；桌面持有的聊天继续通过桌面 IPC 操作。助手持有的聊天由独立 app-server 运行，遇到 active writer 冲突会拒绝恢复；运行中和写入结果未知时拒绝普通退出。桌面新任务通过列表变化通知触发手机刷新。macOS 与 H5 已完成自动化回归及专用聊天实测；多人长期负载、真实审批等场景仍需补验，不把手机视口模拟视为真实 iPhone 验收。
 
 完整能力矩阵和实现边界见 [手机端与 Codex 能力对照](docs/CODEX-CAPABILITIES.md)。
 
@@ -114,7 +112,7 @@ npm ci
 npm run build:macos
 ```
 
-默认输出为 `build/codex手机助手.app`。Apple Silicon 包使用本地 ad-hoc 签名。安装、配对和浏览器验收结果在发布前记录；下载、未公证提示处理、配对和常见问题见 [macOS 安装与使用](macos/README.md)。
+默认输出为 `build/codex手机助手.app`。Apple Silicon 包使用本地 ad-hoc 签名。下载、未公证提示处理、配对和常见问题见 [macOS 安装与使用](macos/README.md)。
 
 ## 配置
 
@@ -136,17 +134,11 @@ Windows 图片能力默认关闭；文字配对、历史、发送和停止不依
 
 详见 [能力对照](docs/CODEX-CAPABILITIES.md)、[docs/SECURITY.md](docs/SECURITY.md) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-## 发布状态
+## 已知限制
 
-Windows 版已完成以下真实验证：
+- 部分聊天冷连接实测约需 20–32 秒；可先显示只读历史，连接速度优化留到下一期。
+- H5 暂不显示未读蓝点。跨端已读同步留到下一期，电脑端蓝点仍按桌面行为显示。
+- 助手持有写入权时，桌面主动接管及归档仍有限制；礼品卡聊天的旧恢复锁仍保留，均留到下一期处理。
+- 部分历史图片只能显示数量，无法预览。多人长期负载、真实审批和实际手机键盘、安全区等场景尚未完成验证。
 
-- 当前组合测试 182 项全部通过（包含协议、历史、上传、配对恢复和模型流程）
-- Windows 命名管道握手、项目与任务读取
-- Windows 150% 缩放下的 Per-Monitor V2 清晰渲染
-- H5 配对、历史、发送与停止
-- 关闭到托盘、再次启动唤回
-- 安装、卸载和重新安装
-
-H5 已移除灰色安全区，标题与按钮居中，保留用户确认清晰的 8 CSS 像素独立窗口留白。附件使用无损压缩与协商并发，消息点击发送后进入聊天并在后台传输。新聊天、历史恢复、模型切换和只读历史分页已纳入当前组合测试。
-
-当前中转入口为 `npm run start:relay`，配置与本地验证见 [运行中转服务](docs/RELAY.md)。稳定版发布前仍需核对线上入口、静态资源哈希、数据库备份、Mac 安装包和下载页内容；历史快照不作为当前启动入口。仓库不授予再分发许可，公开或商业发布前仍需确定许可证、检查图标与第三方依赖授权。
+版本变更、测试证据与覆盖边界见 [stable43 版本说明](docs/stable43-release-notes-2026-11-09.md) 和 [验收记录](docs/stable41-acceptance-report-2026-11-09.md)。中转配置见 [运行中转服务](docs/RELAY.md)；历史快照不作为当前启动入口。仓库不授予再分发许可，公开或商业发布前仍需确定许可证、检查图标与第三方依赖授权。
