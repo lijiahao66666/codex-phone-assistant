@@ -20,7 +20,7 @@ async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers =
   let requestClock=0;
   const fixtureTimeout=(fn,ms,...args)=>{
     if(manualRequestTimers&&ms>=10000){const timer={unref(){}};requestTimers.set(timer,{at:requestClock+ms,run:()=>fn(...args)});return timer;}
-    if(manualHandoverTimers&&ms===1500){const timer={unref(){}};handoverTimers.set(timer,()=>fn(...args));return timer;}
+    if(manualHandoverTimers&&ms===30000){const timer={unref(){}};handoverTimers.set(timer,()=>fn(...args));return timer;}
     if(!manualRecoveryTimers||ms!==500)return setTimeout(fn,ms,...args);
     const timer={unref(){}};recoveryTimers.set(timer,()=>fn(...args));return timer;
   };
@@ -538,9 +538,21 @@ test('an inconclusive list status leaves the handover deadline to clear the old 
   const f=await fixture(undefined,{manualHandoverTimers:true});
   f.run("projectList.append(renderTask({id:selectedId,title:'running',status:'idle'}));updateLiveTaskStatus(selectedId,'active');beginStatusHandover(selectedId);projectList.replaceChildren(renderTask({id:selectedId,title:'running',status:'unknown'}))");
   assert.equal(f.handoverTimers.size,1);
+  assert.equal(f.run("projectList.querySelector('.task-active').dataset.status"),'checking');
+  assert.equal(f.run("projectList.querySelector('.task-active').hidden"),false);
+  f.run("acceptSidebarStatuses({[selectedId]:'unknown'})");
+  assert.equal(f.run("projectList.querySelector('.task-active').dataset.status"),'checking');
   for(const fire of f.handoverTimers.values())fire();f.handoverTimers.clear();
   assert.equal(f.run("projectList.querySelector('.task-active').hidden"),true);
   assert.equal(f.run('statusHandovers.has(selectedId)'),false);
+});
+
+test('a fresh sidebar status resolves handover immediately, including idle',async()=>{
+  const f=await fixture(undefined,{manualHandoverTimers:true});
+  f.run("projectList.append(renderTask({id:selectedId,title:'running',status:'active'}));updateLiveTaskStatus(selectedId,'active');beginStatusHandover(selectedId);acceptSidebarStatuses({[selectedId]:'idle'})");
+  assert.equal(f.run('statusHandovers.has(selectedId)'),false);
+  assert.equal(f.run("projectList.querySelector('.task-active').hidden"),true);
+  assert.equal(f.handoverTimers.size,0);
 });
 
 test('list refresh retains the selected task project and only fills a placeholder title',async()=>{

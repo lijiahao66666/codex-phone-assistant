@@ -2191,6 +2191,14 @@ function taskStatusIsActive(state) {
 }
 function setTaskIndicator(marker, state) {
   if (!marker) return;
+  if (state === 'checking') {
+    marker.hidden = false;
+    marker.dataset.status = 'checking';
+    marker.className = 'task-active task-status-checking';
+    marker.title = '状态更新中';
+    marker.setAttribute('aria-label', '状态更新中');
+    return;
+  }
   const active = taskStatusIsActive(state);
   marker.hidden = !active;
   marker.dataset.status = active ? 'active' : 'idle';
@@ -2202,13 +2210,14 @@ function applySidebarStatuses() {
   for (const task of projectList.querySelectorAll?.('.task') || []) {
     const marker = task.querySelector?.('.task-active');
     const observed = sidebarStatusSnapshot?.get(task.dataset.id) ?? task.dataset.status;
-    setTaskIndicator(marker, liveTaskStatus.get(task.dataset.id) === 'active' ? 'active' : observed);
+    setTaskIndicator(marker, liveTaskStatus.get(task.dataset.id) === 'active' ? 'active' : statusHandovers.has(task.dataset.id) ? 'checking' : observed);
   }
 }
 function acceptSidebarStatuses(value) {
   // The observer also retains running tasks outside the four visible slots.
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 1024 || Object.entries(value).some(([id, state]) => !uuid.test(id) || !['active', 'idle', 'unknown'].includes(state))) return;
   sidebarStatusSnapshot = new Map(Object.entries(value));
+  for (const [id, state] of sidebarStatusSnapshot) if (state === 'active' || state === 'idle') clearStatusHandover(id);
   for (const task of projectList.querySelectorAll?.('.task') || []) {
     const state = sidebarStatusSnapshot.get(task.dataset.id);
     if (state) task.dataset.status = state;
@@ -2245,12 +2254,13 @@ function beginStatusHandover(id) {
   if (liveTaskStatus.get(id) !== 'active') { updateLiveTaskStatus(id, 'unknown'); return; }
   liveTaskStatus.delete(id);
   clearStatusHandover(id);
+  sidebarStatusSnapshot?.delete(id);
   for (const task of projectList.querySelectorAll('.task')) {
     if (task.dataset.id !== id) continue;
-    const marker = task.querySelector?.('.task-active');
-    if (marker) { marker.className = 'task-active task-status-checking'; marker.title = '状态更新中'; marker.setAttribute('aria-label', '状态更新中'); }
+    task.dataset.status = 'unknown';
+    setTaskIndicator(task.querySelector?.('.task-active'), 'checking');
   }
-  const timer = setTimeout(() => { statusHandovers.delete(id); updateLiveTaskStatus(id, 'unknown'); }, 1500);
+  const timer = setTimeout(() => { statusHandovers.delete(id); updateLiveTaskStatus(id, 'unknown'); }, 30000);
   timer?.unref?.(); statusHandovers.set(id, timer);
 }
 function chevronIcon() {
@@ -2284,7 +2294,7 @@ function renderTask(task) {
   const observedStatus = sidebarStatusSnapshot?.get(task.id) ?? button.dataset.status;
   button.append(indicator);
   if (task.unread === true && task.id !== selectedId) { const dot = element('span', 'task-unread', ''); dot.title = '未读'; dot.setAttribute('aria-label', '未读'); button.append(dot); }
-  setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : observedStatus);
+  setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
   button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); if (selected) item.querySelector?.('.task-unread')?.remove(); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
