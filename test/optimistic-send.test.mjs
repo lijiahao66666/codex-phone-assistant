@@ -132,7 +132,8 @@ test('device scope change aborts old pending work and cannot reuse new device cr
   assert.equal(f.run('outgoingList.hidden'),true);
   assert.equal(f.requests.some(r=>r.url.endsWith('/messages')),false);
   assert.equal(f.requests.some(r=>r.options.headers?.['x-codex-expected-device']==='new-device'),false);
-  assert.deepEqual(f.revoked,['blob:old']);
+  assert.deepEqual(f.revoked,[]);
+  assert.equal(f.run("[...outgoingMessages.values()][0][0].state"),'failed');
 });
 
 test('capabilities negotiate 512 KB chunks and preserve 128 KB compatibility',async()=>{

@@ -388,32 +388,69 @@ const deviceScrim = document.querySelector('#device-scrim');
 const deviceCurrent = document.querySelector('#device-current');
 const deviceList = document.querySelector('#device-list');
 let historyScope = null, historyScopeGeneration = 0, deviceLoadGeneration = 0, homeConnectionConfirmed = false;
+let deviceIdentityRetryTimer;
 const deviceChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('codex-device-selection-v1') : null;
 async function scopedFetch(url, options = {}) {
   const path = typeof url === 'string' ? url : '';
   if (!path.startsWith('/api/') || path.startsWith('/api/devices')) return fetch(url, options);
   if (!historyScope && window.pairingReady && path !== '/api/host-status') throw new Error('Device identity unavailable');
   const scopeGeneration = historyScopeGeneration;
+  const ensureCurrentScope = () => { if (scopeGeneration !== historyScopeGeneration) throw Object.assign(new Error('Device scope changed'), { name: 'AbortError' }); };
   const response = await fetch(url, { ...options, headers: { ...options.headers, ...(historyScope ? { 'x-codex-expected-device': historyScope.deviceId } : {}) } });
+  ensureCurrentScope();
   if (response.status === 401) {
     const body = await response.clone().json().catch(() => null);
     if (scopeGeneration === historyScopeGeneration && body?.error === 'device-replaced') showPairingConflict(body.activeDeviceId);
   }
   if (response.status === 409 && historyScope) {
     const body = await response.clone().json().catch(() => null);
-    if (body?.error === 'device-changed') deviceChanged();
+    if (scopeGeneration === historyScopeGeneration && body?.error === 'device-changed') deviceChanged();
+  }
+  ensureCurrentScope();
+  if (typeof response.json === 'function') {
+    const readJson = response.json.bind(response);
+    response.json = async (...args) => { const value = await readJson(...args); ensureCurrentScope(); return value; };
   }
   return response;
 }
 function resetHistoryScope(clearStored = false) {
   cancelOutgoingForScopeChange(); historyRequest?.abort(); historyRequest = null; recordedHistory = null; historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
 }
-function deviceChanged() {
+// Unknown writes remain bound to their original device; switching never retries them.
+const deviceCreationDrafts = new Map(), deviceSubmissionGuards = new Map(), deviceConversationDrafts = new Map();
+function invalidateDeviceState() {
+  clearTimeout(deviceIdentityRetryTimer); deviceIdentityRetryTimer = undefined;
+  if (newDraft && currentDeviceId) {
+    newDraft.text = messageInput.value;
+    if (newDraft.pending) { newDraft.uncertain = true; newDraft.message = '发送结果未知，请先检查原电脑任务列表'; newDraft.controller?.abort(); }
+    deviceCreationDrafts.set(currentDeviceId, newDraft);
+  }
+  if (currentDeviceId && submissions.size) deviceSubmissionGuards.set(currentDeviceId, new Map(submissions));
+  submissions.clear();
+  if (currentDeviceId) {
+    if (selectedId && !newDraft) drafts.set(selectedId, messageInput.value);
+    deviceConversationDrafts.set(currentDeviceId, {
+      text: new Map(drafts), images: new Map(imageDrafts), savedCreation: savedNewDraft?.deviceId === currentDeviceId ? savedNewDraft : null,
+      models: new Map([...modelChanges].map(([id, change]) => [id, { ...change, cancelling: false, checkAfterCancel: true, message: '切换结果未知，请先重新检查模型状态' }])),
+      modes: new Map([...modeChanges].map(([id, change]) => [id, { ...change, uncertain: true, message: '切换结果未知，请查看电脑上的模式' }])),
+      pendingModels: new Map(pendingModelChanges), pendingModes: new Map(pendingModeChanges),
+      stops: new Map([...stops].map(([id, stop]) => [id, stop.pending ? { ...stop, pending: false, error: true, message: '停止结果未知，请查看任务状态' } : { ...stop }])),
+    });
+  }
+  newDraft = null; savedNewDraft = null; newProjectBar.hidden = true;
   resetHistoryScope(); clearTimeout(reconnectTimer); active?.abort(); active = undefined;
-  selectedId = null; renderOutgoingMessages(); clearRecentViews(); clearConversation(); invalidateThreadList(); status('电脑已切换', 'error');
-  location.reload();
+  ++hostStatusGeneration; clearTimeout(hostStatusTimer);
+  selectedId = null; connected = false; currentDeviceId = null;
+  modelDeviceGeneration++; modelCatalog = []; modelChanges.clear(); pendingModelChanges.clear(); newModels = []; liveModel = null;
+  imageUploadAvailable = false; uploadCompression = null; uploadConcurrency = 1;
+  drafts.clear(); imageDrafts.clear(); stops.clear(); modeChanges.clear(); pendingModeChanges.clear(); modeNotices.clear();
+  messageInput.value = ''; clearRecentViews(); clearConversation(); invalidateThreadList(); status('电脑已切换', 'idle'); updateComposer();
 }
-if (deviceChannel) deviceChannel.onmessage = event => { if (event.data?.type === 'device-changed') deviceChanged(); };
+function deviceChanged() {
+  invalidateDeviceState();
+  void startPairedHome();
+}
+if (deviceChannel) deviceChannel.onmessage = event => { if (event.data?.type === 'device-changed') void startPairedHome({ preserveDeviceState: true }); };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 sessionStorage.removeItem('codex-hub-token');
 sessionStorage.removeItem('codex-hub-thread');
@@ -988,7 +1025,7 @@ function imagePreviewButton(handle, threadId, inline = false, label = '查看图
     try {
       let size, mime, offset = 0; const chunks = [];
       do {
-        const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/images/${handle}/chunks/${offset}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+        const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/images/${handle}/chunks/${offset}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
         if (!response.ok) throw new Error('unavailable');
         const part = await response.json();
         if (!['image/png', 'image/jpeg', 'image/webp'].includes(part.mime) || !Number.isSafeInteger(part.size) || part.size < 1 || part.size > 8 * 1024 * 1024 || part.offset !== offset || (size !== undefined && (size !== part.size || mime !== part.mime)) || typeof part.data !== 'string' || part.data.length > 174764) throw new Error('invalid');
@@ -1069,7 +1106,7 @@ function videoPreviewButton(media, threadId, occurrence = Symbol('video')) {
     try {
       let size, mime = media.mime, offset = 0; const chunks = [];
       do {
-        const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/images/${media.id}/chunks/${offset}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+        const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/images/${media.id}/chunks/${offset}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
         if (!response.ok) throw new Error('unavailable');
         const part = await response.json();
         if (!['video/mp4', 'video/webm', 'video/quicktime'].includes(part.mime) || !Number.isSafeInteger(part.size) || part.size < 1 || part.size > 32 * 1024 * 1024 || part.offset !== offset || (size !== undefined && (size !== part.size || mime !== part.mime)) || typeof part.data !== 'string') throw new Error('invalid');
@@ -1111,14 +1148,16 @@ async function encodeUploadChunk(chunk, signal, compressionAllowed = true) {
   return { body: chunk, compressionRatio: 1, headers: { 'content-type': 'application/octet-stream' } };
 }
 async function loadCapabilities() {
+  const generation = historyScopeGeneration;
   try {
     const response = await scopedFetch('/api/capabilities', { credentials: 'same-origin', cache: 'no-store' });
     const data = response.ok ? await response.json() : null;
+    if (generation !== historyScopeGeneration) return;
     imageUploadAvailable = data?.imageUpload === true && [128 * 1024, 512 * 1024].includes(data?.imageChunkBytes) && data?.maxImageBytes === 20 * 1024 * 1024;
     imageChunkBytes = imageUploadAvailable ? data.imageChunkBytes : 128 * 1024;
     uploadCompression = data?.uploadCompression === 'gzip' ? 'gzip' : null;
     uploadConcurrency = data?.uploadConcurrency === 2 ? 2 : 1;
-  } catch { imageUploadAvailable = false; uploadCompression = null; uploadConcurrency = 1; }
+  } catch { if (generation !== historyScopeGeneration) return; imageUploadAvailable = false; uploadCompression = null; uploadConcurrency = 1; }
   updateComposer();
 }
 const submissions = new Map();
@@ -1126,6 +1165,16 @@ const stops = new Map();
 const modeChanges = new Map();
 const pendingModeChanges = new Map();
 const modeNotices = new Map();
+const unlockModeChange = document.createElement('button');
+unlockModeChange.type = 'button'; unlockModeChange.className = 'unlock-send'; unlockModeChange.hidden = true;
+unlockModeChange.textContent = '已核实电脑模式，解除本地保护';
+document.querySelector('.send-feedback')?.append?.(unlockModeChange);
+let modeUnlockTarget = null;
+unlockModeChange.addEventListener('click', () => {
+  const target = modeUnlockTarget;
+  if (!target || !connected || newDraft || currentDeviceId !== target.deviceId || historyScopeGeneration !== target.generation || selectedId !== target.threadId || modeChanges.get(target.threadId) !== target.change || !target.change.uncertain) return;
+  modeChanges.delete(target.threadId); updateComposer();
+});
 let liveMode = null, liveRuntimeStatus = null;
 let activeTurnId = null;
 const expandedThinking = new Set();
@@ -1289,10 +1338,10 @@ async function applyModeChange(id, target) {
     });
     if (modeChanges.get(id) !== change) return;
     if (response.ok) change.message = '等待电脑确认模式';
-    else if (response.status === 408 || response.status >= 500) change.message = '切换结果未知，请查看电脑上的模式';
+    else if (response.status === 408 || response.status >= 500) { change.uncertain = true; change.message = '切换结果未知，请查看电脑上的模式'; }
     else { modeChanges.delete(id); modeNotices.set(id, '模式切换未被接受'); }
   } catch {
-    if (modeChanges.get(id) === change) change.message = '切换结果未知，请查看电脑上的模式';
+    if (modeChanges.get(id) === change) { change.uncertain = true; change.message = '切换结果未知，请查看电脑上的模式'; }
   } finally {
     clearTimeout(timer);
     if (selectedId === id) updateComposer();
@@ -1424,6 +1473,9 @@ function updateComposer() {
   fileChoose.disabled = imageChoose.disabled;
   const modeAvailable = newDraft ? true : ['default', 'plan'].includes(liveMode);
   const modeChange = selectedId && modeChanges.get(selectedId);
+  const canUnlockMode = Boolean(!newDraft && currentDeviceId && historyScope && connected && modeChange?.uncertain);
+  unlockModeChange.hidden = !canUnlockMode; unlockModeChange.disabled = !canUnlockMode;
+  modeUnlockTarget = canUnlockMode ? { deviceId: currentDeviceId, generation: historyScopeGeneration, threadId: selectedId, change: modeChange } : null;
   const pendingMode = selectedId && pendingModeChanges.get(selectedId);
   const effectiveMode = newDraft ? (newDraft.mode === 'plan' ? 'plan' : 'default') : (pendingMode || modeChange?.target || liveMode);
   modeChoose.hidden = !modeAvailable;
@@ -1528,21 +1580,21 @@ async function recoverSelectedChat({ preserveStream = null, isCurrent = () => tr
 recoverChat.addEventListener('click', recoverSelectedChat);
 stopButton.addEventListener('click', async () => {
   flushPendingRender();
-  const id = selectedId, turnId = activeTurnId;
+  const id = selectedId, turnId = activeTurnId, scopeGeneration = historyScopeGeneration;
   if (!id || !turnId || !connected || stops.get(id)?.turnId === turnId || recoveryBlocksWrite()) return;
   stops.set(id, { turnId, pending: true, message: '正在停止...' });
   updateComposer();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(`/api/threads/${encodeURIComponent(id)}/stop`, {
+    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/stop`, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ turnId }),
     });
-    if (stops.get(id)?.turnId !== turnId) return;
+    if (scopeGeneration !== historyScopeGeneration || stops.get(id)?.turnId !== turnId) return;
     if (response.ok) {
       let result; try { result = await response.json(); } catch { /* Older relays may return no body. */ }
-      if (stops.get(id)?.turnId !== turnId) return;
+      if (scopeGeneration !== historyScopeGeneration || stops.get(id)?.turnId !== turnId) return;
       if (result?.status === 'stopped-goal-pause-failed') stops.set(id, { turnId, error: true, goalPauseFailed: true, message: '任务已停止，但目标暂停失败，请在电脑上检查目标状态' });
       else if (selectedId === id && activeTurnId !== turnId) stops.delete(id);
       else stops.set(id, { turnId, message: '已发送停止请求，等待任务状态更新' });
@@ -1550,9 +1602,10 @@ stopButton.addEventListener('click', async () => {
     else if (response.status === 408 || response.status >= 500) stops.set(id, { turnId, error: true, message: '停止结果未知，请查看任务状态' });
     else stops.set(id, { turnId, error: true, message: '停止请求未被接受，请查看任务状态' });
   } catch {
-    if (stops.get(id)?.turnId === turnId) stops.set(id, { turnId, error: true, message: '停止结果未知，请查看任务状态' });
+    if (scopeGeneration === historyScopeGeneration && stops.get(id)?.turnId === turnId) stops.set(id, { turnId, error: true, message: '停止结果未知，请查看任务状态' });
   } finally {
     clearTimeout(timer);
+    if (scopeGeneration !== historyScopeGeneration) return;
     const latestStop = stops.get(id);
     if (selectedId === id && activeTurnId && activeTurnId !== turnId && latestStop?.turnId === turnId && !latestStop.goalPauseFailed) stops.delete(id);
     if (selectedId === id) updateComposer();
@@ -1568,7 +1621,8 @@ outgoingList.className = 'outgoing-messages'; outgoingList.hidden = true;
 outgoingList.setAttribute('aria-label', '待送达的消息');
 turns.after?.(outgoingList);
 function outgoingScopeKey(threadId = selectedId) { return JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId]); }
-function outgoingScopeMatches(entry) { return entry.scopeGeneration === historyScopeGeneration && entry.scopeKey === outgoingScopeKey(entry.threadId); }
+function outgoingDeviceMatches(entry) { return entry.scopeKey === outgoingScopeKey(entry.threadId); }
+function outgoingScopeMatches(entry) { return entry.scopeGeneration === historyScopeGeneration && outgoingDeviceMatches(entry); }
 function hasPendingOutgoing(threadId) {
   return Boolean(threadId && (outgoingMessages.get(outgoingScopeKey(threadId)) || []).some(entry => ['queued', 'sending', 'unknown'].includes(entry.state)));
 }
@@ -1611,7 +1665,7 @@ function renderOutgoingMessages() {
       const actions = element('div', 'outgoing-actions');
       const edit = element('button', 'outgoing-edit', entry.state === 'unknown' ? '确认未送达后恢复草稿' : '恢复草稿'); edit.type = 'button';
       edit.addEventListener('click', () => {
-        if (newDraft || !outgoingScopeMatches(entry) || selectedId !== entry.threadId || !['failed', 'unknown', 'queued'].includes(entry.state)) return;
+        if (newDraft || !outgoingDeviceMatches(entry) || selectedId !== entry.threadId || !['failed', 'unknown', 'queued'].includes(entry.state)) return;
         const pending = imageDrafts.get(entry.threadId) || [];
         if (pending.length + entry.images.length > 4) { entry.error = '请先处理输入框中的附件，再恢复这条消息'; renderOutgoingMessages(); return; }
         messageInput.value = [messageInput.value, entry.text].filter(Boolean).join('\n'); drafts.set(entry.threadId, messageInput.value);
@@ -1619,7 +1673,7 @@ function renderOutgoingMessages() {
         entry.images = []; disposeOutgoing(entry); renderImageDraft(); renderOutgoingMessages(); updateComposer(); void runOutgoingQueue(entry.threadId);
       });
       const dismiss = element('button', 'outgoing-dismiss', '移除'); dismiss.type = 'button';
-      dismiss.addEventListener('click', () => { if (entry.state === 'sending') return; disposeOutgoing(entry); renderOutgoingMessages(); updateComposer(); void runOutgoingQueue(entry.threadId); });
+      dismiss.addEventListener('click', () => { if (!outgoingDeviceMatches(entry) || entry.state === 'sending') return; disposeOutgoing(entry); renderOutgoingMessages(); updateComposer(); void runOutgoingQueue(entry.threadId); });
       actions.append(edit, dismiss); group.append(actions);
     }
     row.append(group); fragment.append(row);
@@ -1629,10 +1683,11 @@ function renderOutgoingMessages() {
 }
 function cancelOutgoingForScopeChange() {
   for (const entries of outgoingMessages.values()) for (const entry of [...entries]) {
-    if (entry.messageDispatched) { entry.state = 'unknown'; entry.controller?.abort(); }
-    else disposeOutgoing(entry);
+    entry.controller?.abort();
+    if (entry.messageDispatched) entry.state = 'unknown';
+    else if (['queued', 'sending'].includes(entry.state)) { entry.state = 'failed'; entry.error = '电脑已切换，请恢复草稿后重试'; }
   }
-  outgoingBarriers.clear(); outgoingViewVersions.clear();
+  outgoingWorkers.clear(); outgoingBarriers.clear(); outgoingViewVersions.clear();
   renderOutgoingMessages();
 }
 function syncOutgoingWithView(view) {
@@ -1645,7 +1700,7 @@ function syncOutgoingWithView(view) {
   void runOutgoingQueue(view.id);
 }
 async function runOutgoingQueue(threadId) {
-  const key = outgoingScopeKey(threadId);
+  const key = outgoingScopeKey(threadId), generation = historyScopeGeneration;
   if (outgoingWorkers.has(key) || outgoingBarriers.has(key)) return outgoingWorkers.get(key);
   const entry = (outgoingMessages.get(key) || [])[0];
   if (!entry || entry.state !== 'queued' || !outgoingScopeMatches(entry)) return;
@@ -1656,7 +1711,7 @@ async function runOutgoingQueue(threadId) {
       const work = recoverSelectedChat(); outgoingWorkers.set(key, work);
       try { await work; }
       finally {
-        outgoingWorkers.delete(key);
+        if (outgoingWorkers.get(key) === work) outgoingWorkers.delete(key);
         const recovery = recoveries.get(recoveryKey(currentDeviceId, threadId));
         if (outgoingScopeMatches(entry) && (!recovery || recovery.status === 'unavailable')) { entry.state = 'failed'; entry.error = recovery?.message || '暂时无法连接，请恢复草稿后重试'; }
         if (outgoingScopeMatches(entry)) { renderOutgoingMessages(); updateComposer(); }
@@ -1666,7 +1721,10 @@ async function runOutgoingQueue(threadId) {
   }
   const work = sendOutgoing(entry);
   outgoingWorkers.set(key, work);
-  try { await work; } finally { outgoingWorkers.delete(key); if (selectedId === threadId) { renderOutgoingMessages(); updateComposer(); } void runOutgoingQueue(threadId); }
+  try { await work; } finally {
+    if (outgoingWorkers.get(key) === work) outgoingWorkers.delete(key);
+    if (generation === historyScopeGeneration) { if (selectedId === threadId) { renderOutgoingMessages(); updateComposer(); } void runOutgoingQueue(threadId); }
+  }
 }
 async function sendOutgoing(entry) {
   const id = entry.threadId, text = entry.text, images = entry.images;
@@ -1772,13 +1830,13 @@ composerForm.addEventListener('submit', async event => {
   event.preventDefault();
   flushPendingRender();
   if (newDraft) {
-    const draft = newDraft, text = messageInput.value;
+    const draft = newDraft, text = messageInput.value, draftScopeGeneration = historyScopeGeneration;
     if (!connected || !draft.projectId || (!text.trim() && !draft.attachments.length) || draft.pending || draft.uncertain) return;
     const selectedModel = newModels.find(item => item.model === draft.model);
     if (draft.model && (!selectedModel || (draft.effort && !selectedModel.supportedReasoningEfforts.includes(draft.effort)))) { draft.message = '模型暂不可用，请重新选择'; updateComposer(); return; }
     if (!draft.requestId) draft.requestId = crypto.randomUUID();
     stopVoice(); draft.pending = true; draft.message = '发送中...'; newProject.disabled = true; renderNewModels(); updateComposer();
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 120000);
+    const controller = draft.controller = new AbortController(), timer = setTimeout(() => controller.abort(), 120000);
     let preparedThread = draft.prepared?.threadId, dispatched = false, creationDispatched = false, inProgressUpload;
     const stagedIds = draft.prepared?.uploaded || [];
     try {
@@ -1860,9 +1918,11 @@ composerForm.addEventListener('submit', async event => {
         dispatched = true; creationDispatched = true;
         response = await scopedFetch('/api/chats', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, projectId: draft.projectId, text, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
       }
+      if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed');
       if (!response.ok) {
         if (response.status === 504) {
           const result = await response.json().catch(() => null);
+          if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed');
           if (result?.error === 'start-unknown' && uuid.test(result.threadId || '')) {
             saveProject(draft.projectId); savedNewDraft = null; newDraft = null; newProjectBar.hidden = true;
             selectedId = result.threadId; selectedTitle = '新聊天'; drafts.set(selectedId, text);
@@ -1876,6 +1936,7 @@ composerForm.addEventListener('submit', async event => {
         draft.pending = false; draft.requestId = null; draft.message = '创建失败，请重试'; return;
       }
       const result = await response.json();
+      if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed');
       if (!uuid.test(result?.threadId || '')) throw new Error('uncertain');
       for (const attachment of draft.attachments) disposeAttachmentDraft(attachment);
       saveProject(draft.projectId); savedNewDraft = null; newDraft = null; newProjectBar.hidden = true;
@@ -1885,6 +1946,7 @@ composerForm.addEventListener('submit', async event => {
       if (draft.mode === 'plan') pendingModeChanges.set(selectedId, 'plan');
       renderImageDraft(); void loadThreads(); void connect(selectedId);
     } catch (error) {
+      if (draftScopeGeneration !== historyScopeGeneration) { draft.uncertain = true; draft.message = '发送结果未知，请先检查原电脑任务列表'; return; }
       if (preparedThread && !dispatched) {
         if (inProgressUpload) void scopedFetch(`/api/threads/${preparedThread}/uploads/${inProgressUpload}`, { method: 'DELETE', credentials: 'same-origin', headers: { 'x-creation-id': draft.requestId } }).catch(() => {});
         draft.message = '附件上传失败，可继续发送，或放弃并打开聊天';
@@ -2069,7 +2131,7 @@ function openAgentHistory(name, threadId, agentId) {
   panel.append(content);
   void (async () => {
     try {
-      const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/agents/${encodeURIComponent(agentId)}/history`, { credentials: 'same-origin', cache: 'no-store' });
+      const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/agents/${encodeURIComponent(agentId)}/history`, { credentials: 'same-origin', cache: 'no-store' });
       if (!response.ok) throw new Error();
       const result = await response.json();
       if (panel.isConnected === false) return;
@@ -2125,16 +2187,37 @@ async function loadDevices() {
   const generation = ++deviceLoadGeneration;
   try {
     const response = await fetch('/api/devices', { credentials: 'same-origin', cache: 'no-store' });
-    if (!response.ok) return;
+    if (!response.ok) return false;
     const data = await response.json();
-    if (generation !== deviceLoadGeneration) return;
-    if (!Array.isArray(data.devices) || !data.devices.length) return;
+    if (generation !== deviceLoadGeneration) return false;
+    if (!Array.isArray(data.devices)) return false;
+    if (!data.devices.length) { if (historyScope) invalidateDeviceState(); showUnpaired(); return true; }
     const current = data.devices.find(item => item.deviceId === data.currentDeviceId);
     if (current && uuid.test(current.hostId || '') && uuid.test(current.deviceId || '')) {
-      if (historyScope && (historyScope.hostId !== current.hostId || historyScope.deviceId !== current.deviceId)) resetHistoryScope();
+      if (historyScope && (historyScope.hostId !== current.hostId || historyScope.deviceId !== current.deviceId)) invalidateDeviceState();
       historyScope = { hostId: current.hostId, deviceId: current.deviceId };
-    } else resetHistoryScope();
+    } else invalidateDeviceState();
     currentDeviceId = current?.deviceId || null;
+    if (historyScope && deviceConversationDrafts.has(currentDeviceId)) {
+      const saved = deviceConversationDrafts.get(currentDeviceId); deviceConversationDrafts.delete(currentDeviceId);
+      savedNewDraft = saved.savedCreation;
+      for (const [id, text] of saved.text) drafts.set(id, text);
+      for (const [id, images] of saved.images) imageDrafts.set(id, images);
+      for (const [id, change] of saved.models) modelChanges.set(id, change);
+      for (const [id, change] of saved.modes) modeChanges.set(id, change);
+      for (const [id, change] of saved.pendingModels) pendingModelChanges.set(id, change);
+      for (const [id, target] of saved.pendingModes) pendingModeChanges.set(id, target);
+      for (const [id, stop] of saved.stops) stops.set(id, stop);
+    }
+    if (historyScope && deviceSubmissionGuards.has(currentDeviceId)) {
+      for (const [id, state] of deviceSubmissionGuards.get(currentDeviceId)) submissions.set(id, state);
+      deviceSubmissionGuards.delete(currentDeviceId);
+    }
+    if (historyScope && !newDraft && deviceCreationDrafts.has(currentDeviceId)) {
+      newDraft = deviceCreationDrafts.get(currentDeviceId); deviceCreationDrafts.delete(currentDeviceId);
+      messageInput.value = newDraft.text || ''; newProjectBar.hidden = false;
+      renderNewModels(); updateComposer(); void loadNewModels(newDraft, currentDeviceId);
+    }
     if (currentDeviceId && selectedId && recoveryStream?.threadId === selectedId && !recoveryStream.controller.signal.aborted && !recoveryChecks.has(recoveryKey(currentDeviceId, selectedId))) void checkRecoveryStatus(selectedId, currentDeviceId, recoveryStream);
     deviceCurrent.textContent = current?.name || '选择电脑';
     deviceCurrent.append(chevronIcon());
@@ -2157,10 +2240,8 @@ async function loadDevices() {
         try {
           const result = await fetch('/api/devices/select', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ deviceId: device.deviceId }) });
           if (!result.ok) throw new Error('切换电脑失败');
-          if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; clearRecentViews(); invalidateThreadList();
-          clearTimeout(reconnectTimer); active?.abort(); active = undefined; selectedId = null;
-          modelDeviceGeneration++; modelCatalog = []; modelChanges.clear(); liveModel = null; drafts.clear(); clearImageDrafts(); submissions.clear(); modeChanges.clear(); modeNotices.clear(); messageInput.value = ''; clearConversation(); status('未连接', 'idle');
-          deviceMenu.open = false; connectSidebarStatuses(); await loadDevices(); await loadThreads(); void loadModels(); void refreshHostStatus();
+          invalidateDeviceState(); deviceChannel?.postMessage({ type: 'device-changed' });
+          deviceMenu.open = false; await startPairedHome();
         } catch { fail('切换电脑失败'); } finally { choose.disabled = false; }
       });
       const remove = element('button', 'device-remove', '移除配对');
@@ -2172,19 +2253,15 @@ async function loadDevices() {
         try {
           const result = await fetch('/api/devices/remove', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ deviceId: device.deviceId }) });
           if (!result.ok) throw new Error('移除失败');
-          clearRecentViews(); invalidateThreadList();
-          clearTimeout(reconnectTimer); active?.abort(); active = undefined; selectedId = null;
-          modelDeviceGeneration++; modelCatalog = []; modelChanges.clear(); liveModel = null; drafts.clear(); clearImageDrafts(); submissions.clear(); modeChanges.clear(); modeNotices.clear(); messageInput.value = ''; clearConversation(); status('未连接', 'idle');
-          const refresh = await fetch('/api/devices', { credentials: 'same-origin', cache: 'no-store' });
-          const remaining = refresh.ok ? await refresh.json() : { devices: [] };
-          if (!remaining.devices?.length) { location.assign('/'); return; }
-          connectSidebarStatuses(); await loadDevices(); await loadThreads(); void loadModels(); void refreshHostStatus();
+          deviceChannel?.postMessage({ type: 'device-changed' });
+          await startPairedHome({ preserveDeviceState: true });
         } catch { fail('移除电脑失败'); } finally { remove.disabled = false; }
       });
       row.append(choose, remove); rows.push(row);
     }
     deviceList.replaceChildren(...rows); deviceMenu.hidden = false;
-  } catch { /* Local development mode has no device endpoint. */ }
+    return true;
+  } catch { return false; /* Local development mode has no device endpoint. */ }
 }
 const liveTaskStatus = new Map();
 let sidebarEvents, sidebarWatchdog, sidebarEventGeneration = 0, sidebarStatusSnapshot = null;
@@ -2226,25 +2303,66 @@ function acceptSidebarStatuses(value) {
   }
   applySidebarStatuses();
 }
-function stopSidebarStatuses() { ++sidebarEventGeneration; clearTimeout(sidebarWatchdog); sidebarEvents?.close(); sidebarEvents = undefined; sidebarStatusSnapshot = typeof EventSource === 'undefined' ? null : new Map(); applySidebarStatuses(); }
-function connectSidebarStatuses({ allowSelected = false } = {}) {
+function stopSidebarStatuses() {
+  ++sidebarEventGeneration; clearTimeout(sidebarWatchdog); sidebarEvents?.abort(); sidebarEvents = undefined;
+  sidebarStatusSnapshot = new Map(); applySidebarStatuses();
+}
+function connectSidebarStatuses({ allowSelected = false, attempt = 0 } = {}) {
   stopSidebarStatuses();
-  if (typeof EventSource === 'undefined' || (selectedId && !allowSelected)) return;
-  const generation = sidebarEventGeneration;
-  const selectedAtOpen = selectedId;
-  const source = sidebarEvents = new EventSource('/api/sidebar/events');
-  const arm = () => { clearTimeout(sidebarWatchdog); sidebarWatchdog = setTimeout(() => { if (generation === sidebarEventGeneration && sidebarEvents === source && selectedId === selectedAtOpen) connectSidebarStatuses({ allowSelected }); }, 45000); };
-  source.addEventListener('sidebar-status', event => {
-    if (generation !== sidebarEventGeneration || sidebarEvents !== source) return;
-    let value; try { value = JSON.parse(event.data); } catch { return; }
-    acceptSidebarStatuses(value); arm();
-  });
-  source.addEventListener('thread-list-changed', () => {
-    if (generation === sidebarEventGeneration && sidebarEvents === source) { refreshChangedThreadList(); arm(); }
-  });
-  source.addEventListener('sidebar-heartbeat', () => { if (generation === sidebarEventGeneration && sidebarEvents === source) arm(); });
-  source.onerror = () => { if (generation !== sidebarEventGeneration || sidebarEvents !== source) return; sidebarStatusSnapshot = new Map(); applySidebarStatuses(); };
+  if (!historyScope || (selectedId && !allowSelected) || document.hidden === true || pageSuspended) return;
+  const generation = sidebarEventGeneration, scopeGeneration = historyScopeGeneration, selectedAtOpen = selectedId;
+  const controller = sidebarEvents = new AbortController();
+  let retryAttempt = attempt;
+  const isCurrent = () => generation === sidebarEventGeneration && scopeGeneration === historyScopeGeneration && sidebarEvents === controller && !controller.signal.aborted && selectedId === selectedAtOpen;
+  const reconnect = () => { if (isCurrent()) connectSidebarStatuses({ allowSelected, attempt: retryAttempt + 1 }); };
+  const arm = () => { clearTimeout(sidebarWatchdog); sidebarWatchdog = setTimeout(reconnect, 45000); sidebarWatchdog?.unref?.(); };
+  const handle = block => {
+    let type = '', data = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) type = line.slice(6).trim();
+      else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+    }
+    if (type === 'sidebar-status') {
+      let value; try { value = JSON.parse(data.join('\n')); } catch { return; }
+      acceptSidebarStatuses(value);
+    } else if (type === 'thread-list-changed') refreshChangedThreadList();
+    else if (type !== 'sidebar-heartbeat') return;
+    retryAttempt = 0; arm();
+  };
   arm();
+  void (async () => {
+    let reader;
+    const cancelReader = () => { void reader?.cancel().catch(() => {}); };
+    controller.signal.addEventListener('abort', cancelReader, { once: true });
+    try {
+      const response = await scopedFetch('/api/sidebar/events', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      if (!isCurrent()) { void response.body?.cancel(); return; }
+      if (!response.ok || !response.body) throw new Error('unavailable');
+      reader = response.body.getReader();
+      const decoder = new TextDecoder(); let pending = '';
+      while (isCurrent()) {
+        const { value, done } = await reader.read();
+        if (!isCurrent()) return;
+        if (done) throw new Error('closed');
+        const chunk = decoder.decode(value, { stream: true });
+        if (pending.endsWith('\r') && chunk.startsWith('\n')) pending = pending.slice(0, -1);
+        pending += chunk.replace(/\r\n/g, '\n');
+        if (pending.length > 256 * 1024) throw new Error('oversized');
+        let end;
+        while ((end = pending.indexOf('\n\n')) !== -1) {
+          if (!isCurrent()) return;
+          const block = pending.slice(0, end); pending = pending.slice(end + 2); handle(block);
+        }
+      }
+    } catch {
+      if (!isCurrent()) return;
+      sidebarStatusSnapshot = new Map(); applySidebarStatuses(); clearTimeout(sidebarWatchdog);
+      sidebarWatchdog = setTimeout(reconnect, Math.min(30000, 1000 * 2 ** Math.min(retryAttempt, 5))); sidebarWatchdog?.unref?.();
+    } finally {
+      controller.signal.removeEventListener('abort', cancelReader);
+      if (reader) { try { await reader.cancel(); } catch {} reader.releaseLock?.(); }
+    }
+  })();
 }
 const statusHandovers = new Map();
 function clearStatusHandover(id) {
@@ -2354,6 +2472,7 @@ function pauseBackgroundPolling({ includePairing = true } = {}) {
   clearTimeout(listRetryTimer); listRetryTimer = undefined;
   clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined;
   clearTimeout(hostStatusTimer); hostStatusTimer = undefined;
+  clearTimeout(deviceIdentityRetryTimer); deviceIdentityRetryTimer = undefined;
   ++listRequestGeneration; ++hostStatusGeneration;
 }
 function scheduleVisibleStatusRefresh() {
@@ -2570,7 +2689,7 @@ async function fetchThreadList() {
     const handover = [...statusHandovers.keys()][0];
     let body = JSON.stringify({ visibleThreads: visible, ...(handover && visible.includes(handover) ? { handoverThread: handover } : {}) });
     if (visible.length > 1024 || body.length > 1048576) body = JSON.stringify({ visibleThreads: [] });
-    const response = await fetch('/api/threads', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body });
+    const response = await scopedFetch('/api/threads', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body });
     if (generation !== listRequestGeneration) return false;
     if (response.status === 401 || response.status === 403) retry = false;
     if (!response.ok) throw new Error(await responseError(response, `任务列表加载失败 (${response.status})`));
@@ -2869,7 +2988,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           if (!request.questions.every(q => draft.answers[q.id]?.trim())) { status.textContent = '请回答所有问题'; return; }
           draft.pending = true; submit.disabled = true; status.textContent = '';
           try {
-            const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/user-input`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: request.id, answers: draft.answers }) });
+            const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/user-input`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: request.id, answers: draft.answers }) });
             if (!response.ok) throw new Error();
             draft.feedback = '已提交，等待任务更新'; draft.outcome = '已提交';
           } catch { draft.feedback = '结果暂不确定，请查看电脑上的任务状态'; draft.outcome = '结果待确认'; }
@@ -2895,7 +3014,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
             if (selectedId !== threadId || draft.pending || draft.completed || recoveryBlocksWrite()) return;
             draft.pending = true; updateRecoveryGuardedControls();
             try {
-              const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/approvals`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: request.id, kind: request.kind, decision }) });
+              const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/approvals`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: request.id, kind: request.kind, decision }) });
               if (!response.ok) throw new Error();
               draft.completed = true; draft.message = decision === 'accept' ? '已允许，等待任务更新' : '已拒绝，等待任务更新';
               draft.card.replaceChildren(element('p', '', draft.message));
@@ -3226,7 +3345,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           if (!asyncQuestions.every(q => draft.answers[q.id]?.trim())) { feedback.textContent = '请回答所有问题'; return; }
           draft.pending = true; submit.disabled = true;
           try {
-            const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/async-question`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: item.id, answers: draft.answers }) });
+            const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/async-question`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: item.id, answers: draft.answers }) });
             if (!response.ok) throw new Error();
             draft.feedback = '已提交，等待任务更新'; draft.outcome = '已提交';
           } catch { draft.feedback = '结果暂不确定，请查看电脑上的任务状态'; draft.outcome = '结果待确认'; }
@@ -3546,7 +3665,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   if (!preserveView) showConversationLoading();
   if (!uuid.test(id)) { diagnostic.close('invalid'); current.abort(); fail('任务 ID 格式不正确'); return; }
   const cached = recentView(id);
-  if (cached) void fetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store', signal: current.signal }).then(response => {
+  if (cached) void scopedFetch('/api/host-status', { credentials: 'same-origin', cache: 'no-store', signal: current.signal }).then(response => {
     if ((response.status === 401 || response.status === 403) && active === current) clearRecentViews();
     if (response.ok && active === current && !current.signal.aborted && !connected && !receivedView) { showState(cached, false); status('连接中', 'connecting'); }
   }).catch(() => {});
@@ -3557,7 +3676,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
     // a preview: the stream alone may establish attachment or request recovery.
     void (async () => {
       try {
-        const response = await fetch(`/api/threads/${encodeURIComponent(id)}/recorded-history`, { credentials: 'same-origin', cache: 'no-store', signal: current.signal,
+        const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/recorded-history`, { credentials: 'same-origin', cache: 'no-store', signal: current.signal,
           headers: { 'x-codex-expected-device': deviceId, 'x-codex-history-chunks': '1' } });
         if (!response.ok || !canPreview()) { await response.body?.cancel(); return; }
         const page = await readHistoryPage(response, current.signal, { maxBytes: 4 * 1024 * 1024 });
@@ -3571,7 +3690,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   resetWatchdog();
   try {
     diagnostic.mark('fetch');
-    const response = await fetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1', 'x-codex-staged-preview': '1' } });
+    const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/events`, { credentials: 'same-origin', signal: current.signal, cache: 'no-store', headers: { 'x-codex-view-delta': '3', 'x-codex-sidebar-status': '1', 'x-codex-history-window': '1', 'x-codex-staged-preview': '1' } });
     if (current.signal.aborted || active !== current) return;
     diagnostic.mark('headers'); diagnostic.correlate(response.headers?.get?.('x-codex-stream-id'));
     if (response.status === 401 || response.status === 403) { const message = await responseError(response, '配对状态不可用'); if (active !== current || current.signal.aborted) return; clearRecentViews(); current.abort(); fail(message); return; }
@@ -3646,12 +3765,22 @@ function showUnpaired() {
   projectList.replaceChildren(element('p', 'list-status', '配对电脑后查看任务'));
   status('未配对', 'idle');
 }
-async function startPairedHome() {
+async function startPairedHome({ preserveDeviceState = false } = {}) {
+  const scopeGeneration = historyScopeGeneration;
   pairingAvailable = true;
   connection.hidden = false;
   const control = document.querySelector('#unpaired-control'); if (control) control.hidden = true;
-  await loadDevices();
-  if (!pairingAvailable || !historyScope) return;
+  const devicesLoaded = await loadDevices();
+  if (!pairingAvailable) return;
+  if (!devicesLoaded || !historyScope) {
+    if (!pageSuspended && document.hidden !== true) {
+      clearTimeout(deviceIdentityRetryTimer);
+      deviceIdentityRetryTimer = setTimeout(() => { deviceIdentityRetryTimer = undefined; void startPairedHome({ preserveDeviceState }); }, 5000); deviceIdentityRetryTimer?.unref?.();
+    }
+    return;
+  }
+  clearTimeout(deviceIdentityRetryTimer); deviceIdentityRetryTimer = undefined;
+  if (preserveDeviceState && scopeGeneration === historyScopeGeneration) return;
   connectSidebarStatuses(); void loadThreads(); void loadCapabilities(); void loadModels(); void refreshHostStatus();
   if (pairingConflict) void refreshPairingStatus();
 }
@@ -3686,18 +3815,22 @@ else startPairedHome();
 document.addEventListener?.('visibilitychange', () => {
   if (document.hidden !== true && !pageSuspended && (pairingAvailable || pairingWasReplaced)) void refreshPairingStatus();
   if (document.hidden === true) { discardDeferredListRender(); pauseBackgroundPolling(); }
-  else if (!pageSuspended && pairingAvailable) { void loadThreads(); void refreshHostStatus(); }
+  else if (!pageSuspended && pairingAvailable) { if (!historyScope) void startPairedHome(); else { void loadThreads(); void refreshHostStatus(); } }
   else if (!pageSuspended && window.pairingReady) void checkPairingStatus();
 });
 window.addEventListener('pagehide', () => { discardDeferredListRender(); cancelPendingRender(); pageSuspended = true; stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; pauseBackgroundPolling(); for (const id of statusHandovers.keys()) clearStatusHandover(id); active?.abort(); });
-window.addEventListener('pageshow', event => {
+window.addEventListener('pageshow', async event => {
   if (!event.persisted) return;
   pageSuspended = false;
   if (pairingConflict) void refreshPairingStatus();
   if (!pairingAvailable) { if (window.pairingReady) void checkPairingStatus(); return; }
+  await loadDevices();
+  if (pageSuspended) return;
+  if (!historyScope) { if (pairingAvailable) void startPairedHome(); return; }
   if (!selectedId) connectSidebarStatuses();
-  void loadDevices();
   void loadThreads();
+  void loadModels();
+  void loadCapabilities();
   void refreshHostStatus();
   if (selectedId) void connect(selectedId);
 });
