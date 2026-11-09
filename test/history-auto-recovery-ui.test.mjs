@@ -9,6 +9,7 @@ const response=(value={},status=200)=>({ok:status>=200&&status<300,status,json:a
 async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers = false, manualHandoverTimers = false, manualRequestTimers = false } = {}) {
   class Element {
     constructor(){this.children=[];this.listeners={};this.dataset={};this.value='';this.style={};this.classList={toggle(){},contains(){return false;}};this.scrollHeight=300;this.clientHeight=500;this.scrollTop=0;}
+    getBoundingClientRect(){return this.rect||{top:0,bottom:500,left:0,right:250,width:250,height:500};}
     addEventListener(type,fn){this.listeners[type]=fn;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}get childNodes(){return this.children;}setAttribute(){}after(){}before(){}
     querySelectorAll(selector){return this.children.flatMap(node=>[...(selector.startsWith('.')&&String(node.className||'').split(/\s+/).includes(selector.slice(1))?[node]:[]),...node.querySelectorAll(selector)]);}
     querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
@@ -26,7 +27,7 @@ async function fixture(handler, { stubLoadThreads = true, manualRecoveryTimers =
   const fixtureClearTimeout=timer=>{if(!recoveryTimers.delete(timer)&&!handoverTimers.delete(timer)&&!requestTimers.delete(timer))clearTimeout(timer);};
   const document={listeners:{},addEventListener(type,fn){this.listeners[type]=fn;},querySelector(key){if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key);},createElement(){return new Element();},createDocumentFragment(){return new Element();}};
   const store={read:async()=>null,reserve:async(...args)=>{reserves.push(args);return true;},remove:async(...args)=>{removes.push(args);return true;}};
-  const context=vm.createContext({document,store,crypto:webcrypto,AbortController,URLSearchParams,TextDecoder,TextEncoder,Date,setTimeout:fixtureTimeout,clearTimeout:fixtureClearTimeout,localStorage:{getItem(){return null;},removeItem(){}},sessionStorage:{removeItem(){}},window:{addEventListener(){}},fetch:async(url,options={})=>{
+  const context=vm.createContext({document,store,crypto:webcrypto,AbortController,URLSearchParams,TextDecoder,TextEncoder,Date,setTimeout:fixtureTimeout,clearTimeout:fixtureClearTimeout,localStorage:{getItem(){return null;},removeItem(){}},sessionStorage:{removeItem(){}},window:{innerWidth:1300,innerHeight:800,addEventListener(){}},fetch:async(url,options={})=>{
     requests.push({url,options});return await handler?.(url,options)||response({projects:[],recent:[]});
   }});
   let source=await readFile(new URL('../public/desktop.js',import.meta.url),'utf8');
@@ -496,6 +497,17 @@ test('thread list sends visible ids as a POST body so the relay can resolve runn
   assert.ok(call);assert.equal(call.options.method,'POST');
   assert.equal(call.options.headers['content-type'],'application/json');
   assert.deepEqual(JSON.parse(call.options.body).visibleThreads,[id]);
+});
+
+test('visible sidebar rows are observed on desktop and excluded when the mobile drawer is offscreen',async()=>{
+  const other='22222222-2222-4222-8222-222222222222';
+  const f=await fixture(async()=>response({projects:[],recent:[]}),{stubLoadThreads:false});
+  f.run(`selectedId=null;projectList.append(renderTask({id:'${other}',title:'active'}));`);
+  await f.run('loadThreads()');
+  assert.deepEqual(JSON.parse(f.requests.filter(r=>r.url.endsWith('/api/threads')).at(-1).options.body).visibleThreads,[other]);
+  f.run(`projectList.append(renderTask({id:'${other}',title:'active'}));window.innerWidth=375;projectList.rect={top:0,bottom:700,left:-300,right:0,width:300,height:700};projectList.querySelector('.task').rect={top:100,bottom:136,left:-300,right:0,width:300,height:36}`);
+  await f.run('loadThreads()');
+  assert.deepEqual(JSON.parse(f.requests.filter(r=>r.url.endsWith('/api/threads')).at(-1).options.body).visibleThreads,[]);
 });
 
 test('sidebar SSE updates running indicators when retained tasks exceed the visible window',async()=>{

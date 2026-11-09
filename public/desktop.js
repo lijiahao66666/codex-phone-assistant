@@ -2354,12 +2354,11 @@ projectList.addEventListener('scroll', scheduleVisibleStatusRefresh, { passive: 
 function visibleStatusIds() {
   const ids = [...statusHandovers.keys()];
   if (uuid.test(selectedId || '')) ids.push(selectedId);
-  if (sidebar.classList.contains?.('open')) {
-    const bounds = projectList.getBoundingClientRect();
-    for (const task of projectList.querySelectorAll('.task')) {
-      const rect = task.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom && uuid.test(task.dataset.id)) ids.push(task.dataset.id);
-    }
+  const bounds = projectList.getBoundingClientRect();
+  for (const task of projectList.querySelectorAll('.task')) {
+    const rect = task.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom &&
+        rect.right > 0 && rect.left < window.innerWidth && rect.bottom > 0 && rect.top < window.innerHeight && uuid.test(task.dataset.id)) ids.push(task.dataset.id);
   }
   return [...new Set(ids)].slice(0, 4);
 }
