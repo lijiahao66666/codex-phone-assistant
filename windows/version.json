@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "build": 52,
+  "version": "1.0.1",
+  "build": 53,
   "updateFeedUrl": "https://codex.air-inc.top/download/windows/latest-manual.json",
   "installerUrl": "",
   "releaseNotesUrl": "https://codex.air-inc.top/download/",
