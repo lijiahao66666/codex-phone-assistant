@@ -38,7 +38,6 @@ internal sealed class PhoneForm : Form
     private Uri? panelUri;
     private bool quitting;
     private bool checkingUpdates;
-    private CancellationTokenSource? updateCancellation;
 
     public PhoneForm(EventWaitHandle showEvent, EventWaitHandle quitEvent)
     {
@@ -182,15 +181,14 @@ internal sealed class PhoneForm : Form
                 return;
             }
             updateTimer.Stop();
-            var notes = string.IsNullOrWhiteSpace(release.ReleaseNotesUrl) ? "" : $"\n\n版本说明：{release.ReleaseNotesUrl}";
             var answer = MessageBox.Show(
                 this,
-                $"发现新版本 {release.Version}（构建 {release.Build}）。\n当前版本 {BuildInfo.Version}（构建 {BuildInfo.Build}）。{notes}\n\n是否下载并安装？安装时助手会退出并在完成后重新启动。",
+                $"发现新版本 {release.Version}（构建 {release.Build}）。\n当前版本 {BuildInfo.Version}（构建 {BuildInfo.Build}）。\n\n是否打开下载页面？请自行下载并安装新版本。",
                 Text,
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Information,
                 MessageBoxDefaultButton.Button1);
-            if (answer == DialogResult.Yes) await DownloadAndApplyUpdateAsync(release);
+            if (answer == DialogResult.Yes) Process.Start(new ProcessStartInfo("https://codex.air-inc.top/download/") { UseShellExecute = true });
         } catch (OperationCanceledException) {
         } catch (UpdateException error) {
             if (userInitiated) MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -204,65 +202,6 @@ internal sealed class PhoneForm : Form
             checkUpdateItem.Text = oldText;
             if (autoUpdateItem.Checked && !quitting) updateTimer.Start();
         }
-    }
-
-    private async Task DownloadAndApplyUpdateAsync(UpdateRelease release)
-    {
-        if (updates is null) return;
-        updateCancellation = new CancellationTokenSource();
-        using var progress = new UpdateProgressForm(release.Version, updateCancellation);
-        progress.Show(this);
-        try {
-            var installer = await updates.DownloadAndVerifyAsync(
-                release,
-                UpdateService.UpdateDirectory,
-                new Progress<int>(progress.SetProgress),
-                updateCancellation.Token);
-            progress.SetProgress(100);
-            progress.Complete();
-
-            if (!IsInstalledCopy()) {
-                MessageBox.Show(
-                    this,
-                    $"更新已下载并通过校验：\n{installer}\n\n自动安装仅支持安装版。便携版请退出助手后手动运行该安装包。",
-                    Text,
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                return;
-            }
-
-            var appPath = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(appPath)) throw new UpdateException("无法确定当前应用路径。");
-            updates.LaunchUpdater(
-                Path.Combine(AppContext.BaseDirectory, "updater.ps1"),
-                installer,
-                release,
-                appPath,
-                UpdateService.UpdateDirectory);
-            quitting = true;
-            Close();
-        } catch (OperationCanceledException) {
-            if (!progress.IsDisposed) progress.Complete();
-        } catch (UpdateException error) {
-            if (!progress.IsDisposed) progress.Complete();
-            MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        } catch (Exception error) {
-            if (!progress.IsDisposed) progress.Complete();
-            MessageBox.Show(this, $"更新失败：{error.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
-        } finally {
-            updateCancellation?.Dispose();
-            updateCancellation = null;
-        }
-    }
-
-    private static bool IsInstalledCopy()
-    {
-        var expected = Path.GetFullPath(Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Programs",
-            "codex-phone-assistant")).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var actual = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool ReadAutoUpdateSetting()
@@ -282,7 +221,6 @@ internal sealed class PhoneForm : Form
         if (!quitting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); return; }
         quitting = true;
         updateTimer.Stop();
-        updateCancellation?.Cancel();
         tray.Visible = false;
         tray.Dispose();
         if (runtime is { HasExited: false }) { runtime.Kill(entireProcessTree: true); runtime.WaitForExit(5000); }

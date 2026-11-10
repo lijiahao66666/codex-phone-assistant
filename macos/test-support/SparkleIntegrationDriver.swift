@@ -15,6 +15,11 @@ final class IntegrationUserDriver: NSObject, SPUUserDriver {
     }
     func showUserInitiatedUpdateCheck(cancellation: @escaping () -> Void) { testLog("checking") }
     func showUpdateFound(with appcastItem: SUAppcastItem, state: SPUUserUpdateState, reply: @escaping (SPUUserUpdateChoice) -> Void) {
+        if appcastItem.isInformationOnlyUpdate {
+            testLog("information:" + (appcastItem.infoURL?.absoluteString ?? "missing"))
+            reply(.dismiss)
+            return
+        }
         testLog("found:" + appcastItem.versionString); reply(.install)
     }
     func showUpdateReleaseNotes(with downloadData: SPUDownloadData) {}

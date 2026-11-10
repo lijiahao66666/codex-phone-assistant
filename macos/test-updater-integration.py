@@ -77,7 +77,7 @@ run(['swiftc','-target','arm64-apple-macosx12.0',str(WORK/'CodexHub.swift'),str(
 results=[]
 processes=[]
 try:
-    for case in ['wrong-signature','blocked-then-retry','success','slow-exit']:
+    for case in ['information-only','information-tampered','wrong-signature','blocked-then-retry','success','slow-exit']:
         base=WORK/case; base.mkdir(); app=base/'Test.app'
         bid='local.codex-hub.updater-integration.'+uuid.uuid4().hex
         serve=SERVER/case; serve.mkdir()
@@ -108,13 +108,25 @@ while :; do sleep 0.2; done
             signing_seed=base64.b64encode(Ed25519PrivateKey.generate().private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption()))
         signature=sign(archive,signing_seed)
         appcast=serve/'appcast.xml'
-        appcast.write_text(f'''<?xml version="1.0" encoding="utf-8"?><rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>Isolated Test</title><item><title>2</title><sparkle:version>2</sparkle:version><sparkle:shortVersionString>0.0.2</sparkle:shortVersionString><sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion><enclosure url="http://127.0.0.1:{port}/{case}/update.zip" sparkle:edSignature="{signature}" length="{archive.stat().st_size}" type="application/octet-stream"/></item></channel></rss>''')
+        contents = '<link>https://codex.air-inc.top/download/</link>' if case.startswith('information-') else f'<enclosure url="http://127.0.0.1:{port}/{case}/update.zip" sparkle:edSignature="{signature}" length="{archive.stat().st_size}" type="application/octet-stream"/>'
+        appcast.write_text(f'''<?xml version="1.0" encoding="utf-8"?><rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>Isolated Test</title><item><title>2</title><sparkle:version>2</sparkle:version><sparkle:shortVersionString>0.0.2</sparkle:shortVersionString><sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>{contents}</item></channel></rss>''')
         sign(appcast)
+        if case=='information-tampered':
+            appcast.write_text(appcast.read_text().replace('https://codex.air-inc.top/download/', 'https://example.com/'))
         if case in ('success','slow-exit'): (base/'allow-exit').touch()
         log=(base/'process.log').open('w')
         proc=subprocess.Popen([str(app/'Contents/MacOS/CodexHub')],stdout=log,stderr=log)
         processes.append((proc,base,bid))
-        if case=='wrong-signature':
+        if case.startswith('information-'):
+            expected = 'information:https://codex.air-inc.top/download/' if case=='information-only' else 'error:'
+            waitfor(lambda:expected in events(base))
+            assert 'download' not in events(base).splitlines() and 'installing:' not in events(base),events(base)
+            assert plistlib.load((app/'Contents/Info.plist').open('rb'))['CFBundleVersion']=='1'
+            assert proc.poll() is None
+            results.append({'case':case,'result':'PASS','events':events(base)})
+            (base/'allow-exit').touch(); (base/'finish-test').touch()
+            waitfor(lambda:proc.poll() is not None,10)
+        elif case=='wrong-signature':
             waitfor(lambda:'error:' in events(base))
             assert plistlib.load((app/'Contents/Info.plist').open('rb'))['CFBundleVersion']=='1'
             assert 'ready' not in events(base),events(base)

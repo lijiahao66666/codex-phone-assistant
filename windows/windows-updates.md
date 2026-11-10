@@ -1,5 +1,7 @@
 # Windows 自动更新
 
+> 下方“当前稳定源”和旧版安装流程记录既有 0.3.50 行为。源码中下一版保留默认启用的自动检查与手动检查，读取签名版本清单；用户确认后打开 `https://codex.air-inc.top/download/`，手动选择渠道下载安装，不自动下载、退出或安装。新清单尚需部署、签名并验证后才能发布新客户端。
+
 Windows 更新链独立于 macOS Sparkle。修改 Windows 版本、签名或发布文件不得改动 `macos/`、`appcast.xml` 或 Sparkle 密钥。
 
 ## 客户端行为
@@ -15,6 +17,8 @@ Windows 更新链独立于 macOS Sparkle。修改 Windows 版本、签名或发�
 - 失败日志位于 `%LOCALAPPDATA%\codex-phone-assistant\Updates\update.log`。
 
 ## 固定更新地址
+
+下一版客户端使用独立的 `https://codex.air-inc.top/download/windows/latest-manual.json` 和 `.sig`，内容只包含 `schemaVersion: 2`、`channel`、`version`、`build` 和 `publishedAt`。固定下载页地址内置于应用，不由清单指定。旧版仍使用下面的 schema 1 地址和安装包，迁移时必须保持这些资源可用；新客户端须先由用户手动安装一次。
 
 当前稳定源：
 
@@ -49,8 +53,8 @@ npm run build:windows
 
 - `build/windows/codex-phone-assistant-windows-x64-setup.exe`
 - `build/windows/codex-phone-assistant-windows-x64.zip`
-- `build/windows/latest.json`
-- `build/windows/latest.json.sig`
+- `build/windows/latest-manual.json`
+- `build/windows/latest-manual.json.sig`
 - `build/windows/SHA256SUMS.txt`
 
 构建脚本不会在签名失败或不匹配时继续产出可发布清单。

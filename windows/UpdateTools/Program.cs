@@ -75,6 +75,27 @@ internal static class UpdateToolsProgram
             Require(await current.CheckAsync() is null, "Current build should not update");
         }
 
+        var manualManifest = JsonSerializer.SerializeToUtf8Bytes(new {
+            schemaVersion = 2, channel = "stable", version = "0.3.51", build = 51, publishedAt = DateTimeOffset.UtcNow,
+        });
+        var manualSignature = key.SignData(manualManifest, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        server.Add("/manual.json", manualManifest, "application/json");
+        server.Add("/manual.json.sig", Encoding.ASCII.GetBytes(Convert.ToBase64String(manualSignature)), "text/plain");
+        using (var manual = new UpdateService(new Uri(server.BaseUri + "manual.json"), 50, publicKey, true)) {
+            var manualRelease = await manual.CheckAsync();
+            Require(manualRelease?.Build == 51 && manualRelease.Version == "0.3.51", "Signed version-only manifest was not accepted");
+        }
+        var tamperedManual = manualManifest.ToArray();
+        tamperedManual[^2] ^= 1;
+        server.Add("/manual-tampered.json", tamperedManual, "application/json");
+        server.Add("/manual-tampered.json.sig", Encoding.ASCII.GetBytes(Convert.ToBase64String(manualSignature)), "text/plain");
+        using (var manual = new UpdateService(new Uri(server.BaseUri + "manual-tampered.json"), 50, publicKey, true)) {
+            try {
+                await manual.CheckAsync();
+                throw new InvalidOperationException("Tampered version-only manifest was accepted");
+            } catch (UpdateException error) when (error.Message.Contains("签名", StringComparison.Ordinal)) { }
+        }
+
         var output = Path.Combine(Path.GetTempPath(), "codex-update-test-" + Guid.NewGuid().ToString("N"));
         try {
             var downloaded = await service.DownloadAndVerifyAsync(release, output);

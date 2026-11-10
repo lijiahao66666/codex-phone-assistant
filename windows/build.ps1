@@ -3,7 +3,6 @@ param(
   [string]$Version,
   [int]$BuildNumber = 0,
   [string]$UpdateFeedUrl,
-  [string]$InstallerUrl,
   [string]$UpdatePrivateKeyPath = $env:CODEX_PHONE_WINDOWS_UPDATE_PRIVATE_KEY,
   [switch]$SkipUpdateSigning,
   [switch]$Force
@@ -27,13 +26,11 @@ $releaseConfig = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'version.json
 if (-not $Version) { $Version = [string]$releaseConfig.version }
 if ($BuildNumber -le 0) { $BuildNumber = [int]$releaseConfig.build }
 if (-not $UpdateFeedUrl) { $UpdateFeedUrl = [string]$releaseConfig.updateFeedUrl }
-if (-not $InstallerUrl) { $InstallerUrl = [string]$releaseConfig.installerUrl }
 $releaseNotesUrl = [string]$releaseConfig.releaseNotesUrl
 $updatePublicKey = [string]$releaseConfig.updatePublicKey
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must contain three numeric components: $Version" }
 if ($BuildNumber -le 0) { throw "BuildNumber must be a positive integer" }
 if (-not [Uri]::IsWellFormedUriString($UpdateFeedUrl, [UriKind]::Absolute) -or ([Uri]$UpdateFeedUrl).Scheme -ne 'https') { throw "UpdateFeedUrl must be an HTTPS URL" }
-if (-not [Uri]::IsWellFormedUriString($InstallerUrl, [UriKind]::Absolute) -or ([Uri]$InstallerUrl).Scheme -ne 'https') { throw "InstallerUrl must be an HTTPS URL" }
 if (-not $updatePublicKey) { throw "version.json must contain updatePublicKey" }
 $fileVersion = "$Version.0"
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -137,23 +134,15 @@ if ($LASTEXITCODE -ne 0) { throw "Windows updater helper self-test failed with e
 
 $installerPath = Join-Path $buildRoot 'codex-phone-assistant-windows-x64-setup.exe'
 if (Test-Path -LiteralPath $installerPath) {
-  $installerHash = Get-Sha256 $installerPath
   $manifest = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     channel = 'stable'
     version = $Version
     build = $BuildNumber
     publishedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
-    installer = [ordered]@{
-      url = $InstallerUrl
-      size = (Get-Item -LiteralPath $installerPath).Length
-      sha256 = $installerHash
-      signerThumbprint = $null
-    }
-    releaseNotesUrl = $releaseNotesUrl
   }
-  $manifestPath = Join-Path $buildRoot 'latest.json'
-  $signaturePath = Join-Path $buildRoot 'latest.json.sig'
+  $manifestPath = Join-Path $buildRoot 'latest-manual.json'
+  $signaturePath = Join-Path $buildRoot 'latest-manual.json.sig'
   [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), $utf8NoBom)
   if (-not $UpdatePrivateKeyPath) {
     $candidate = Join-Path $env:USERPROFILE '.codex\secrets\codex-phone-windows-update-ecdsa.pk8'

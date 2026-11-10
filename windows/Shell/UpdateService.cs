@@ -264,10 +264,11 @@ internal sealed class UpdateService : IDisposable
 
     private void ValidateRelease(UpdateRelease? release)
     {
-        if (release is null || release.SchemaVersion != ManifestSchemaVersion || release.Channel != "stable") throw new UpdateException("更新清单版本或通道无效。");
+        if (release is null || (release.SchemaVersion != ManifestSchemaVersion && release.SchemaVersion != 2) || release.Channel != "stable") throw new UpdateException("更新清单版本或通道无效。");
         if (!System.Text.RegularExpressions.Regex.IsMatch(release.Version, @"^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})(?:[-+][0-9A-Za-z.-]+)?$")) throw new UpdateException("更新版本号无效。");
         if (release.Build <= 0) throw new UpdateException("更新构建号无效。");
         if (release.PublishedAt == default) throw new UpdateException("更新发布时间无效。");
+        if (release.SchemaVersion == 2) return;
         if (release.Installer is null || release.Installer.Size <= 0 || release.Installer.Size > MaxInstallerBytes) throw new UpdateException("更新包大小无效。");
         ValidateHttpsUri(new Uri(release.Installer.Url), "安装包地址", allowInsecureForTests);
         if (!System.Text.RegularExpressions.Regex.IsMatch(release.Installer.Sha256 ?? "", "^[0-9a-fA-F]{64}$")) throw new UpdateException("更新包摘要无效。");
