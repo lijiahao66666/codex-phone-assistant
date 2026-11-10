@@ -25,7 +25,7 @@
 - [手机助手下载页](https://codex.air-inc.top/download/)
 - [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)
 
-stable48 的 Mac 与 H5 已完成专项实机/隔离验收；Windows 0.3.49 已完成构建、更新器组件测试与 Windows 回归，尚缺第二台真实电脑的公网跨版本升级验收。
+stable48 的 Mac 与 H5 已完成专项实机/隔离验收；Windows 0.3.50 已完成构建、更新器组件与运行中覆盖保护测试，尚缺第二台真实电脑的公网跨版本升级验收。
 
 安装步骤：
 

@@ -9,18 +9,20 @@ namespace CodexPhone;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
         using var guard = new Mutex(true, @"Local\codex-phone-assistant", out var created);
         using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\codex-phone-assistant-show");
+        using var quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\codex-phone-assistant-quit");
         if (!created)
         {
-            showEvent.Set();
+            if (args.Contains("--quit", StringComparer.OrdinalIgnoreCase)) quitEvent.Set();
+            else showEvent.Set();
             return;
         }
-        Application.Run(new PhoneForm(showEvent));
+        Application.Run(new PhoneForm(showEvent, quitEvent));
     }
 }
 
@@ -38,7 +40,7 @@ internal sealed class PhoneForm : Form
     private bool checkingUpdates;
     private CancellationTokenSource? updateCancellation;
 
-    public PhoneForm(EventWaitHandle showEvent)
+    public PhoneForm(EventWaitHandle showEvent, EventWaitHandle quitEvent)
     {
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
@@ -78,8 +80,10 @@ internal sealed class PhoneForm : Form
         {
             while (!quitting)
             {
-                showEvent.WaitOne();
-                if (!quitting && IsHandleCreated) BeginInvoke(ShowPanel);
+                var signal = WaitHandle.WaitAny([showEvent, quitEvent]);
+                if (quitting || !IsHandleCreated) continue;
+                if (signal == 1) BeginInvoke(() => { quitting = true; Close(); });
+                else BeginInvoke(ShowPanel);
             }
         }) { IsBackground = true };
         activation.Start();
