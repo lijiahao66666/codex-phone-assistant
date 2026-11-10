@@ -690,7 +690,7 @@ test('mode change rejects stale settings when state changes during owner discove
 for (const runtime of ['idle', 'active']) {
   test(`message rejects stale ${runtime} state changed during owner discovery`, async () => {
     let discoveries = 0, writes = 0;
-    const state = type => ({ id: 'thread', cwd: '/tmp', threadRuntimeStatus: { type }, turns: type === 'active' ? [{ turnId: 'turn', status: 'inProgress' }] : [] });
+    const state = type => ({ id: 'thread', cwd: tmpdir(), threadRuntimeStatus: { type }, turns: type === 'active' ? [{ turnId: 'turn', status: 'inProgress' }] : [] });
     const broadcast = (revision, type) => frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'owner', params: { conversationId: 'thread', hostId: 'local', change: { type: 'snapshot', revision, conversationState: state(type) } } });
     const f = await fixture((socket, msg) => {
       if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId, resultType: 'success', result: { clientId: 'test-client' } }));

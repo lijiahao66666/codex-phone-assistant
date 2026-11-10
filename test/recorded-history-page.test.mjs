@@ -10,6 +10,9 @@ const id = '11111111-1111-4111-8111-111111111111';
 const other = '22222222-2222-4222-8222-222222222222';
 const parent = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const scope = { hostId: 'host', deviceId: 'phone' };
+const projectRoot = process.platform === 'win32' ? 'C:\\project' : '/project';
+const projectApp = join(projectRoot, 'app');
+const projectSibling = process.platform === 'win32' ? 'C:\\sibling' : '/sibling';
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), 'recorded-page-'));
   const state = new DatabaseSync(join(home, 'state_5.sqlite'));
@@ -25,7 +28,7 @@ async function fixture() {
   let ordinal = 1;
   const project = thread => history.prepare('INSERT INTO thread_history_projection_state VALUES (?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET next_rollout_ordinal=excluded.next_rollout_ordinal,next_rollout_byte_offset=excluded.next_rollout_byte_offset').run(thread, ordinal, ordinal * 100);
   const register = (thread = id, options = {}) => {
-    state.prepare('INSERT INTO threads VALUES (?, ?, NULL, 0, ?, ?, ?)').run(thread, 'History', options.parent ? JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: options.parent } } }) : 'vscode', options.parent ? 'subagent' : 'user', '/project/app');
+    state.prepare('INSERT INTO threads VALUES (?, ?, NULL, 0, ?, ?, ?)').run(thread, 'History', options.parent ? JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: options.parent } } }) : 'vscode', options.parent ? 'subagent' : 'user', projectApp);
     project(thread);
   };
   const turn = (turnId, thread = id, status = 'completed') => { history.prepare('INSERT INTO thread_turns VALUES (?, ?, ?, ?, ?)').run(thread, turnId, ordinal++, status, 1); project(thread); };
@@ -88,16 +91,16 @@ test('signed cursors bind thread, parent, device, project and expiration', async
     f.turn('one'); f.item('one', 'a'); f.item('one', 'b'); f.register(other); f.turn('two', other); f.item('two', 'c', 'c', other);
     let now = 1000;
     const pager = createRecordedHistoryPager({ codexHome: f.home, cursorSecret: Buffer.alloc(32, 7), ttlMs: 1000, now: () => now });
-    const options = { scope, projectPath: '/project', maxItems: 1 };
+    const options = { scope, projectPath: projectRoot, maxItems: 1 };
     const first = pager.read(id, options), cursor = first.nextCursor;
     assert.ok(cursor);
     assert.throws(() => pager.read(other, { ...options, cursor }), { code: 'invalid-cursor' });
     assert.throws(() => pager.read(id, { ...options, scope: { ...scope, deviceId: 'other-phone' }, cursor }), { code: 'invalid-cursor' });
-    assert.throws(() => pager.read(id, { ...options, projectPath: '/project/app', cursor }), { code: 'invalid-cursor' });
+    assert.throws(() => pager.read(id, { ...options, projectPath: projectApp, cursor }), { code: 'invalid-cursor' });
     const [body, signature] = cursor.split('.');
     const tampered = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(body, 'base64url')), turnBefore: 0 })).toString('base64url') + '.' + signature;
     assert.throws(() => pager.read(id, { ...options, cursor: tampered }), { code: 'invalid-cursor' });
-    assert.equal(pager.read(id, { ...options, projectPath: '/sibling' }), null);
+    assert.equal(pager.read(id, { ...options, projectPath: projectSibling }), null);
     now = 2001;
     assert.throws(() => pager.read(id, { ...options, cursor }), { code: 'invalid-cursor' });
   } finally { await f.close(); }

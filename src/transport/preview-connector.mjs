@@ -258,7 +258,10 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         if (createUploadContext) return createUploadContext();
         await mkdir(uploadRoot, { recursive: true, mode: 0o700 });
         const info = await lstat(uploadRoot);
-        if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) throw new Error('Invalid upload root');
+        // Windows ignores POSIX create modes and reports synthetic permission
+        // bits, so ownership and mode checks are only meaningful on POSIX.
+        const insecurePosixMode = process.platform !== 'win32' && (info.mode & 0o077) !== 0;
+        if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || insecurePosixMode) throw new Error('Invalid upload root');
         const store = await UploadStore.create({ root: uploadRoot });
         return { store, receiver: new ChunkUploads(store, { maxChunk: 512 * 1024, pipelineWindow: 2,
           helperPath: fileURLToPath(new URL('../../validate-image', import.meta.url)), ...(imageValidator ? { validator: imageValidator } : {}) }) };

@@ -6,6 +6,7 @@
 
 - stable48 的 H5 和中转已部署；2026-11-10 又发布了目录状态、动画和图标修复。完整自动化回归、真实样本及限制见 [stable48 验收记录](stable48-release-notes-2026-11-09.md)。
 - Mac Apple Silicon 构建号 49 的安装包、签名更新源和下载页已发布。服务器经 HTTPS 路径核对 DMG 与 ZIP 摘要，公网更新源签名校验通过。首次使用应用内更新的旧版需要手动安装；本机从构建号 48 的实际升级尚待验收。
+- Windows `0.3.49` 构建已加入独立于 Sparkle 的签名更新链。安装器、ZIP、校验文件、`windows-latest.json` 和签名已上传到 GitHub `stable48` Release；稳定更新源固定为 `https://codex.air-inc.top/download/windows/`。公网服务器上传和黑盒升级完成前，不能宣称生产自动更新已经上线。
 - 2026-11-10 再次运行隔离 Sparkle 实装测试，错误签名拒绝、退出阻止后重试、正常升级和慢退出后升级均通过。测试使用独立应用和模拟 runtime，生产 HTTPS 更新源及真实任务升级仍需验收。
 - stable48 代码已提交并推送至远程 main，GitHub `stable48` Release 已发布，附件摘要与服务器安装包一致。GitHub CLI 默认账号无项目权限，发布使用已登录的项目账号单次授权，未切换全局账号。
 - 下载页补丁的生成与核对步骤见 [下载页更新补丁](download-page-release-tool.md)；Mac 更新签名与验证步骤见 [macOS 应用内更新](../macos/UPDATES.md)。最终包、更新源、下载页和 GitHub 附件应在测试及签名校验完成后统一发布。

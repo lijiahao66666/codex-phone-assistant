@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using Microsoft.Win32;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -27,9 +28,15 @@ internal sealed class PhoneForm : Form
 {
     private readonly WebView2 web = new() { Dock = DockStyle.Fill };
     private readonly NotifyIcon tray = new();
+    private readonly UpdateService? updates;
+    private readonly ToolStripMenuItem checkUpdateItem;
+    private readonly ToolStripMenuItem autoUpdateItem;
+    private readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 6 * 60 * 60 * 1000 };
     private Process? runtime;
     private Uri? panelUri;
     private bool quitting;
+    private bool checkingUpdates;
+    private CancellationTokenSource? updateCancellation;
 
     public PhoneForm(EventWaitHandle showEvent)
     {
@@ -48,10 +55,24 @@ internal sealed class PhoneForm : Form
         tray.Visible = true;
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开 codex手机助手", null, (_, _) => ShowPanel());
+        checkUpdateItem = new ToolStripMenuItem("检查更新…", null, async (_, _) => await CheckForUpdatesAsync(true));
+        autoUpdateItem = new ToolStripMenuItem("自动检查更新") { Checked = ReadAutoUpdateSetting() };
+        autoUpdateItem.Click += (_, _) => {
+            autoUpdateItem.Checked = !autoUpdateItem.Checked;
+            WriteAutoUpdateSetting(autoUpdateItem.Checked);
+            if (autoUpdateItem.Checked) updateTimer.Start(); else updateTimer.Stop();
+        };
+        menu.Items.Add(checkUpdateItem);
+        menu.Items.Add(autoUpdateItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => { quitting = true; Close(); });
         tray.ContextMenuStrip = menu;
         tray.DoubleClick += (_, _) => ShowPanel();
-        Shown += async (_, _) => await StartAsync();
+        updates = BuildInfo.UpdateFeed is Uri feed && BuildInfo.Build > 0 && !string.IsNullOrWhiteSpace(BuildInfo.UpdatePublicKey)
+            ? new UpdateService(feed, BuildInfo.Build, BuildInfo.UpdatePublicKey)
+            : null;
+        updateTimer.Tick += async (_, _) => await CheckForUpdatesAsync(false);
+        Shown += (_, _) => _ = StartAfterShownAsync();
         FormClosing += OnClosing;
         var activation = new Thread(() =>
         {
@@ -62,6 +83,15 @@ internal sealed class PhoneForm : Form
             }
         }) { IsBackground = true };
         activation.Start();
+    }
+
+    private async Task StartAfterShownAsync()
+    {
+        await StartAsync();
+        if (updates is null || !autoUpdateItem.Checked) return;
+        updateTimer.Start();
+        await Task.Delay(TimeSpan.FromSeconds(8));
+        if (!quitting) await CheckForUpdatesAsync(false);
     }
 
     private void ShowPanel()
@@ -130,10 +160,125 @@ internal sealed class PhoneForm : Form
 
     private void ShowError() => MessageBox.Show(this, "后台服务已退出，请退出助手后重新打开。", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
 
+    private async Task CheckForUpdatesAsync(bool userInitiated)
+    {
+        if (checkingUpdates || quitting) return;
+        if (updates is null) {
+            if (userInitiated) MessageBox.Show(this, "当前构建没有配置 Windows 更新源。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        checkingUpdates = true;
+        checkUpdateItem.Enabled = false;
+        var oldText = checkUpdateItem.Text;
+        checkUpdateItem.Text = "正在检查更新…";
+        try {
+            var release = await updates.CheckAsync();
+            if (release is null) {
+                if (userInitiated) MessageBox.Show(this, $"当前已是最新版本 {BuildInfo.Version}（构建 {BuildInfo.Build}）。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            updateTimer.Stop();
+            var notes = string.IsNullOrWhiteSpace(release.ReleaseNotesUrl) ? "" : $"\n\n版本说明：{release.ReleaseNotesUrl}";
+            var answer = MessageBox.Show(
+                this,
+                $"发现新版本 {release.Version}（构建 {release.Build}）。\n当前版本 {BuildInfo.Version}（构建 {BuildInfo.Build}）。{notes}\n\n是否下载并安装？安装时助手会退出并在完成后重新启动。",
+                Text,
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information,
+                MessageBoxDefaultButton.Button1);
+            if (answer == DialogResult.Yes) await DownloadAndApplyUpdateAsync(release);
+        } catch (OperationCanceledException) {
+        } catch (UpdateException error) {
+            if (userInitiated) MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            else tray.ShowBalloonTip(5000, "无法检查更新", error.Message, ToolTipIcon.Warning);
+        } catch (Exception error) {
+            if (userInitiated) MessageBox.Show(this, $"检查更新失败：{error.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            else tray.ShowBalloonTip(5000, "无法检查更新", "更新服务器暂时不可用。", ToolTipIcon.Warning);
+        } finally {
+            checkingUpdates = false;
+            checkUpdateItem.Enabled = true;
+            checkUpdateItem.Text = oldText;
+            if (autoUpdateItem.Checked && !quitting) updateTimer.Start();
+        }
+    }
+
+    private async Task DownloadAndApplyUpdateAsync(UpdateRelease release)
+    {
+        if (updates is null) return;
+        updateCancellation = new CancellationTokenSource();
+        using var progress = new UpdateProgressForm(release.Version, updateCancellation);
+        progress.Show(this);
+        try {
+            var installer = await updates.DownloadAndVerifyAsync(
+                release,
+                UpdateService.UpdateDirectory,
+                new Progress<int>(progress.SetProgress),
+                updateCancellation.Token);
+            progress.SetProgress(100);
+            progress.Complete();
+
+            if (!IsInstalledCopy()) {
+                MessageBox.Show(
+                    this,
+                    $"更新已下载并通过校验：\n{installer}\n\n自动安装仅支持安装版。便携版请退出助手后手动运行该安装包。",
+                    Text,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            var appPath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(appPath)) throw new UpdateException("无法确定当前应用路径。");
+            updates.LaunchUpdater(
+                Path.Combine(AppContext.BaseDirectory, "updater.ps1"),
+                installer,
+                release,
+                appPath,
+                UpdateService.UpdateDirectory);
+            quitting = true;
+            Close();
+        } catch (OperationCanceledException) {
+            if (!progress.IsDisposed) progress.Complete();
+        } catch (UpdateException error) {
+            if (!progress.IsDisposed) progress.Complete();
+            MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        } catch (Exception error) {
+            if (!progress.IsDisposed) progress.Complete();
+            MessageBox.Show(this, $"更新失败：{error.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        } finally {
+            updateCancellation?.Dispose();
+            updateCancellation = null;
+        }
+    }
+
+    private static bool IsInstalledCopy()
+    {
+        var expected = Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs",
+            "codex-phone-assistant")).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var actual = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ReadAutoUpdateSetting()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(@"Software\codex-phone-assistant");
+        return key?.GetValue("AutoCheckForUpdates") is not int value || value != 0;
+    }
+
+    private static void WriteAutoUpdateSetting(bool enabled)
+    {
+        using var key = Registry.CurrentUser.CreateSubKey(@"Software\codex-phone-assistant");
+        key.SetValue("AutoCheckForUpdates", enabled ? 1 : 0, RegistryValueKind.DWord);
+    }
+
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
         if (!quitting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); return; }
         quitting = true;
+        updateTimer.Stop();
+        updateCancellation?.Cancel();
         tray.Visible = false;
         tray.Dispose();
         if (runtime is { HasExited: false }) { runtime.Kill(entireProcessTree: true); runtime.WaitForExit(5000); }
