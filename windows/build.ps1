@@ -30,7 +30,10 @@ $releaseNotesUrl = [string]$releaseConfig.releaseNotesUrl
 $updatePublicKey = [string]$releaseConfig.updatePublicKey
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must contain three numeric components: $Version" }
 if ($BuildNumber -le 0) { throw "BuildNumber must be a positive integer" }
-if (-not [Uri]::IsWellFormedUriString($UpdateFeedUrl, [UriKind]::Absolute) -or ([Uri]$UpdateFeedUrl).Scheme -ne 'https') { throw "UpdateFeedUrl must be an HTTPS URL" }
+$updateEnabled = -not [string]::IsNullOrWhiteSpace($UpdateFeedUrl)
+if ($updateEnabled) {
+  if (-not [Uri]::IsWellFormedUriString($UpdateFeedUrl, [UriKind]::Absolute) -or ([Uri]$UpdateFeedUrl).Scheme -ne 'https') { throw "UpdateFeedUrl must be an HTTPS URL" }
+}
 if (-not $updatePublicKey) { throw "version.json must contain updatePublicKey" }
 $fileVersion = "$Version.0"
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -133,7 +136,12 @@ if ($LASTEXITCODE -ne 0) { throw "Windows update self-test failed with exit code
 if ($LASTEXITCODE -ne 0) { throw "Windows updater helper self-test failed with exit code $LASTEXITCODE" }
 
 $installerPath = Join-Path $buildRoot 'codex-phone-assistant-windows-x64-setup.exe'
-if (Test-Path -LiteralPath $installerPath) {
+$manifestPath = Join-Path $buildRoot 'latest-manual.json'
+$signaturePath = Join-Path $buildRoot 'latest-manual.json.sig'
+if (-not $updateEnabled) {
+  Remove-Item -LiteralPath $manifestPath, $signaturePath -Force -ErrorAction SilentlyContinue
+  Write-Warning "Windows update feed is not configured; installer and portable ZIP are manual-download builds."
+} elseif (Test-Path -LiteralPath $installerPath) {
   $manifest = [ordered]@{
     schemaVersion = 2
     channel = 'stable'
@@ -141,8 +149,6 @@ if (Test-Path -LiteralPath $installerPath) {
     build = $BuildNumber
     publishedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
   }
-  $manifestPath = Join-Path $buildRoot 'latest-manual.json'
-  $signaturePath = Join-Path $buildRoot 'latest-manual.json.sig'
   [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), $utf8NoBom)
   if (-not $UpdatePrivateKeyPath) {
     $candidate = Join-Path $env:USERPROFILE '.codex\secrets\codex-phone-windows-update-ecdsa.pk8'
@@ -159,14 +165,16 @@ if (Test-Path -LiteralPath $installerPath) {
     & $dotnet $updateTools verify --manifest $manifestPath --signature $signaturePath --public-key $updatePublicKey
     if ($LASTEXITCODE -ne 0) { throw "Update manifest verification failed with exit code $LASTEXITCODE" }
   }
+  Write-Output "Update manifest: $manifestPath"
+  if (Test-Path -LiteralPath $signaturePath) { Write-Output "Update signature: $signaturePath" }
+}
+if (Test-Path -LiteralPath $installerPath) {
   $zipPath = Join-Path $buildRoot 'codex-phone-assistant-windows-x64.zip'
   $checksums = @(
     "$(Get-Sha256 $installerPath)  codex-phone-assistant-windows-x64-setup.exe",
     "$(Get-Sha256 $zipPath)  codex-phone-assistant-windows-x64.zip"
   )
   [System.IO.File]::WriteAllText((Join-Path $buildRoot 'SHA256SUMS.txt'), ($checksums -join "`n") + "`n", $utf8NoBom)
-  Write-Output "Update manifest: $manifestPath"
-  if (Test-Path -LiteralPath $signaturePath) { Write-Output "Update signature: $signaturePath" }
 }
 Write-Output "Portable app: $OutputDirectory"
 Write-Output "Archive: $archive"

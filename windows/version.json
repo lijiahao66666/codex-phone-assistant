@@ -1,8 +1,8 @@
 {
-  "version": "0.3.50",
-  "build": 50,
+  "version": "1.0.0",
+  "build": 52,
   "updateFeedUrl": "https://codex.air-inc.top/download/windows/latest-manual.json",
-  "installerUrl": "https://codex.air-inc.top/download/windows/codex-phone-assistant-windows-x64-setup.exe",
-  "releaseNotesUrl": "https://github.com/lijiahao66666/codex-phone-assistant/blob/main/docs/windows-0.3.50-release-notes.md",
+  "installerUrl": "",
+  "releaseNotesUrl": "https://codex.air-inc.top/download/",
   "updatePublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/w67b2seFuKYKIz3NUZDm/kov/H4iruzcQblSxkz+oryE4tNYlAyxtn51IB4Py2NZTuDyFfFstRdEiGOLskoeQ=="
 }

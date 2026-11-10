@@ -6,15 +6,15 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
 ## 当前版本
 
-当前 Windows 构建为 `0.3.50`（构建号 50）。本版修正安装器覆盖运行中应用时 DLL 被占用的问题，并允许安装器通过本地退出事件请求助手正常退出；首次使用必须手动安装。
+当前 Windows 构建为 `0.3.51`（构建号 51）。本版在安装完成页默认勾选“启动 codex手机助手”，并保留运行中覆盖保护与正常退出事件。
 
 ## 下载
 
-- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/codex-phone-assistant-windows-x64-setup.exe)
-- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/codex-phone-assistant-windows-x64.zip)
-- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/SHA256SUMS-windows.txt)
+- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.3.51-windows/codex-phone-assistant-windows-x64-setup.exe)
+- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.3.51-windows/codex-phone-assistant-windows-x64.zip)
+- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.3.51-windows/SHA256SUMS-windows.txt)
 
-仓库当前为私有，GitHub 下载需要已授权账号。公网固定更新源 <https://codex.air-inc.top/download/windows/latest.json> 已上线并通过签名与摘要核验。安装包内自带 Node 和 .NET 运行时，当前公网完整下载实测约 279 秒，首次下载会明显慢于后续启动。
+仓库当前为私有，GitHub 下载需要已授权账号。Windows 大文件不再放在轻量服务器；本版默认未配置自动更新源，托盘检查更新会显示“未配置”。安装包内自带 Node 和 .NET 运行时，因此体积约 123 MiB。
 
 ## 系统要求
 
@@ -29,22 +29,18 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 1. 运行 `codex-phone-assistant-windows-x64-setup.exe`。
 2. 安装位置为 `%LOCALAPPDATA%\Programs\codex-phone-assistant`，无需管理员权限。
 3. 如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，先确认文件来源和 SHA-256。当前安装器没有 Authenticode 商业证书签名。只对这一发布文件选择“更多信息” → “仍要运行”，不要绕过来源不明的同名文件。
-4. 从开始菜单启动 `codex手机助手`。
+4. 安装完成页默认勾选“启动 codex手机助手”；取消勾选时可稍后从开始菜单启动。
 
 ![Windows 客户端配对界面](../docs/assets/windows-pairing.png)
 
 ## 自动更新
 
-源码中的下一版保留自动和手动检查：检查到新版后打开下载页，由用户自行下载安装；当前已发布的 0.3.50 仍按下述方式自动下载和安装，不能仅靠修改服务端切换行为。
+托盘菜单保留更新入口，但当前构建没有默认更新源：
 
-托盘菜单提供：
+- **检查更新…**：当前显示更新源未配置，不发网络请求。
+- **自动检查更新**：开关保留；未配置更新源时不会周期检查。
 
-- **检查更新…**：立即读取稳定通道清单。
-- **自动检查更新**：默认开启。启动后检查一次，之后每 6 小时检查。
-
-发现新版本后，应用会先显示版本号和版本说明链接，经用户确认才下载。更新清单使用独立 ECDSA P-256 签名，安装包还会校验 SHA-256。下载完成后，更新助手等待当前应用退出，再以静默模式运行 NSIS 安装器并重新启动应用。
-
-更新文件位于 `%LOCALAPPDATA%\codex-phone-assistant\Updates`，失败日志为其中的 `update.log`。便携版可以下载并校验更新，但自动安装只支持 NSIS 安装版。
+源码中下一版保留自动和手动检查签名版本信息，发现新版后打开下载页，由用户自行下载安装，不再自动下载安装包。该版本需先手动安装一次；版本清单尚待部署验证。此前放在 `codex.air-inc.top` 的 Windows 安装包及旧清单已撤除。
 
 签名、发布顺序和故障边界见 [Windows 自动更新说明](windows-updates.md)。
 
@@ -76,7 +72,7 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 - 双击托盘图标，或选择“打开 codex手机助手”，可恢复窗口。
 - 再次运行 `codex-phone-assistant.exe` 会唤回已有窗口，不会启动第二个后台进程。
 - 选择“退出”会结束窗口和随包 Node 进程。
-- 自动更新安装前必须退出当前助手；正在进行的手机消息或附件写入会由现有退出保护阻止。
+- 安装新版本时安装器会请求当前助手退出；无法退出时会停止安装。
 
 ## 卸载
 
@@ -96,7 +92,7 @@ npm test
 npm run build:windows
 ```
 
-发布构建会读取 [version.json](version.json)，生成并签名 `latest.json`。私钥不进入仓库：
+配置更新源的发布构建会读取 [version.json](version.json)，生成并签名 `latest-manual.json`。私钥不进入仓库：
 
 ```powershell
 $env:CODEX_PHONE_WINDOWS_UPDATE_PRIVATE_KEY = 'C:\secure\codex-phone-windows-update-ecdsa.pk8'
@@ -114,8 +110,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -Force -Sk
 - `dist/codex-phone-assistant.exe`
 - `codex-phone-assistant-windows-x64.zip`
 - `codex-phone-assistant-windows-x64-setup.exe`
-- `latest.json`
-- `latest.json.sig`
+- `latest-manual.json`
+- `latest-manual.json.sig`
 - `SHA256SUMS.txt`
 
 构建过程会运行 C# 更新服务自测和更新助手实装测试，覆盖清单签名、版本门槛、下载校验、SHA-256 拒绝、等待退出、静默安装和重启。
@@ -124,8 +120,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -Force -Sk
 
 - **一直显示“电脑未连接”**：确认 `codex-phone-assistant.exe` 正在运行，Codex Desktop 已登录，并检查 `HUB_ORIGIN` 是否为 <https://codex.air-inc.top>。
 - **无法通过命名管道连接**：确认 `\\.\pipe\codex-ipc` 存在，并重启 Codex Desktop 与手机助手。
-- **检查更新提示签名无效**：不要安装提示中的文件。核对 `latest.json` 和 `latest.json.sig` 是否来自同一次发布。
-- **自动更新失败**：查看 `%LOCALAPPDATA%\codex-phone-assistant\Updates\update.log`；安装包会保留，可手动运行。
+- **检查更新提示签名无效**：核对 `latest-manual.json` 和 `latest-manual.json.sig` 是否来自同一次发布。
 - **安装文件被 SmartScreen 拦截**：核对 SHA-256 和来源后，才使用“更多信息” → “仍要运行”。
 - **图片或文件按钮未出现**：受桌面媒体能力及其平台开关限制；文字消息和停止任务不受影响。
 
