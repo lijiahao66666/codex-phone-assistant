@@ -38,7 +38,7 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
    ![Windows 安装程序欢迎界面](../docs/assets/windows-installer-welcome.png)
 
-4. 安装完成页默认勾选“启动 codex手机助手”；取消勾选时可稍后从开始菜单启动。
+4. 安装器会创建桌面快捷方式和开始菜单顶层入口。安装完成页默认勾选“启动 codex手机助手”；取消勾选时可稍后从桌面或开始菜单启动。
 
 ![Windows 客户端配对界面](../docs/assets/windows-pairing.png)
 
