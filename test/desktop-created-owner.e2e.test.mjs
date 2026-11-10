@@ -82,7 +82,17 @@ test('created-thread adapter sends the first prompt only through a second real C
           respond({ supportsUntrustedAppInput: nativeThread === message.params.conversationId }, nativeThread ? 'isolated-native-desktop' : 'isolated-bridge');
         } else if (message.method === 'thread-follower-start-turn') {
           nativeControls.push(message);
-          desktop.request('turn/start', message.params.turnStart.request).then(result => respond(result, 'isolated-native-desktop'), error => {
+          const { request, context } = message.params.turnStart;
+          // Native Desktop inherits its collaboration mode separately from
+          // top-level model/effort. App-server gives that mode precedence.
+          // Deliberately conflict with the phone's first-turn selection so
+          // forwarding the request unchanged cannot mask native inheritance.
+          const nativeRequest = context.inheritThreadSettings === false ? request : {
+            ...request, collaborationMode: { mode: 'default', settings: {
+              model: 'native-default-model', reasoning_effort: 'low', developer_instructions: null,
+            } },
+          };
+          desktop.request('turn/start', nativeRequest).then(result => respond(result, 'isolated-native-desktop'), error => {
             socket.write(frame({ type: 'response', requestId: message.requestId, resultType: 'error', error: error.message }));
           });
         }

@@ -64,8 +64,17 @@ test('prepare releases an empty phone owner once and the first send reuses the r
   assert.match(request.input[0].text, /first\n\n# Files mentioned by the user:/);
   assert.match(request.input[0].text, /"notes.md": \/isolated\/notes.md/);
   assert.deepEqual(request.input[1], { type: 'localImage', path: '/isolated/photo.png' });
-  assert.deepEqual(context, { inheritThreadSettings: true });
+  assert.deepEqual(context, { inheritThreadSettings: false });
   assert.equal(f.counts().closed, 3, 'all preparation and sending clients close');
+});
+
+test('a first send without an explicit model inherits native Desktop settings', async () => {
+  const f = fixture();
+  await f.adapter.startTurn(threadId, 'use desktop defaults');
+  const { request, context } = f.controls[0].params;
+  assert.equal(Object.hasOwn(request, 'model'), false);
+  assert.equal(Object.hasOwn(request, 'effort'), false);
+  assert.deepEqual(context, { inheritThreadSettings: true });
 });
 
 test('missing native capability times out without sending or falling back to the phone', async () => {

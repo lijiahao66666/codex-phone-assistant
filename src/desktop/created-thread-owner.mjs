@@ -89,8 +89,11 @@ export function createCreatedThreadOwner({ localOwner, openThread, createClient,
     const client = createClient();
     try {
       await client.connect();
+      // Native Desktop otherwise inherits its collaboration mode, whose model
+      // and effort override these explicit first-turn selections downstream.
+      // Unselected creations continue using Desktop's own thread defaults.
       return await client.startTurn(threadId, { request: { threadId, input, clientUserMessageId: randomUUID(),
-        ...(model ? { model } : {}), ...(effort ? { effort } : {}) }, context: { inheritThreadSettings: true } }, {
+        ...(model ? { model } : {}), ...(effort ? { effort } : {}) }, context: { inheritThreadSettings: !model } }, {
         expectedOwnerId: ownerId, beforeWrite: () => !isCancelled(),
       });
     } finally { await client.close(); }
