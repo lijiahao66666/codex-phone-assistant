@@ -11,5 +11,5 @@
 验收和阶段记录保留为历史快照，不代表当前版本的全部验证结果：
 
 - [macOS 和 H5 验收记录](stable48-release-notes-2026-11-09.md)。
-- [Windows 0.3.49 发布记录](windows-0.3.49-release-notes.md)。
+- [Windows 0.3.50 发布记录](windows-0.3.50-release-notes.md) · [Windows 0.3.49 发布记录](windows-0.3.49-release-notes.md)。
 - [历史验收报告](stable41-acceptance-report-2026-11-09.md)及目录中按日期命名的其他记录。
