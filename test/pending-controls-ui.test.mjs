@@ -9,21 +9,27 @@ const response = (value = {}, status = 200) => ({ ok: status >= 200 && status < 
 const descendants = node => [node, ...node.children.flatMap(descendants)];
 async function fixture(handler) {
   class Element {
-    constructor() { this.children = []; this.dataset = {}; this.listeners = {}; this.value = ''; this.style = {}; this.attributes = {}; this.classList = { toggle() {}, contains() { return false; } }; }
+    constructor() { this.children = []; this.dataset = {}; this.listeners = {}; this.value = ''; this.style = {}; this.attributes = {}; this.classList = { toggle() {}, contains() { return false; } }; this.focusCount = 0; }
     append(...nodes) { this.children.push(...nodes); for (const node of nodes) if (node && typeof node === 'object') node.parentElement = this; }
-    replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+    replaceChildren(...nodes) { if (this.contains(document.activeElement)) document.activeElement = document.body; for (const child of this.children) child.parentElement = null; this.children = []; this.append(...nodes); }
     remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); }
     get childNodes() { return this.children; }
     addEventListener(type, listener) { this.listeners[type] = listener; }
     setAttribute(name, value) { this.attributes[name] = value; }
     getAttribute(name) { return this.attributes[name]; }
-    querySelectorAll(selector) { return descendants(this).slice(1).filter(node => selector.split(',').some(part => part.trim().startsWith('.') && String(node.className || '').split(/\s+/).includes(part.trim().slice(1)))); }
+    querySelectorAll(selector) { return descendants(this).slice(1).filter(node => selector.split(',').some(part => part.trim().startsWith('.') ? String(node.className || '').split(/\s+/).includes(part.trim().slice(1)) : part === 'button[type="submit"]' ? node.type === 'submit' : part === 'input[type=radio]' ? node.type === 'radio' : false)); }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-    after() {} before() {}
+    contains(target) { return Boolean(target) && descendants(this).includes(target); }
+    get isConnected() { let node = this; while (node && node !== document.body) node = node.parentElement; return node === document.body; }
+    closest(selector) { let node = this; while (node) { if (selector === 'form' && node.tagName === 'FORM') return node; node = node.parentElement; } return null; }
+    focus() { document.activeElement = this; this.focusCount++; }
+    setSelectionRange(start, end, direction = 'none') { this.selectionStart = Math.min(start, this.value.length); this.selectionEnd = Math.min(end, this.value.length); this.selectionDirection = direction; }
+    after(...nodes) { if (this.parentElement) { const parent = this.parentElement, index = parent.children.indexOf(this); parent.children.splice(index + 1, 0, ...nodes); for (const node of nodes) node.parentElement = parent; } }
+    before(...nodes) { if (this.parentElement) { const parent = this.parentElement, index = parent.children.indexOf(this); parent.children.splice(index, 0, ...nodes); for (const node of nodes) node.parentElement = parent; } }
   }
   const nodes = new Map(), requests = [];
   const store = { read: async () => null, reserve: async () => true, remove: async () => true };
-  const document = { querySelector(key) { if (!nodes.has(key)) nodes.set(key, new Element()); return nodes.get(key); }, createElement: () => new Element(), createDocumentFragment: () => new Element() };
+  const document = { body: new Element(), querySelector(key) { if (!nodes.has(key)) { const node = new Element(); nodes.set(key, node); this.body.append(node); } return nodes.get(key); }, createElement(tag) { const node = new Element(); node.tagName = tag.toUpperCase(); return node; }, createDocumentFragment: () => new Element() };
   const context = vm.createContext({ document, store, AbortController, URLSearchParams, TextDecoder, Date, setTimeout, clearTimeout,
     localStorage: { getItem() { return null; } }, sessionStorage: { removeItem() {} }, window: { addEventListener() {} },
     fetch: async (url, options = {}) => { requests.push({ url, options }); return await handler?.(url, options) || response({ projects: [], recent: [] }); } });
@@ -32,7 +38,7 @@ async function fixture(handler) {
   const run = code => vm.runInContext(code, context);
   run(source); await tick();
   run(`selectedId='${threadId}';currentDeviceId='device';historyScope={hostId:'host',deviceId:'device'};connected=true;loadThreads=async()=>{};recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'});recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});`);
-  return { nodes, requests, run, show(view, live = true) { run(`showState(${JSON.stringify({ id: threadId, runtimeStatus: 'idle', requests: [], turns: [], history: { complete: true }, ...view })},${live})`); }, find(selector) { return [...nodes.values(), run('questionPanel')].flatMap(descendants).find(node => selector.startsWith('.') && String(node.className || '').split(/\s+/).includes(selector.slice(1))); } };
+  return { nodes, requests, run, document, show(view, live = true) { run(`showState(${JSON.stringify({ id: threadId, runtimeStatus: 'idle', requests: [], turns: [], history: { complete: true }, ...view })},${live})`); }, find(selector) { return [...nodes.values(), run('questionPanel')].flatMap(descendants).find(node => selector.startsWith('.') && String(node.className || '').split(/\s+/).includes(selector.slice(1))); } };
 }
 
 test('live approval submits one decision while pending and history never exposes its buttons', async () => {
@@ -433,4 +439,138 @@ test('disconnect blocks other forms; clearing the chat aborts a write without cl
   assert.equal(descendants(forms(f)[1]).find(node => node.type === 'submit').disabled, false);
   release(); await first;
   assert.ok(descendants(forms(f)[0]).some(node => node.textContent === '结果暂不确定，请查看电脑上的任务状态'));
+});
+
+for (const kind of ['async', 'request']) test(`${kind} custom answer keeps its attached input, focus and selection through streaming updates and still submits`, async () => {
+  const f = await fixture();
+  const view = kind === 'async'
+    ? { turns: [{ id: 'turn', status: 'inProgress', items: [choiceItem('A')] }] }
+    : { requests: [{ id: 'request', kind: 'userInput', questions: [{ id: 'q', question: '回答', isOther: true, options: [{ label: '继续' }] }] }], turns: [{ id: 'turn', status: 'inProgress', items: [] }] };
+  f.show(view);
+  const form = forms(f)[0], input = inputIn(form);
+  fill(form, '输入中中文 custom answer'); input.focus(); input.setSelectionRange(3, 7, 'backward');
+  // These are actual renders of streamed state, not a copied reconciliation function.
+  for (let n = 0; n < 25; n++) {
+    const next = structuredClone(view);
+    next.turns[0].items.push({ id: 'tool', type: 'mcpToolCall', server: 'server', tool: 'run', status: 'inProgress', output: `chunk ${n}` }, { id: 'commentary', type: 'agentMessage', phase: 'commentary', text: `stream ${n}` });
+    next.requests ||= [];
+    next.requests.push({ id: `approval-${n}`, kind: 'command', command: 'echo unrelated' });
+    f.show(next);
+    assert.equal(inputIn(forms(f)[0]), input);
+    assert.equal(input.isConnected, true);
+    assert.equal(f.document.activeElement, input);
+    assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [3, 7, 'backward']);
+    assert.equal(input.focusCount, 1);
+  }
+  // Continued input must use the still-current form closure, including IME commit input.
+  input.value = '中文输入完成'; input.listeners.input();
+  await form.listeners.submit({ preventDefault() {} });
+  const request = f.requests.find(entry => entry.url.endsWith(kind === 'async' ? '/async-question' : '/user-input'));
+  assert.ok(request);
+  assert.deepEqual(JSON.parse(request.options.body).answers, kind === 'async' ? { 'question-A': '中文输入完成' } : { q: '中文输入完成' });
+  f.show(view);
+  assert.equal(inputIn(forms(f)[0]), input);
+  assert.equal(descendants(form).find(node => node.type === 'submit').disabled, true);
+  assert.ok(descendants(form).some(node => node.textContent === '已提交，等待任务更新'));
+});
+
+test('retained question controls still react to recovery guards without replacing the editor', async () => {
+  const f = await fixture(), view = multipleView(); f.show(view);
+  const form = forms(f)[0], input = inputIn(form); input.focus(); fill(form, '未提交回答');
+  f.run("recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown'})");
+  f.show(view);
+  assert.equal(inputIn(forms(f)[0]), input);
+  assert.equal(descendants(form).find(node => node.type === 'submit').disabled, true);
+  await form.listeners.submit({ preventDefault() {} });
+  assert.equal(f.requests.some(request => request.url.endsWith('/async-question')), false);
+  f.run("recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'})"); f.show(view);
+  assert.equal(descendants(form).find(node => node.type === 'submit').disabled, false);
+});
+
+for (const kind of ['async', 'request']) test(`${kind} question schema changes reset the old answer and do not focus the replacement`, async () => {
+  const f = await fixture();
+  const view = kind === 'async' ? { turns: [{ id: 'turn', status: 'completed', items: [choiceItem('A')] }] }
+    : { requests: [{ id: 'request', kind: 'userInput', questions: [{ id: 'q', question: '原来的问题', options: [] }] }] };
+  f.show(view); const original = inputIn(forms(f)[0]); fill(forms(f)[0], '不适用于新问题的答案'); original.focus(); original.setSelectionRange(2, 5);
+  const next = structuredClone(view);
+  const question = kind === 'async' ? next.turns[0].items[0].questions[0] : next.requests[0].questions[0];
+  question.question = '相同 ID 的另一个问题'; question.options = [];
+  f.show(next); const replacement = inputIn(forms(f)[0]);
+  assert.notEqual(replacement, original);
+  assert.equal(original.isConnected, false);
+  assert.equal(replacement.value, '');
+  assert.notEqual(f.document.activeElement, replacement);
+  await forms(f)[0].listeners.submit({ preventDefault() {} });
+  assert.equal(f.requests.some(request => request.url.endsWith(kind === 'async' ? '/async-question' : '/user-input')), false);
+});
+
+test('answered or remotely submitting questions update immediately and do not steal input focus', async () => {
+  const f = await fixture(), view = multipleView(); f.show(view);
+  const input = inputIn(forms(f)[0]); fill(forms(f)[0], 'custom'); input.focus(); input.setSelectionRange(2, 4, 'backward');
+  const remote = structuredClone(view); remote.turns[0].items[0].submittingQuestionIds = ['question-A']; f.show(remote);
+  assert.equal(descendants(forms(f)[0]).find(node => node.type === 'submit').disabled, true);
+  assert.notEqual(f.document.activeElement, inputIn(forms(f)[0]));
+  const answered = structuredClone(remote); answered.turns[0].items[0].pendingQuestionIds = []; f.show(answered);
+  assert.equal(forms(f).length, 1);
+  assert.equal(inputIn(forms(f)[0]).dataset.inputQuestionId, 'question-B');
+  assert.notEqual(f.document.activeElement, inputIn(forms(f)[0]));
+});
+
+test('an unrelated question change restores selection direction only in the same question scope', async () => {
+  const f = await fixture(), view = multipleView(); f.show(view);
+  fill(forms(f)[0], 'same answer'); const input = inputIn(forms(f)[0]); input.focus(); input.setSelectionRange(2, 6, 'backward');
+  const changed = structuredClone(view); changed.turns[1].items[0].questions[0].question = 'B 新问题'; f.show(changed);
+  const replacement = inputIn(forms(f)[0]);
+  assert.equal(f.document.activeElement, replacement);
+  assert.equal(replacement.value, 'same answer');
+  assert.deepEqual([replacement.selectionStart, replacement.selectionEnd, replacement.selectionDirection], [2, 6, 'backward']);
+  f.run("resetHistoryScope();currentDeviceId='new-device';historyScope={hostId:'host',deviceId:'new-device'};connected=true"); f.show(changed);
+  const otherDevice = inputIn(forms(f)[0]);
+  assert.notEqual(f.document.activeElement, otherDevice);
+  assert.equal(otherDevice.value, '');
+});
+
+test('clearing a conversation invalidates its retained question form', async () => {
+  const f = await fixture(), view = multipleView(); f.show(view);
+  const original = inputIn(forms(f)[0]); original.focus();
+  f.run('clearConversation()'); assert.equal(forms(f).length, 0);
+  f.show(view);
+  assert.notEqual(inputIn(forms(f)[0]), original);
+  assert.notEqual(f.document.activeElement, inputIn(forms(f)[0]));
+});
+
+test('the first live state becoming connected does not replace a just-focused question input', async () => {
+  const f = await fixture(), view = multipleView();
+  f.run('connected=false'); f.show(view);
+  assert.equal(f.run('connected'), true);
+  const input = inputIn(forms(f)[0]); fill(forms(f)[0], 'first state input'); input.focus(); input.setSelectionRange(3, 8, 'backward');
+  f.show(view);
+  assert.equal(inputIn(forms(f)[0]), input);
+  assert.equal(input.isConnected, true);
+  assert.equal(f.document.activeElement, input);
+  assert.equal(input.focusCount, 1);
+  assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [3, 8, 'backward']);
+});
+
+test('a preserved-view reconnect unhides the same questions on its next live state', async () => {
+  let releaseEvents;
+  const f = await fixture(url => url.endsWith('/events') ? new Promise(resolve => { releaseEvents = () => resolve(response()); }) : undefined);
+  const view = multipleView(); f.show(view);
+  const oldInput = inputIn(forms(f)[0]); fill(forms(f)[0], 'retained draft');
+  const reconnect = f.run('connect(selectedId,0,true)');
+  assert.equal(f.run('questionPanel.hidden'), true);
+  f.show(view);
+  assert.equal(f.run('questionPanel.hidden'), false);
+  assert.equal(forms(f).length, 2);
+  assert.notEqual(inputIn(forms(f)[0]), oldInput);
+  assert.equal(inputIn(forms(f)[0]).value, 'retained draft');
+  f.run('active.abort()'); releaseEvents(); await reconnect;
+});
+
+test('question retention signatures exclude long message, reasoning and tool bodies', async () => {
+  const f = await fixture();
+  const makeSignature = length => f.run(`questionPanelSignature({requests:[],turns:[{id:'long',items:[{id:'user',type:'userMessage',text:'x'.repeat(${length})},{id:'tool',type:'commandExecution',output:'y'.repeat(${length})},{id:'reasoning',type:'reasoning',summary:['z'.repeat(${length})]}]}]},[], 'scope')`);
+  const short = makeSignature(1), long = makeSignature(500000);
+  assert.equal(long, short);
+  assert.ok(long.length < 200);
 });

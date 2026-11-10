@@ -942,6 +942,7 @@ function selectDraftProject(value) { if (newDraft && availableProjects.some(proj
 newProject.addEventListener('change', () => selectDraftProject(newProject.value));
 currentProject.addEventListener('change', () => selectDraftProject(currentProject.value));
 const inputDrafts = new Map();
+let renderedQuestionPanel = null;
 const asyncQuestionWrites = new Map();
 function cancelAsyncQuestionWrites() {
   for (const write of asyncQuestionWrites.values()) {
@@ -2161,7 +2162,7 @@ async function responseError(response, fallback) {
   return fallback;
 }
 let displayedHistoryId = null, homeErrorSource = null;
-function clearConversation() { cancelAsyncQuestionWrites(); clearToolOutputEntries(); cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
+function clearConversation() { cancelAsyncQuestionWrites(); clearToolOutputEntries(); cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; renderedQuestionPanel = null; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
 function diffStats(changes) {
   let added = 0, removed = 0;
   for (const change of changes || []) {
@@ -3197,6 +3198,21 @@ async function loadEarlierPage() {
   finally { if (historyRequest === controller) { historyRequest = null; updateHistoryControl(); } }
 }
 loadEarlier.addEventListener('click', () => loadEarlierPage());
+function questionPanelSignature(view, controlTurns, scope) {
+  const questions = turns => turns.map(turn => [turn.viewKey || turn.id, (turn.items || [])
+    .filter(item => item?.questions?.length || item?.type === 'userMessage')
+    .map(item => [item.id, item.type, item.questions, item.pendingQuestionIds, item.submittingQuestionIds, item.questionReplyIds])]);
+  return JSON.stringify([scope, (view.requests || []).filter(request => request.kind === 'userInput'), questions(controlTurns), questions(view.turns || [])]);
+}
+function reconcileQuestionDraft(draft, questions) {
+  draft.questionSchemas ||= new Map();
+  for (const question of questions) {
+    const schema = questionInputSchema(question);
+    if (draft.questionSchemas.has(question.id) && draft.questionSchemas.get(question.id) !== schema) delete draft.answers[question.id];
+    draft.questionSchemas.set(question.id, schema);
+  }
+}
+function questionInputSchema(question) { return JSON.stringify([question.question, question.options, question.isOther]); }
 function showState(view, live = true, loadingPreview = false, immediateWork = null) {
   recoveryGuardedControls = [];
   const viewThread = selectedId;
@@ -3271,6 +3287,13 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   error.hidden = true;
   const fragment = document.createDocumentFragment();
   const questionFragment = document.createDocumentFragment();
+  const questionScope = JSON.stringify([historyScope?.hostId, historyScope?.deviceId, currentDeviceId, selectedId, historyScopeGeneration, live]);
+  const questionSignature = questionPanelSignature(view, controlTurns, questionScope);
+  // Keeping the actual form attached preserves the iOS keyboard, selection and
+  // an in-flight IME composition. Refocusing a newly created input cannot do so.
+  const reuseQuestions = renderedQuestionPanel?.signature === questionSignature;
+  const questionControls = reuseQuestions ? renderedQuestionPanel.controls : [];
+  if (reuseQuestions) recoveryGuardedControls.push(...questionControls);
   let pendingQuestionCount = 0;
   const fileTargets = new Map();
   if (live && Array.isArray(view.requests) && view.requests.length) {
@@ -3278,11 +3301,13 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
       if (request.unsupported || !request.kind) { fragment.append(element('p', 'pending-request', '此任务有待处理请求，请在电脑上的 Codex 中查看并处理。')); continue; }
       const card = element('div', request.kind === 'userInput' ? 'question-card' : 'pending-request');
       if (request.kind === 'userInput') {
+        if (reuseQuestions) continue;
         card.append(element('div', 'question-card-title', '问题'));
         const threadId = selectedId;
-        const key = JSON.stringify([threadId, request.id]);
+        const key = JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId, 'request', request.id]);
         let draft = inputDrafts.get(key);
         if (!draft) { draft = { answers: Object.create(null), pending: false }; inputDrafts.set(key, draft); }
+        reconcileQuestionDraft(draft, request.questions);
         const form = element('form', 'user-input-form');
         for (const question of request.questions) {
           const group = element('fieldset', 'user-input-question');
@@ -3305,7 +3330,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           }
           if (!question.options.length || question.isOther) {
             const input = element('input', 'user-input-text'); input.type = 'text'; input.placeholder = question.options.length ? '其他回答' : '输入回答';
-            input.dataset.inputDraftKey = key; input.dataset.inputQuestionId = question.id;
+            input.dataset.inputDraftKey = key; input.dataset.inputQuestionId = question.id; input.dataset.inputQuestionSchema = questionInputSchema(question);
             input.value = question.options.some(o => o.label === draft.answers[question.id]) ? '' : (draft.answers[question.id] || '');
             input.addEventListener('input', () => { draft.answers[question.id] = input.value; for (const radio of group.querySelectorAll('input[type=radio]')) radio.checked = false; });
             group.append(input);
@@ -3313,6 +3338,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           form.append(group);
         }
         const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending);
+        questionControls.push(recoveryGuardedControls.at(-1));
         const status = element('p', 'list-error', draft.feedback || ''); form.append(submit, status);
         draft.controls = { submit, status };
         form.addEventListener('submit', async event => {
@@ -3645,10 +3671,11 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         section.append(text, toggle);
       } else if (content) section.append(item.type === 'agentMessage' ? assistantContent(content, live && turn.id && item.id ? { threadId: selectedId, turnId: turn.id, itemId: item.id } : null) : element('p', item.type === 'commandExecution' ? 'item-code' : 'item-text', content));
       if (item.type === 'userMessage' && item.questionReplyPendingIds?.length) section.append(element('p', 'file-change-empty', '结果待确认'));
-      if (showAsyncForm) {
+      if (showAsyncForm && !reuseQuestions) {
         const threadId = selectedId, key = JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId, 'async', item.id]);
         let draft = inputDrafts.get(key);
         if (!draft) { draft = { answers: Object.create(null), pending: false }; inputDrafts.set(key, draft); }
+        reconcileQuestionDraft(draft, formQuestions);
         if (knownPending && draft.pending && draft.sentQuestionIds?.every(id => !pendingIds.includes(id))) {
           draft.pending = false; draft.feedback = ''; draft.outcome = ''; draft.attempt = null;
         }
@@ -3689,12 +3716,13 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           }
           if (question.options.length) group.append(choices);
           const input = element('input', 'user-input-text'); input.type = 'text'; input.placeholder = question.options.length ? '其他回答' : '输入回答';
-          input.dataset.inputDraftKey = key; input.dataset.inputQuestionId = question.id;
+          input.dataset.inputDraftKey = key; input.dataset.inputQuestionId = question.id; input.dataset.inputQuestionSchema = questionInputSchema(question);
           input.value = question.options.includes(draft.answers[question.id]) ? '' : (draft.answers[question.id] || '');
           input.addEventListener('input', () => { if (!isCurrentForm()) return; draft.answers[question.id] = input.value; for (const radio of group.querySelectorAll('input[type=radio]')) radio.checked = false; });
           group.append(input); form.append(group);
         }
         const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : remoteSubmitting ? '结果待确认' : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending || remoteSubmitting || asyncQuestionWrites.has(writeKey) || !isCurrentScope());
+        questionControls.push(recoveryGuardedControls.at(-1));
         const feedback = element('p', 'list-error', draft.feedback || (remoteSubmitting ? '回答结果待确认，请查看电脑上的任务状态' : ''));
         const actions = element('div', 'question-actions');
         if (skipKey) {
@@ -3773,7 +3801,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     priorWorkGroups.delete(scope);
   }
   const focusedInput = document.activeElement;
-  const inputFocus = focusedInput?.dataset?.inputDraftKey ? { key: focusedInput.dataset.inputDraftKey, question: focusedInput.dataset.inputQuestionId, start: focusedInput.selectionStart, end: focusedInput.selectionEnd } : null;
+  const inputFocus = !reuseQuestions && renderedQuestionPanel?.scope === questionScope && focusedInput?.dataset?.inputDraftKey ? { key: focusedInput.dataset.inputDraftKey, question: focusedInput.dataset.inputQuestionId, schema: focusedInput.dataset.inputQuestionSchema, start: focusedInput.selectionStart, end: focusedInput.selectionEnd, direction: focusedInput.selectionDirection } : null;
   const oldQuestionScroll = questionPanel.scrollTop;
   turns.replaceChildren(fragment);
   if (live && sourceView.id === selectedId) syncOutgoingWithView(sourceView); else renderOutgoingMessages();
@@ -3784,12 +3812,17 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     for (const index of workFocus.path) target = target?.children[index];
     if (target?.tagName === workFocus.tag && target.className === workFocus.className && target.textContent === workFocus.text) target.focus?.({ preventScroll: true });
   }
-  questionPanel.replaceChildren(questionFragment);
-  questionPanel.hidden = pendingQuestionCount === 0;
+  if (!reuseQuestions) {
+    questionPanel.replaceChildren(questionFragment);
+    questionPanel.hidden = pendingQuestionCount === 0;
+    renderedQuestionPanel = { signature: questionSignature, scope: questionScope, controls: questionControls };
+  }
+  updateRecoveryGuardedControls();
   if (Number.isFinite(oldQuestionScroll)) questionPanel.scrollTop = oldQuestionScroll;
   if (inputFocus) {
-    const replacement = [...questionPanel.querySelectorAll('.user-input-text')].find(input => input.dataset.inputDraftKey === inputFocus.key && input.dataset.inputQuestionId === inputFocus.question);
-    if (replacement) { replacement.focus({ preventScroll: true }); replacement.setSelectionRange(inputFocus.start, inputFocus.end); }
+    const replacement = [...questionPanel.querySelectorAll('.user-input-text')].find(input => input.dataset.inputDraftKey === inputFocus.key && input.dataset.inputQuestionId === inputFocus.question && input.dataset.inputQuestionSchema === inputFocus.schema);
+    const form = replacement?.closest('form');
+    if (replacement && !replacement.disabled && !form?.hidden && !form?.querySelector('button[type="submit"]')?.disabled) { replacement.focus({ preventScroll: true }); replacement.setSelectionRange(inputFocus.start, inputFocus.end, inputFocus.direction); }
   }
   if (conversation) {
     if (followLatest) conversation.scrollTop = conversation.scrollHeight;
@@ -4038,7 +4071,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   if (preserveView) {
     historyRequest?.abort(); historyRequest = null; stopGoalClock();
     activeTurnId = null; liveMode = null; liveRuntimeStatus = null;
-    goalPanel.hidden = true; questionPanel.hidden = true;
+    goalPanel.hidden = true; questionPanel.hidden = true; renderedQuestionPanel = null;
   } else clearConversation();
   homeErrorSource = null; error.hidden = true; status(preserveView ? '重新连接中' : '连接中', 'connecting');
   if (!preserveView) showConversationLoading();
