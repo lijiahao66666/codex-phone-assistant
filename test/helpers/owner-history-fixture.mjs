@@ -91,17 +91,34 @@ export async function fixture(page, options = {}) {
     state: () => local.owner._debugSnapshot(threadId),
     async resume() { await local.resume(threadId); await until(() => snapshots().length, 'initial IPC snapshot'); },
     notify: emit,
-    follower(following, sourceClientId = 'isolated-native-follower') {
+    follower(following, sourceClientId = 'isolated-native-follower', { phone = false, source } = {}) {
       ownerSocket.write(frame({ type: 'broadcast', method: 'thread-stream-following-changed', sourceClientId,
-        params: { conversationId: threadId, hostId: 'local', following } }));
+        params: { conversationId: threadId, hostId: 'local', following,
+          ...(phone || source ? { remodexFollowerSource: source || 'codex-phone-assistant' } : {}) } }));
+    },
+    disconnectFollower(clientId) {
+      ownerSocket.write(frame({ type: 'broadcast', method: 'client-status-changed', sourceClientId: clientId,
+        params: { clientId, status: 'disconnected' } }));
     },
     disconnectOwner() { ownerSocket.destroy(); },
-    reply(request, result) { emit({ id: request.id, result }); },
+    reply(request, result) {
+      emit({ id: request.id, result });
+      if (request.method === 'thread/unsubscribe' && ['unsubscribed', 'notSubscribed'].includes(result?.status)
+          && options.disableAutoClosed !== true) {
+        emit({ method: 'thread/closed', params: { threadId: request.params.threadId } });
+      }
+    },
     reject(request, message = 'fixture rejection') { emit({ id: request.id, error: { code: -1, message } }); },
     native(method, params = {}) {
       const requestId = `native-${++serial}`;
       ownerSocket.write(frame({ type: 'request', method, requestId,
         params: { conversationId: threadId, ...params }, sourceClientId: 'isolated-native-follower' }));
+      return requestId;
+    },
+    nativeDiscovery(method, params = {}) {
+      const requestId = `native-discovery-${++serial}`;
+      ownerSocket.write(frame({ type: 'client-discovery-request', requestId,
+        request: { method, params: { conversationId: threadId, ...params } } }));
       return requestId;
     },
     replyFor: id => frames.find(message => message.type === 'response' && message.requestId === id),

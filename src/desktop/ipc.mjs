@@ -12,7 +12,8 @@ const defaultSocketPath = process.platform === 'win32'
 // This private desktop protocol is version-specific; writes require explicit methods.
 export class DesktopIpc extends EventEmitter {
   #socket;
-  constructor({ socketPath = defaultSocketPath, timeout, discoveryTimeout = timeout ?? 11000, maxFrame = 64 * 1024 * 1024 } = {}) {
+  constructor({ socketPath = defaultSocketPath, timeout, discoveryTimeout = timeout ?? 11000, maxFrame = 64 * 1024 * 1024,
+    followerSource = 'codex-phone-assistant' } = {}) {
     super();
     this.socketPath = socketPath;
     this.timeout = timeout ?? 5000;
@@ -20,6 +21,7 @@ export class DesktopIpc extends EventEmitter {
     // final response to arrive without extending control or connection timers.
     this.discoveryTimeout = discoveryTimeout;
     this.maxFrame = maxFrame;
+    this.followerSource = followerSource;
     this.frameHeader = Buffer.alloc(4);
     this.frameHeaderBytes = 0;
     this.frameLength = null;
@@ -71,7 +73,7 @@ export class DesktopIpc extends EventEmitter {
     let cancel;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(requestId); reject(new Error(`${method} timed out`)); }, timeout);
-      this.pending.set(requestId, { resolve, reject, timer });
+      this.pending.set(requestId, { resolve, reject, timer, method });
       cancel = () => {
         if (!this.pending.delete(requestId)) return;
         clearTimeout(timer);
@@ -188,7 +190,8 @@ export class DesktopIpc extends EventEmitter {
 
   #follow(subscription, following) {
     this.#send({ type: 'broadcast', method: 'thread-stream-following-changed', sourceClientId: this.clientId,
-      version: 1, targetClientIds: [subscription.ownerId], params: { conversationId: subscription.conversationId, hostId: subscription.hostId, following } });
+      version: 1, targetClientIds: [subscription.ownerId], params: { conversationId: subscription.conversationId, hostId: subscription.hostId,
+        remodexFollowerSource: this.followerSource, following } });
   }
 
   refreshSubscription(conversationId, hostId = 'local') {
@@ -251,7 +254,14 @@ export class DesktopIpc extends EventEmitter {
         if (message.resultType === 'success') pending.resolve(message);
         else {
           const known = ['no-client-found', 'client-disconnected', 'request-timeout', 'request-version-mismatch', 'no-handler-for-request', 'server-closed'];
-          const code = known.includes(message.error) ? message.error : 'owner-error';
+          // The bundled fallback router uses a descriptive response for the
+          // same definite absence native Desktop calls no-client-found. Only
+          // its exact discovery result proves absence; arbitrary owner errors
+          // must never authorize a competing writer.
+          const missingDiscoveryOwner = pending.method === 'thread-owner-discovery'
+            && message.method === 'thread-owner-discovery' && message.handledByClientId === ''
+            && message.error === 'No Codex IPC client can handle thread-owner-discovery.';
+          const code = missingDiscoveryOwner ? 'no-client-found' : known.includes(message.error) ? message.error : 'owner-error';
           const error = new Error(`IPC request failed: ${code}`);
           error.code = code;
           pending.reject(error);

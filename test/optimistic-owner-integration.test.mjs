@@ -58,7 +58,7 @@ test('new chat first attachment retains prepare and creation-bound upload before
   const prepared=JSON.parse(prepare.options.body);assert.match(prepared.digest,/^[a-f0-9]{64}$/);
   const uploads=f.requests.filter(request=>/\/uploads/.test(request.url));assert.equal(uploads.length,3);
   for(const request of uploads)assert.equal(request.options.headers['x-creation-id'],prepared.requestId);
-  const submit=f.requests.find(request=>request.url==='/api/chats/submit');assert.ok(submit);assert.deepEqual(JSON.parse(submit.options.body),{requestId:prepared.requestId,text:'first file',attachmentIds:[attachment]});
+  const submit=f.requests.find(request=>request.url==='/api/chats/submit');assert.ok(submit);assert.deepEqual(JSON.parse(submit.options.body),{requestId:prepared.requestId,text:'first file',attachmentIds:[attachment],title:'first file'});
   assert.equal(sent(f).length,0);assert.equal(f.run('outgoingMessages.size'),0);
 });
 

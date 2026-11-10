@@ -11,6 +11,7 @@ import { DesktopIpcPool } from '../src/desktop/ipc-pool.mjs';
 import { discoverDesktopOwner } from '../src/desktop/owner-runtime.mjs';
 import { OwnerRouter } from '../src/desktop/owner-router.mjs';
 import { CreationJournal } from '../src/desktop/creation-journal.mjs';
+import { SidebarStatus } from '../src/desktop/sidebar-status.mjs';
 
 function frame(message) {
   const body = Buffer.from(JSON.stringify(message));
@@ -41,6 +42,28 @@ async function fixture(handler) {
   await new Promise(resolve => server.listen(socketPath, resolve));
   return { socketPath, async close() { await new Promise(resolve => server.close(resolve)); await rm(dir, { recursive: true, force: true }); } };
 }
+
+test('fallback router definite missing-owner discovery allows recovery without treating other owner errors as absence', async () => {
+  const missing = { method: 'thread-owner-discovery', handledByClientId: '', error: 'No Codex IPC client can handle thread-owner-discovery.' };
+  for (const [fields, absent] of [
+    [missing, true],
+    [{ ...missing, handledByClientId: 'known-owner' }, false],
+    [{ ...missing, method: 'thread-follower-load-complete-history' }, false],
+    [{ ...missing, error: 'No Codex IPC client can handle thread-follower-start-turn.' }, false],
+    [{ ...missing, error: 'Owner encountered an unexpected error' }, false],
+    [{ error: missing.error }, false],
+  ]) {
+    const f = await fixture((socket, message) => {
+      if (message.method === 'initialize') socket.write(frame({ type: 'response', requestId: message.requestId, resultType: 'success', result: { clientId: 'follower' } }));
+      else if (message.method === 'thread-owner-discovery') socket.write(frame({ type: 'response', requestId: message.requestId, resultType: 'error', ...fields }));
+    });
+    try {
+      const createClient = () => new DesktopIpc({ socketPath: f.socketPath, timeout: 1000 });
+      if (absent) assert.deepEqual(await discoverDesktopOwner('released-thread', createClient), { kind: 'unknown' });
+      else await assert.rejects(discoverDesktopOwner('released-thread', createClient), { code: 'owner-error' });
+    } finally { await f.close(); }
+  }
+});
 
 test('non-object IPC frames disconnect and reject pending discovery', async () => {
   for (const value of [null, [], 'invalid', 1]) {
@@ -384,6 +407,7 @@ test('owner status requests reannounce only existing subscriptions for that exac
     assert.equal(follows.length, 2);
     assert.deepEqual(follows[1].targetClientIds, ['owner']);
     assert.equal(follows[1].params.following, true);
+    assert.equal(follows[1].params.remodexFollowerSource, 'codex-phone-assistant');
     off();
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(follows.at(-1).params.following, false);
@@ -392,6 +416,50 @@ test('owner status requests reannounce only existing subscriptions for that exac
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(follows.length, count);
   } finally { await client.close(); await f.close(); }
+});
+
+test('sidebar observers use their own role and rebind only the released thread', async () => {
+  const follows = [], generations = new Map();
+  const f = await fixture((socket, msg) => {
+    if (msg.method === 'initialize') socket.write(frame({ type: 'response', requestId: msg.requestId,
+      resultType: 'success', result: { clientId: 'sidebar' } }));
+    else if (msg.method === 'thread-owner-discovery') socket.write(frame({ type: 'response', requestId: msg.requestId,
+      resultType: 'success', handledByClientId: generations.has(msg.params.conversationId) ? 'desktop-owner' : 'phone-owner', result: {} }));
+    else if (msg.method === 'thread-stream-following-changed') {
+      follows.push(msg);
+      if (!msg.params.following) return;
+      const id = msg.params.conversationId, ownerId = msg.targetClientIds[0];
+      generations.set(id, true);
+      socket.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: ownerId,
+        params: { conversationId: id, hostId: 'local', change: { type: 'snapshot', revision: 1,
+          conversationState: { threadRuntimeStatus: { type: ownerId === 'desktop-owner' ? 'active' : 'idle' } } } } }));
+    }
+  });
+  const sidebar = new SidebarStatus();
+  // Preserve the production default client's role while selecting this test's
+  // isolated socket instead of the user's real Desktop IPC bus.
+  const defaultClient = sidebar.createClient;
+  sidebar.createClient = () => { const client = defaultClient(); client.socketPath = f.socketPath; return client; };
+  const wait = async predicate => {
+    const end = Date.now() + 2500;
+    while (!predicate()) { if (Date.now() > end) throw new Error('sidebar observation timed out'); await new Promise(resolve => setTimeout(resolve, 5)); }
+  };
+  try {
+    await sidebar.updateAndWait(['released', 'other']);
+    await wait(() => sidebar.get('released') === 'idle' && sidebar.get('other') === 'idle');
+    assert.ok(follows.length >= 2);
+    assert.ok(follows.every(msg => msg.params.remodexFollowerSource === 'codex-phone-sidebar'));
+    assert.equal(sidebar.invalidateThread('missing'), false);
+    assert.equal(sidebar.invalidateThread('released'), true);
+    assert.equal(sidebar.get('released'), 'unknown');
+    assert.equal(sidebar.get('other'), 'idle');
+    await wait(() => sidebar.get('released') === 'active');
+    assert.equal(sidebar.get('other'), 'idle');
+    assert.equal(follows.filter(msg => msg.params.conversationId === 'other').length, 1,
+      'another device/thread observer must stay subscribed');
+    assert.ok(follows.some(msg => msg.params.conversationId === 'released' && msg.params.following === false));
+    assert.equal(sidebar.entries.get('released').ownerId, 'desktop-owner');
+  } finally { await sidebar.close(); await f.close(); }
 });
 
 test('closing a half-open peer cannot block session recovery indefinitely', async () => {

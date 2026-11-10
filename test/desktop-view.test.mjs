@@ -128,6 +128,7 @@ test('places steering messages at their matching steered markers', () => {
     { type: 'agentMessage', id: 'final', text: 'done' },
   ] }] });
   assert.deepEqual(view.turns[0].items.map(item => item.id), ['first', 'intermediate', 'local', 'final']);
+  assert.equal(view.turns[0].items[2].serverUserMessageId, 'server', 'history can link the local steering row to its recorded server item');
 });
 
 test('renders structured asynchronous question replies without their system wrapper', () => {

@@ -9,7 +9,7 @@ test('1 GiB history marker resumes with only an authoritative finite page and un
     await f.resume();
     assert.equal(f.metadata.extra.fixtureRolloutBytes, 1024 ** 3);
     assert.deepEqual(f.requests.find(r => r.method === 'thread/resume').params,
-      { threadId, excludeTurns: true, initialTurnsPage: { limit: 3, itemsView: 'summary', sortDirection: 'desc' } });
+      { threadId, config: { thread_unload_delay_secs: 0 }, excludeTurns: true, initialTurnsPage: { limit: 3, itemsView: 'summary', sortDirection: 'desc' } });
     assert.equal(f.reads.length, 0);
     assert.equal(f.requests.some(r => r.method === 'thread/settings/update'), false);
     const state = f.state();

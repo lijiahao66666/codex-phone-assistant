@@ -173,6 +173,13 @@ export class DesktopSession extends EventEmitter {
     this.#retry('recovery-accepted');
   }
 
+  ownershipReleased() {
+    if (['idle', 'closed'].includes(this.status)) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.#retry('owner-released');
+  }
+
   #invalidate(reason) {
     this.conversation.invalidate(reason);
     this.status = 'unavailable';

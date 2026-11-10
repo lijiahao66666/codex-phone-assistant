@@ -118,6 +118,39 @@ test('recorded history and a live prompt share native identity without collapsin
   assert.deepEqual(rendered(f).filter(value => value === 'repeat'), ['repeat', 'repeat']);
 });
 
+test('recorded and live steering identities reconcile without collapsing genuinely repeated user messages', async () => {
+  const f = await fixture(() => response(page([])));
+  const content = [{ type: 'text', text: 'repeat' }];
+  const live = desktopView({ id, turns: [{ turnId: 'shared', items: [
+    { type: 'steeringUserMessage', id: 'local-steer', serverUserMessageId: 'server-steer', input: content },
+    { type: 'agentMessage', id: 'answer', text: 'working' },
+    { type: 'userMessage', id: 'different-real-message', content },
+  ] }] });
+  const recorded = page([turn('shared', [
+    { type: 'userMessage', id: 'server-steer', text: 'repeat' },
+    { type: 'agentMessage', id: 'answer', text: 'old answer' },
+  ])]);
+  f.show(recorded);
+  f.run(`streamView=${JSON.stringify(live)};showState(streamView);showState(streamView)`);
+  assert.deepEqual(rendered(f).filter(value => value === 'repeat'), ['repeat', 'repeat']);
+  // Also reconcile an unacknowledged local row captured before the server ID
+  // arrived, and an older page arriving after the live acknowledgement.
+  f.run(`const pending=[{id:'shared',items:[{id:'local-steer',type:'userMessage',text:'repeat'}]}];const accepted=${JSON.stringify(live.turns)};const pendingMerged=mergeHistoryTurns(pending,accepted);const lateRecorded=mergeHistoryTurns(${JSON.stringify(recorded.turns)},pendingMerged)`);
+  assert.equal(f.run("pendingMerged[0].items.filter(item=>item.type==='userMessage').length"), 2);
+  assert.equal(f.run("lateRecorded[0].items.filter(item=>item.type==='userMessage').length"), 2);
+  assert.equal(f.run("lateRecorded[0].items.filter(item=>item.id==='local-steer').length"), 1);
+});
+
+test('existing recorded alias duplicates collapse at the recorded position while late pages preserve neighboring items', async () => {
+  const f = await fixture(() => response(page([])));
+  f.run(`const serverRow={id:'server',type:'userMessage',text:'repeat'};const acknowledged={id:'local',serverUserMessageId:'server',type:'userMessage',text:'repeat',images:['live-image']};const realRepeat={id:'real-repeat',type:'userMessage',text:'repeat'};const stale=[{id:'shared',items:[{id:'before'},serverRow,{id:'between'},acknowledged,realRepeat,{id:'after'}]}];const cleaned=mergeHistoryTurns(stale,[{id:'shared',items:[acknowledged,{id:'after'}]}]);const paged=mergeHistoryTurns([{id:'shared',items:[{id:'older'},serverRow,{id:'between'}]}],cleaned);const repeatCleaned=mergeHistoryTurns(paged,cleaned)`);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(cleaned[0].items.map(item=>item.id))')), ['before','local','between','real-repeat','after']);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(paged[0].items.map(item=>item.id))')), ['older','before','local','between','real-repeat','after']);
+  assert.equal(f.run("paged[0].items.filter(item=>item.text==='repeat').length"), 2);
+  assert.deepEqual(JSON.parse(f.run("JSON.stringify(paged[0].items.find(item=>item.id==='local').images)")), ['live-image']);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(repeatCleaned)')), JSON.parse(f.run('JSON.stringify(paged)')));
+});
+
 test('live summaries update shared messages in recorded order and retain distinct repeated text and live image data', async () => {
   const f = await fixture(() => response(page([])));
   f.run(`const recordedMessages=[{id:'first',type:'userMessage',text:'repeat',images:['stale-image']},{id:'second',type:'userMessage',text:'repeat'},{id:'reasoning',type:'reasoning',text:'thinking'},{id:'answer',type:'agentMessage',text:'old answer'}];const liveFirst={id:'first',type:'userMessage',text:'repeat',images:['live-image'],attachments:[{name:'photo.png'}]};const liveAnswer={id:'answer',type:'agentMessage',text:'updated answer'};const orderedMerge=mergeHistoryTurns([{id:'shared',items:recordedMessages}],[{id:'shared',items:[liveFirst,liveAnswer]}])`);

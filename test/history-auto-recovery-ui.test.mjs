@@ -101,6 +101,112 @@ test('automatic recovery reaches live state on the original history event stream
   } finally { f.run('active?.abort()'); }
 });
 
+test('a live snapshot arriving before IndexedDB finishes reconciles the stored recovery without another message', async () => {
+  const f = await fixture();
+  let releaseRead, reads = 0;
+  f.store.read = async () => ++reads === 1 ? new Promise(resolve => { releaseRead = resolve; }) : null;
+  f.run("recoveries.delete(recoveryKey(currentDeviceId,selectedId));recoveryStream={threadId:selectedId,controller:new AbortController()};recoveryState(currentDeviceId,selectedId)");
+  await tick();
+  f.run("handleEvent('event: state\\ndata: '+JSON.stringify({seq:1,conversation:{id:selectedId,title:'live',turns:[],requests:[],history:{complete:true}}}))");
+  assert.equal(f.nodes.get('#message').disabled, true);
+  assert.equal(f.nodes.get('#connection').textContent, '已连接，待确认');
+  releaseRead('22222222-2222-4222-8222-222222222222');
+  await tick(); await tick(); await tick();
+  assert.equal(f.nodes.get('#message').disabled, false);
+  assert.equal(f.nodes.get('#connection').textContent, '已连接');
+  assert.equal(f.removes.length, 1);
+  assert.equal(f.reserves.length, 0);
+  assert.equal(f.requests.some(request => request.options.method === 'POST'), false);
+});
+
+test('a delayed stored recovery cannot clear the currently selected task or device', async () => {
+  for (const changeDevice of [false, true]) {
+    const f = await fixture();
+    let releaseRead;
+    f.store.read = () => new Promise(resolve => { releaseRead = resolve; });
+    f.run("recoveries.delete(recoveryKey(currentDeviceId,selectedId));recoveryStream={threadId:selectedId,controller:new AbortController()};recoveryState(currentDeviceId,selectedId)");
+    await tick();
+    f.run("handleEvent('event: state\\ndata: '+JSON.stringify({seq:1,conversation:{id:selectedId,turns:[],requests:[]}}))");
+    f.run(`${changeDevice ? "currentDeviceId='other-device'" : "selectedId='33333333-3333-4333-8333-333333333333'"};historyScopeGeneration++;recoveryStream={threadId:selectedId,controller:new AbortController(),liveState:true};recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'44444444-4444-4444-8444-444444444444'});recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});updateComposer()`);
+    releaseRead('22222222-2222-4222-8222-222222222222'); await tick(); await tick();
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'), '44444444-4444-4444-8444-444444444444');
+    assert.equal(f.nodes.get('#message').disabled, true);
+    assert.equal(f.removes.length, 0);
+  }
+});
+
+test('failed readiness checks recover through bounded read-only checks while the live stream stays attached', async () => {
+  let checks = 0;
+  const f = await fixture(url => url.endsWith('/recovery-status')
+    ? (++checks < 3 ? response({}, 503) : response({ locked: false })) : undefined);
+  f.run("connected=true;recoverableHistoryId=null;recoveryStream={threadId:selectedId,controller:new AbortController(),liveState:true}");
+  const stream = f.run('recoveryStream');
+  await f.run('checkRecoveryStatus(selectedId,currentDeviceId,recoveryStream)');
+  assert.equal(f.nodes.get('#message').disabled, true);
+  assert.equal(f.nodes.get('#connection').textContent, '已连接，待确认');
+  assert.ok(f.nodes.get('#recovery-status').textContent.includes('核对失败'));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    f.run('if(recoveryLockWatches.has(recoveryKey(currentDeviceId,selectedId)))recoveryLockWatches.get(recoveryKey(currentDeviceId,selectedId)).at=Date.now()-4000;recoveryNoticeTick()');
+    await tick();
+  }
+  assert.equal(checks, 3);
+  assert.equal(f.nodes.get('#message').disabled, false);
+  assert.equal(f.run('recoveryStream'), stream);
+  assert.equal(stream.controller.signal.aborted, false);
+  assert.equal(f.requests.some(request => request.options.method === 'POST'), false);
+});
+
+test('readiness failures stop automatic retries and the retry button never reissues recovery or input', async () => {
+  let unlocked = false, checks = 0;
+  const f = await fixture(url => url.endsWith('/recovery-status')
+    ? (checks++, unlocked ? response({ locked: false }) : response({}, 503)) : undefined);
+  f.run("connected=true;recoverableHistoryId=null;recoveryStream={threadId:selectedId,controller:new AbortController(),liveState:true}");
+  await f.run('checkRecoveryStatus(selectedId,currentDeviceId,recoveryStream)');
+  for (let attempt = 0; attempt < 6; attempt++) {
+    f.run('if(recoveryLockWatches.has(recoveryKey(currentDeviceId,selectedId)))recoveryLockWatches.get(recoveryKey(currentDeviceId,selectedId)).at=Date.now()-4000;recoveryNoticeTick()');
+    await tick();
+  }
+  assert.equal(checks, 4, 'one initial check and at most three automatic retries');
+  assert.equal(f.nodes.get('#recover-chat').hidden, false);
+  assert.equal(f.nodes.get('#message').disabled, true);
+  unlocked = true;
+  f.run('connected=false;recoverableHistoryId=selectedId;recoveryStream.liveState=false');
+  f.nodes.get('#recover-chat').listeners.click(); await tick();
+  assert.equal(checks, 5);
+  assert.equal(f.run('recoveryChecks.get(recoveryKey(currentDeviceId,selectedId)).status'), 'ready');
+  assert.equal(f.requests.some(request => request.options.method === 'POST'), false);
+  assert.equal(f.reserves.length, 0);
+});
+
+test('a read-only readiness retry preserves a real recovery lock and unknown operation without live state', async () => {
+  const f = await fixture(url => url.endsWith('/recovery-status') ? response({ locked: true }) : undefined);
+  f.run("connected=true;recoveryStream={threadId:selectedId,controller:new AbortController()};recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'22222222-2222-4222-8222-222222222222',message:'恢复结果未知'});recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'failed'});updateComposer()");
+  f.nodes.get('#recover-chat').listeners.click(); await tick();
+  assert.equal(f.run('recoveryBlocksWrite()'), true);
+  assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'), '22222222-2222-4222-8222-222222222222');
+  assert.equal(f.nodes.get('#message').disabled, true);
+  assert.ok(f.nodes.get('#recovery-status').textContent.includes('暂时不能发送'));
+  assert.equal(f.removes.length, 0);
+  assert.equal(f.requests.some(request => request.options.method === 'POST'), false);
+});
+
+test('a late unlocked readiness response cannot authorize another selection or device', async () => {
+  for (const changeDevice of [false, true]) {
+    let release;
+    const f = await fixture(url => url.endsWith('/recovery-status') ? new Promise(resolve => { release = resolve; }) : undefined);
+    f.run("connected=true;recoveryStream={threadId:selectedId,controller:new AbortController(),liveState:true}");
+    const checking = f.run('checkRecoveryStatus(selectedId,currentDeviceId,recoveryStream,{readOnly:true})');
+    await tick();
+    f.run(`${changeDevice ? "currentDeviceId='other-device'" : "selectedId='33333333-3333-4333-8333-333333333333'"};historyScopeGeneration++;recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'unknown',requestId:'44444444-4444-4444-8444-444444444444'});recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'locked'});updateComposer()`);
+    release(response({ locked: false })); await checking; await tick();
+    assert.equal(f.run('recoveryChecks.get(recoveryKey(currentDeviceId,selectedId)).status'), 'locked');
+    assert.equal(f.run('recoveryState(currentDeviceId,selectedId).requestId'), '44444444-4444-4444-8444-444444444444');
+    assert.equal(f.nodes.get('#message').disabled, true);
+    assert.equal(f.removes.length, 0);
+    assert.equal(f.requests.some(request => request.options.method === 'POST'), false);
+  }
+});
+
 test('accepted recovery reconnects only a still-current disconnected scope with no valid stream',async()=>{
   for (const scenario of ['missing','aborted','connected','scope','selection','cancelled']) {
     let release;

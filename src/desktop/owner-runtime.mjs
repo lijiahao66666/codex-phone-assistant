@@ -10,6 +10,8 @@ import { DesktopIpc } from './ipc.mjs';
 import { desktopIpcPool } from './ipc-pool.mjs';
 import { DesktopSession } from './session.mjs';
 import { readProcessStartIdentity, reconcileExitedRecoveryExecutions } from './recovery-execution.mjs';
+import { createCreatedThreadOwner } from './created-thread-owner.mjs';
+import { openDesktopThread } from './open-thread.mjs';
 
 export async function confirmRecoverySnapshot(threadId, ownerId, { socketPath, timeoutMs = 15000, createSession, createClient } = {}) {
   const session = createSession ? createSession(threadId) : new DesktopSession({ conversationId: threadId,
@@ -73,7 +75,7 @@ async function releaseStaleAppServer(pidFile) {
   } catch { /* no pid file */ }
 }
 
-export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '.codex'), dataDir = join(homedir(), '.config/codex-hub'), ownerOptions = {}, projects = () => localProjects(codexHome) }) {
+export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '.codex'), dataDir = join(homedir(), '.config/codex-hub'), ownerOptions = {}, projects = () => localProjects(codexHome), openCreatedThread }) {
   const bundled = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
   const defaultSocketPath = process.platform === 'win32' ? '\\\\.\\pipe\\codex-ipc' : join(codexHome, 'ipc/ipc.sock');
   const socketPath = ownerOptions.socketPath ?? defaultSocketPath;
@@ -108,7 +110,11 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
       catch { return false; }
       finally { ipc.close(); }
     };
-    const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, projects, journal, hostId, recoveryExecution, competeUnknown: true,
+    // Isolated/custom IPC runtimes have no native Desktop to open. Production
+    // uses the installed protocol handler; tests can supply an isolated opener.
+    const opener = openCreatedThread ?? (socketPath === defaultSocketPath ? openDesktopThread : null);
+    const createdThreadOwner = opener ? createCreatedThreadOwner({ localOwner: owner, openThread: opener, createClient: sharedClient }) : null;
+    const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, createdThreadOwner, projects, journal, hostId, recoveryExecution, competeUnknown: true,
       confirmRecovery: (threadId, ownerId) => confirmRecoverySnapshot(threadId, ownerId, { createClient: sharedClient }) });
     const onChildExit = () => {
       if (recoveryExecution) {

@@ -191,7 +191,9 @@ function displayItem(item, imageHandles, mediaHandles, optimisticTurn = false) {
     const images = paths.map(path => imageHandles.get(path)).filter(Boolean);
     const acceptedReply = !optimisticTurn && (item.type === 'userMessage' || item.status === 'accepted' || item.steerAcknowledged === true);
     const replies = !imageCount ? parseQuestionReply(text) : null;
-    return { ...base, type: 'userMessage', text: displayUserText(text, imageCount), ...(replies && acceptedReply ? { questionReplyIds: replies.map(reply => reply.questionItemId) } : {}), ...(replies && !acceptedReply ? { questionReplyPendingIds: replies.map(reply => reply.questionItemId) } : {}), ...(imageCount ? { imageCount } : {}), ...(images.length ? { images } : {}) };
+    const serverIdentity = item.type === 'steeringUserMessage' && typeof item.serverUserMessageId === 'string' && item.serverUserMessageId
+      ? { serverUserMessageId: item.serverUserMessageId } : {};
+    return { ...base, type: 'userMessage', ...serverIdentity, text: displayUserText(text, imageCount), ...(replies && acceptedReply ? { questionReplyIds: replies.map(reply => reply.questionItemId) } : {}), ...(replies && !acceptedReply ? { questionReplyPendingIds: replies.map(reply => reply.questionItemId) } : {}), ...(imageCount ? { imageCount } : {}), ...(images.length ? { images } : {}) };
   }
   if (item.type === 'imageView' || item.type === 'imageGeneration') {
     const media = mediaHandles.get(item.type === 'imageView' ? item.path : item.savedPath);

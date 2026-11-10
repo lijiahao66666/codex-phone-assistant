@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 
 // One shared, bounded observer for the visible recent list; it never writes.
 export class SidebarStatus extends EventEmitter {
-  constructor({ createClient = () => new DesktopIpc({ timeout: 3000 }), concurrency = 2, discoveryConcurrency = 8, idleMs = 30000, retryMs = 5000, sizeRetryMs = 60000, snapshotMs = 5000, ownerCheckMs = 30000, retainActiveMs = 30000, maxRetained = 8 } = {}) {
+  constructor({ createClient = () => new DesktopIpc({ timeout: 3000, followerSource: 'codex-phone-sidebar' }), concurrency = 2, discoveryConcurrency = 8, idleMs = 30000, retryMs = 5000, sizeRetryMs = 60000, snapshotMs = 5000, ownerCheckMs = 30000, retainActiveMs = 30000, maxRetained = 8 } = {}) {
     super();
     this.createClient = createClient; this.concurrency = concurrency; this.idleMs = idleMs; this.retryMs = retryMs; this.sizeRetryMs = sizeRetryMs; this.snapshotMs = snapshotMs; this.ownerCheckMs = ownerCheckMs;
     this.entries = new Map(); this.generation = 0; this.client = null; this.connecting = null; this.retryAt = 0;
@@ -130,6 +130,12 @@ export class SidebarStatus extends EventEmitter {
       this.entries.delete(id); this.pump(this.client);
     }, Math.max(1000, delay));
     entry.retryTimer.unref?.();
+  }
+  invalidateThread(id) {
+    const entry = this.entries.get(id);
+    if (!entry) return false;
+    this.fail(id, entry, 0);
+    return true;
   }
   get(id) { const status = this.entries.get(id)?.status; return status === 'active' || status === 'idle' ? status : 'unknown'; }
   snapshot() { return Object.fromEntries([...(this.desired ?? [])].map(id => [id, this.get(id)])); }

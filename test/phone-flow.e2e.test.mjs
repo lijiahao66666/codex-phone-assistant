@@ -175,6 +175,22 @@ test('paired phone creates, switches model, sends and recovers a completed chat'
     assert.equal(requestBodies[2].reasoning.effort, initial.defaultReasoningEffort);
     await unsubscribe(); await subscribe(threadId);
     await until(() => events.includes('event: state') && events.includes('third isolated prompt after recovery'), 'reconnected message');
+    const nativeFollower = new DesktopIpc({ socketPath });
+    try {
+      await nativeFollower.connect();
+      await nativeFollower.startTurn(threadId, { request: { threadId, input: [{ type: 'text', text: 'native follower prompt without client identity', text_elements: [] }] }, context: { inheritThreadSettings: true } }, { expectedOwnerId: runtime.owner.ownerId() });
+      await completed(threadId, 'native follower prompt without client identity');
+      await until(() => latestSession?.value?.turns?.some(turn => turn.params?.input?.some(part => part.text === 'native follower prompt without client identity')), 'native follower prompt snapshot');
+      const nativeStart = latestSession.value.turns.find(turn => turn.params?.input?.some(part => part.text === 'native follower prompt without client identity')).params;
+      assert.match(nativeStart.clientUserMessageId, /^[a-f0-9-]{36}$/);
+      assert.equal(nativeUserMessages.find(item => JSON.stringify(item.content).includes('native follower prompt without client identity'))?.clientId,
+        nativeStart.clientUserMessageId, 'real CLI echoes the identity assigned to a native follower start');
+      await until(() => latestSession?.value?.threadRuntimeStatus?.type === 'idle'
+        && desktopView(latestSession.value).turns.some(turn => turn.items.some(item => item.type === 'agentMessage' && item.text?.includes('isolated reply 4'))), 'native follower completion snapshot');
+      assert.equal(desktopView(latestSession.value).turns.flatMap(turn => turn.items)
+        .filter(item => item.type === 'userMessage' && item.text === 'native follower prompt without client identity').length, 1,
+      'native follower prompt appears exactly once in the completed projection');
+    } finally { await nativeFollower.close(); }
     t.diagnostic('Real isolated CLI, local relay and current connector exercised; model output is simulated.');
   } finally {
     releaseFirstModel();

@@ -40,11 +40,7 @@ export class LocalOwner extends EventEmitter {
           ? { idleReleaseGraceMs: this.options.idleReleaseGraceMsForTests } : {}),
         canReleaseThread: () => this.state === 'ready' && !this.pendingWrites && !this.uncertainWrites
           && !this.client.pending.size && !this.rawBridge?.hasUnresolved(),
-        unsubscribeIdleThread: async threadId => {
-          this.pendingWrites++; this.writeGeneration++;
-          try { return await this.client.request('thread/unsubscribe', { threadId }, { observe: false }); }
-          finally { this.pendingWrites--; }
-        },
+        unsubscribeIdleThread: threadId => this.#unsubscribeIdleThread(threadId),
         onThreadReleased: threadId => { this.threads.delete(threadId); this.queuedThreads.delete(threadId); this.releasedThreads.add(threadId); this.emit('threadReleased', threadId); },
         onIdleReleaseError: (threadId, error) => {
           if (!error?.rpcError || !Number.isSafeInteger(error.rpcError.code)) this.uncertainWrites = true;
@@ -73,6 +69,32 @@ export class LocalOwner extends EventEmitter {
       this.state = 'ready'; return this;
     } catch (error) { if (generation === this.generation) this.state = 'unavailable'; await client.close(); throw error; }
   }
+  async #unsubscribeIdleThread(threadId) {
+    // The unsubscribe ACK only removes a subscription. The writer is released
+    // when the runtime closes the thread, which can arrive before that ACK.
+    let finish;
+    const closed = new Promise(resolve => { finish = resolve; });
+    const observe = (_raw, message) => {
+      if (message?.method === 'thread/closed' && message.params?.threadId === threadId) finish(true);
+    };
+    const unavailable = () => finish(false);
+    this.client.on('outbound', observe);
+    this.client.once('unavailable', unavailable);
+    const timer = setTimeout(() => finish(false), this.client.timeout);
+    this.pendingWrites++; this.writeGeneration++;
+    try {
+      const result = await this.client.request('thread/unsubscribe', { threadId }, { observe: false });
+      if (['unsubscribed', 'notSubscribed'].includes(result?.status) && !await closed) {
+        throw Object.assign(new Error('Thread writer release was not confirmed'), { code: 'outcome-unknown' });
+      }
+      return result;
+    } finally {
+      clearTimeout(timer);
+      this.client.off('outbound', observe);
+      this.client.off('unavailable', unavailable);
+      this.pendingWrites--;
+    }
+  }
   request(method, params, options) {
     if (this.state !== 'ready') return Promise.reject(Object.assign(new Error('owner unavailable'), { code: 'unavailable' }));
     if (this.owner?.isThreadReleasing(params?.threadId)) return Promise.reject(Object.assign(new Error('owner releasing'), { code: 'unavailable' }));
@@ -93,7 +115,7 @@ export class LocalOwner extends EventEmitter {
   async #write(method, params, options, coordinate) {
     if (this.state !== 'ready') throw Object.assign(new Error('owner unavailable'), { code: 'unavailable' });
     if (this.owner?.isThreadReleasing(params?.threadId)) throw Object.assign(new Error('owner releasing'), { code: 'unavailable' });
-    if (this.releasedThreads.has(params?.threadId) && method !== 'thread/resume') throw Object.assign(new Error('owner resume required'), { code: 'unavailable' });
+    if (this.releasedThreads.has(params?.threadId) && !['thread/resume', 'thread/archive', 'thread/delete'].includes(method)) throw Object.assign(new Error('owner resume required'), { code: 'unavailable' });
     this.pendingWrites++;
     this.writeGeneration++;
     this.owner?.noteLocalOperation(params?.threadId);
@@ -115,8 +137,21 @@ export class LocalOwner extends EventEmitter {
     } finally { active = false; this.pendingWrites--; this.owner?.noteLocalOperation(params?.threadId); }
   }
   ownerId() { return this.state === 'ready' ? this.identityNet?.ownerId || null : null; }
+  async threadAction(threadId, action) {
+    if (!['archive', 'delete'].includes(action) || typeof threadId !== 'string' || !threadId) throw new TypeError('Invalid thread action');
+    if (this.state !== 'ready' || this.pendingWrites || this.uncertainWrites || this.client.pending.size || this.rawBridge?.hasUnresolved()
+        || this.owner?.isThreadReleasing(threadId)
+        || (this.owner?.isThreadOwned(threadId) && this.owner.canPerformThreadAction(threadId) !== true)) {
+      throw Object.assign(new Error('Thread action unavailable'), { code: 'unavailable' });
+    }
+    // Archiving our own idle thread closes its runtime itself. An unsubscribe
+    // first would give up the writer before the actual action is acknowledged.
+    return this.write(`thread/${action}`, { threadId });
+  }
   async create({ cwd, model, runtimeWorkspaceRoots }) {
-    const response = await this.write('thread/start', { cwd, ...(model ? { model } : {}), ...(runtimeWorkspaceRoots ? { runtimeWorkspaceRoots } : {}) });
+    // Unsubscribe otherwise retains the app-server's writer during its default
+    // unload delay, preventing Desktop from resuming or archiving the thread.
+    const response = await this.write('thread/start', { cwd, config: { thread_unload_delay_secs: 0 }, ...(model ? { model } : {}), ...(runtimeWorkspaceRoots ? { runtimeWorkspaceRoots } : {}) });
     if (response?.thread?.id) this.threads.add(response.thread.id);
     return { id: response?.thread?.id, model: response?.model, effort: response?.reasoningEffort };
   }
@@ -131,7 +166,7 @@ export class LocalOwner extends EventEmitter {
   }
   async resume(threadId, { attemptId } = {}) {
     let result;
-    try { result = await this.write('thread/resume', { threadId, excludeTurns: true,
+    try { result = await this.write('thread/resume', { threadId, config: { thread_unload_delay_secs: 0 }, excludeTurns: true,
       initialTurnsPage: { limit: 3, itemsView: 'summary', sortDirection: 'desc' } }, { attemptId }); }
     catch (error) {
       if (error?.rpcError?.code === -32600 && /already has an active writer/i.test(error.rpcError.message || '')) error.code = 'writer-conflict';

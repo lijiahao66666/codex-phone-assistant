@@ -524,7 +524,20 @@ function recoveryState(deviceId, threadId) {
       if (stored === null) Object.assign(state, { status: 'clear', requestId: null, message: '' });
       else Object.assign(state, { status: 'unknown', requestId: stored, message: '恢复结果未知，请重新检查' });
     } catch { if (recoveries.get(key) === state) Object.assign(state, { status: 'unknown', requestId: null, message: '无法读取恢复状态' }); }
-    if (selectedId === threadId && currentDeviceId === deviceId) updateComposer();
+    if (selectedId === threadId && currentDeviceId === deviceId) {
+      const stream = recoveryStream;
+      if (state.status === 'unknown' && state.requestId && stream?.threadId === threadId && stream.liveState && !stream.controller.signal.aborted
+          && recoveryChecks.get(key)?.status === 'ready') {
+        // The first live snapshot can precede IndexedDB's answer. Reconcile
+        // that answer against this exact current attachment, not a later task.
+        stream.reconciledStoredAttempts ??= new Set();
+        if (!stream.reconciledStoredAttempts.has(state.requestId)) {
+          stream.reconciledStoredAttempts.add(state.requestId);
+          void finishAcceptedRecovery(threadId, deviceId, stream);
+        }
+      }
+      updateComposer();
+    }
   })();
   return state;
 }
@@ -585,13 +598,20 @@ function updateRecoveryControl() {
   const key = recoveryKey(currentDeviceId, selectedId), state = recoveryState(currentDeviceId, selectedId), check = recoveryChecks.get(key);
   const checkNotice = check?.status === 'failed' || check?.status === 'locked' || (connected && check?.status === 'checking');
   const pendingAttempt = Boolean(state && ['pending', 'awaiting-state', 'unknown'].includes(state.status));
-  const visible = Boolean(selectedId && currentDeviceId && !newDraft && (checkNotice || pendingAttempt));
+  const visible = Boolean(selectedId && currentDeviceId && !newDraft && (checkNotice || pendingAttempt || (connected && state?.status === 'loading')));
   recoveryControl.hidden = !visible;
-  // Recovery is automatic; no manual retry or cancel buttons are exposed.
-  recoverChat.hidden = true;
+  // This button only rechecks the current attachment. It never issues a new
+  // recovery or message when an earlier operation has an unknown outcome.
+  const watch = recoveryLockWatches.get(key);
+  recoverChat.hidden = !visible || !(check?.status === 'failed' || (check?.status === 'locked' && watch?.lockChecks >= 24));
+  recoverChat.textContent = '重新检查连接';
+  recoverChat.disabled = check?.status === 'checking';
   cancelRecovery.hidden = true;
   if (!visible) { stopRecoveryNoticeTimer(); return; }
-  recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理' : pendingAttempt ? '正在连接任务…' : '';
+  recoveryStatus.textContent = check?.status === 'locked' ? '任务正在电脑上处理，暂时不能发送'
+    : check?.status === 'failed' ? '连接状态核对失败，暂时不能发送；可重新检查'
+    : pendingAttempt ? (state.message || '正在确认恢复结果，暂时不能发送')
+    : state?.status === 'loading' ? '正在读取恢复记录，暂时不能发送' : '正在核对任务状态，暂时不能发送';
   startRecoveryNoticeTimer();
 }
 // Recheck unsettled attempts without discarding their request identity. A
@@ -622,17 +642,15 @@ function recoveryNoticeTick() {
       changed = true;
     }
   }
-  // A check that never resolved (failed on a fresh stream, or still checking)
-  // keeps the notice visible with empty text; drop it on the same deadline.
-  if (!state && check && check.status !== 'locked' && check.status !== 'ready' && Date.now() - (check.since || 0) >= RECOVERY_NOTICE_DEADLINE_MS) {
-    recoveryChecks.delete(key);
-    changed = true;
-  }
-  if (check?.status === 'locked' && connected && recoveryStream?.threadId === id && !recoveryStream.controller.signal.aborted) {
-    const watch = recoveryLockWatches.get(key) || { count: 0, at: 0 };
-    if (watch.count < 24 && Date.now() - watch.at >= 3000) {
-      watch.count += 1; watch.at = Date.now(); recoveryLockWatches.set(key, watch);
-      void checkRecoveryStatus(id, deviceId, recoveryStream);
+  if (['failed', 'locked'].includes(check?.status) && connected && recoveryStream?.threadId === id && !recoveryStream.controller.signal.aborted) {
+    let watch = recoveryLockWatches.get(key);
+    if (watch?.stream !== recoveryStream) watch = { stream: recoveryStream, failedChecks: 0, lockChecks: 0, at: 0 };
+    const counter = check.status === 'failed' ? 'failedChecks' : 'lockChecks';
+    const limit = check.status === 'failed' ? 3 : 24;
+    if (watch[counter] < limit && Date.now() - watch.at >= 3000) {
+      watch[counter] += 1; watch.at = Date.now(); recoveryLockWatches.set(key, watch);
+      void checkRecoveryStatus(id, deviceId, recoveryStream, { readOnly: true });
+      changed = true;
     }
   }
   if (changed) updateComposer();
@@ -803,7 +821,10 @@ cancelRecovery.addEventListener('click', async () => {
     if (selectedId === id && currentDeviceId === deviceId) updateComposer();
   }
 });
-async function checkRecoveryStatus(id, deviceId, stream, { onReady } = {}) {
+async function checkRecoveryStatus(id, deviceId, stream, { onReady, readOnly = false } = {}) {
+  const scopeGeneration = historyScopeGeneration;
+  const isCurrent = () => selectedId === id && currentDeviceId === deviceId && historyScopeGeneration === scopeGeneration
+    && recoveryStream === stream && !stream.controller.signal.aborted;
   const key = recoveryKey(deviceId, id), check = { status: 'checking', since: Date.now() };
   recoveryChecks.set(key, check);
   if (selectedId === id && currentDeviceId === deviceId) updateComposer();
@@ -813,14 +834,14 @@ async function checkRecoveryStatus(id, deviceId, stream, { onReady } = {}) {
     if (!response.ok) throw new Error('unavailable');
     const value = await response.json();
     if (typeof value?.locked !== 'boolean') throw new Error('invalid');
-    if (recoveryChecks.get(key) === check && recoveryStream === stream && !stream.controller.signal.aborted) { check.status = value.locked ? 'locked' : 'ready'; finishAcceptedRecovery(id, deviceId, stream); }
+    if (recoveryChecks.get(key) === check && isCurrent()) { check.status = value.locked ? 'locked' : 'ready'; finishAcceptedRecovery(id, deviceId, stream); }
   } catch {
-    if (recoveryChecks.get(key) === check && recoveryStream === stream && !stream.controller.signal.aborted) check.status = 'failed';
+    if (recoveryChecks.get(key) === check && isCurrent()) check.status = 'failed';
   } finally {
     clearTimeout(timer);
-    if (selectedId === id && currentDeviceId === deviceId) {
+    if (isCurrent()) {
       updateComposer();
-      if (check.status === 'ready' && recoverableHistoryId === id && !connected) {
+      if (!readOnly && check.status === 'ready' && recoverableHistoryId === id && !connected) {
         if (onReady) await onReady(); else void recoverSelectedChat();
       }
     }
@@ -1592,6 +1613,10 @@ function updateComposer() {
   const state = selectedId && submissions.get(selectedId);
   updateRecoveryControl();
   updateRecoveryGuardedControls();
+  if (!newDraft && selectedId && connected) {
+    const blocked = recoveryBlocksWrite();
+    connection.textContent = blocked ? '已连接，待确认' : '已连接';
+  }
   if (messageInput.style) {
     messageInput.style.height = 'auto';
     messageInput.style.height = `${Math.min(messageInput.scrollHeight, Math.min(300, (window.innerHeight || 844) * 0.35))}px`;
@@ -1708,7 +1733,12 @@ async function recoverSelectedChat({ preserveStream = null, isCurrent = () => tr
     if (selectedId === id && currentDeviceId === deviceId) updateComposer();
   }
 }
-recoverChat.addEventListener('click', recoverSelectedChat);
+recoverChat.addEventListener('click', () => {
+  const id = selectedId, deviceId = currentDeviceId, stream = recoveryStream;
+  if (!id || !deviceId || newDraft || stream?.threadId !== id || stream.controller.signal.aborted
+      || recoveryChecks.get(recoveryKey(deviceId, id))?.status === 'checking') return;
+  void checkRecoveryStatus(id, deviceId, stream, { readOnly: true });
+});
 stopButton.addEventListener('click', async () => {
   flushPendingRender();
   const id = selectedId, turnId = activeTurnId, scopeGeneration = historyScopeGeneration;
@@ -1979,13 +2009,14 @@ composerForm.addEventListener('submit', async event => {
           const files = [];
           for (const entry of draft.attachments) files.push({ name: entry.file.name, kind: entry.kind || 'image', size: entry.file.size, sha256: hex(await crypto.subtle.digest('SHA-256', await entry.file.arrayBuffer())) });
           const digest = hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ text, model, effort, files }))));
+          const title = text.replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, 80);
           creationDispatched = true;
-          response = await scopedFetch('/api/chats/prepare', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, projectId: draft.projectId, digest, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
+          response = await scopedFetch('/api/chats/prepare', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, projectId: draft.projectId, digest, ...(title ? { title } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
           if (response.status === 409 && (await response.clone().json().catch(() => null))?.error === 'not-dispatched') { if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed'); creationDispatched = false; draft.message = '助手正在退出，请稍后重试'; return; }
           if (!response.ok) throw new Error(response.status >= 500 ? 'uncertain' : 'prepare');
           preparedThread = (await response.json()).threadId;
           if (!uuid.test(preparedThread || '')) throw new Error('uncertain');
-          draft.prepared = { threadId: preparedThread, uploaded: stagedIds };
+          draft.prepared = { threadId: preparedThread, uploaded: stagedIds, ...(title ? { title } : {}) };
         }
         const base = `/api/threads/${encodeURIComponent(preparedThread)}/uploads`;
         const uploadHeaders = { 'x-creation-id': draft.requestId };
@@ -2045,7 +2076,7 @@ composerForm.addEventListener('submit', async event => {
         }
         ensureDraftUploadScope();
         dispatched = true;
-        response = await scopedFetch('/api/chats/submit', { method: 'POST', credentials: 'same-origin', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, text, attachmentIds: stagedIds, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
+        response = await scopedFetch('/api/chats/submit', { method: 'POST', credentials: 'same-origin', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, text, attachmentIds: stagedIds, ...(draft.prepared?.title ? { title: draft.prepared.title } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
       } else {
         dispatched = true; creationDispatched = true;
         response = await scopedFetch('/api/chats', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, projectId: draft.projectId, text, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
@@ -3016,7 +3047,32 @@ function mergeHistoryOrder(older, newer, key, update = (old, latest) => latest) 
 function mergeHistoryTurns(older, newer) {
   const key = turn => typeof turn.id === 'string' && turn.id ? `id:${turn.id}` : typeof turn.viewKey === 'string' && turn.viewKey ? `view:${turn.viewKey}` : null;
   return mergeHistoryOrder(older, newer, key, (old, turn) => {
-    const items = mergeHistoryOrder(old.items || [], turn.items || [], item => typeof item.id === 'string' && item.id ? item.id : null);
+    // A live steering row keeps its local UI ID, while recorded history uses
+    // the acknowledged server user-message ID. Link only explicit identities;
+    // identical text can be separate messages and must remain separate rows.
+    const aliases = new Map();
+    for (const item of [...(old.items || []), ...(turn.items || [])]) {
+      if (item?.type === 'userMessage' && typeof item.id === 'string' && item.id && typeof item.serverUserMessageId === 'string' && item.serverUserMessageId) aliases.set(item.id, item.serverUserMessageId);
+    }
+    const itemKey = item => typeof item.id === 'string' && item.id ? aliases.get(item.id) || item.id : null;
+    const linkedIds = new Set([...aliases.keys(), ...aliases.values()]);
+    const collapseLinkedRows = values => {
+      const result = [], positions = new Map();
+      for (const item of values) {
+        const id = itemKey(item);
+        if (item?.type !== 'userMessage' || !linkedIds.has(item.id) || !positions.has(id)) {
+          if (item?.type === 'userMessage' && linkedIds.has(item.id)) positions.set(id, result.length);
+          result.push(item);
+        } else {
+          const index = positions.get(id);
+          // Retain the first recorded position and the acknowledged live row's
+          // local identity, attachments and explicit server link.
+          if (item.serverUserMessageId || !result[index].serverUserMessageId) result[index] = item;
+        }
+      }
+      return result;
+    };
+    const items = mergeHistoryOrder(collapseLinkedRows(old.items || []), collapseLinkedRows(turn.items || []), itemKey);
     const pagination = old.itemsPagination || turn.itemsPagination;
     return { ...old, ...turn, items, ...(pagination ? { itemsPagination: { ...pagination,
       hasLoadedNewest: Boolean(old.itemsPagination?.hasLoadedNewest || turn.itemsPagination?.hasLoadedNewest),

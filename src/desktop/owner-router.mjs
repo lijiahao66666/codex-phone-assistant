@@ -6,14 +6,20 @@ function unavailable(code, cause) {
   return Object.assign(new Error(code, cause ? { cause } : undefined), { code });
 }
 
+const validCreationTitle = title => title === undefined || (typeof title === 'string' && title.length > 0 && title.length <= 80
+  && title === title.trim() && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(title));
+const preparedDigest = (digest, model, effort, title) => createHash('sha256')
+  .update(JSON.stringify(title === undefined ? [digest, model ?? null, effort ?? null] : [digest, model ?? null, effort ?? null, title])).digest('hex');
+
 // The adapters must distinguish an explicit missing owner from an unavailable bus.
 export class OwnerRouter {
-  constructor({ discover, verifyOwner = null, localOwner, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 2500, recoveryPollMs = 300, recoveryExecution = null, competeUnknown = false }) {
+  constructor({ discover, verifyOwner = null, localOwner, createdThreadOwner = null, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 2500, recoveryPollMs = 300, recoveryExecution = null, competeUnknown = false }) {
     if (typeof discover !== 'function' || !localOwner || typeof projects !== 'function') throw new TypeError('Missing owner adapters');
     this.competeUnknown = competeUnknown;
     this.discover = discover;
     this.verifyOwner = verifyOwner;
     this.localOwner = localOwner;
+    this.createdThreadOwner = createdThreadOwner;
     this.projects = projects;
     this.journal = journal; this.hostId = hostId;
     this.confirmRecovery = confirmRecovery;
@@ -194,14 +200,14 @@ export class OwnerRouter {
     this.journal.transition(this.hostId, deviceId, requestId, 'creating', 'prepared', thread.id);
     if (this.closed || isCancelled()) throw Object.assign(unavailable('start-unknown'), { threadId: thread.id });
     this.journal.transition(this.hostId, deviceId, requestId, 'prepared', 'submitting');
-    try { await this.localOwner.startTurn(thread.id, text, { model, effort }); }
+    try { await (this.createdThreadOwner || this.localOwner).startTurn(thread.id, text, { model, effort, isCancelled }); }
     catch (error) { throw Object.assign(unavailable('start-unknown', error), { threadId: thread.id }); }
     this.journal.transition(this.hostId, deviceId, requestId, 'submitting', 'submitted');
     return { threadId: thread.id };
   }
 
-  async #prepare({ projectId, model, effort, requestId, deviceId, digest, isCancelled = () => false } = {}) {
-    if (this.closed || !this.journal || !this.hostId || !deviceId || !requestId || !/^[a-f0-9]{64}$/.test(digest || '')) throw unavailable('invalid-input');
+  async #prepare({ projectId, model, effort, requestId, deviceId, digest, title, isCancelled = () => false } = {}) {
+    if (this.closed || !this.journal || !this.hostId || !deviceId || !requestId || !/^[a-f0-9]{64}$/.test(digest || '') || !validCreationTitle(title)) throw unavailable('invalid-input');
     const project = (await this.projects()).find(entry => entry.id === projectId);
     if (!project || !isAbsolute(project.cwd || '')) throw unavailable('invalid-project');
     if (model) {
@@ -210,26 +216,30 @@ export class OwnerRouter {
       if (!selected || (effort && !selected.supportedReasoningEfforts.includes(effort))) throw unavailable('model-unavailable');
     } else if (effort) throw unavailable('invalid-input');
     if (this.closed || isCancelled()) throw unavailable('unavailable');
-    const boundDigest = createHash('sha256').update(JSON.stringify([digest, model ?? null, effort ?? null])).digest('hex');
+    const boundDigest = preparedDigest(digest, model, effort, title);
     const record = this.journal.begin(this.hostId, deviceId, requestId, projectId, boundDigest);
     if (!record.created) {
-      if (record.phase === 'prepared') return { threadId: record.threadId };
+      if (record.phase === 'prepared') {
+        await this.createdThreadOwner?.prepare(record.threadId, { title });
+        return { threadId: record.threadId };
+      }
       throw Object.assign(unavailable(record.threadId ? 'start-unknown' : 'create-unknown'), { threadId: record.threadId });
     }
     const thread = await this.localOwner.create({ cwd: project.cwd, ...(project.runtimeWorkspaceRoots ? { runtimeWorkspaceRoots: project.runtimeWorkspaceRoots } : {}), ...(model ? { model } : {}) });
     if (!thread?.id) throw unavailable('create-unknown');
     this.journal.transition(this.hostId, deviceId, requestId, 'creating', 'prepared', thread.id);
     if (this.closed || isCancelled()) throw Object.assign(unavailable('start-unknown'), { threadId: thread.id });
+    await this.createdThreadOwner?.prepare(thread.id, { title });
     return { threadId: thread.id };
   }
 
-  async #submitPrepared({ deviceId, requestId, text, model, effort, attachments, digest, isCancelled = () => false, onDispatch = () => {} }) {
+  async #submitPrepared({ deviceId, requestId, text, model, effort, attachments, digest, title, isCancelled = () => false, onDispatch = () => {} }) {
     const record = this.journal.get(this.hostId, deviceId, requestId);
-    const boundDigest = createHash('sha256').update(JSON.stringify([digest, model ?? null, effort ?? null])).digest('hex');
-    if (!record || record.phase !== 'prepared' || record.payloadDigest !== boundDigest || isCancelled()) throw unavailable('unavailable');
+    const boundDigest = preparedDigest(digest, model, effort, title);
+    if (!record || record.phase !== 'prepared' || record.payloadDigest !== boundDigest || !validCreationTitle(title) || isCancelled()) throw unavailable('unavailable');
     this.journal.transition(this.hostId, deviceId, requestId, 'prepared', 'submitting');
     onDispatch();
-    try { await this.localOwner.startTurn(record.threadId, text, { model, effort, attachments }); }
+    try { await (this.createdThreadOwner || this.localOwner).startTurn(record.threadId, text, { model, effort, attachments, isCancelled }); }
     catch (error) { throw Object.assign(unavailable('start-unknown', error), { threadId: record.threadId }); }
     this.journal.transition(this.hostId, deviceId, requestId, 'submitting', 'submitted');
     return { threadId: record.threadId };

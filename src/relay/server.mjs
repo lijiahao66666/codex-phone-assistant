@@ -319,12 +319,15 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         const reserved = await reservedBody(req, res, phone, 65536);
         if (res.writableEnded || res.destroyed) return;
         const data = reserved?.data, prepare = requested.endsWith('/prepare');
-        const allowed = prepare ? ['requestId', 'projectId', 'digest', 'model', 'effort'] : ['requestId', 'text', 'model', 'effort', 'attachmentIds'];
-        if (!data || Object.keys(data).some(k => !allowed.includes(k)) || !uuid.test(data.requestId || '') || (data.model !== undefined && (typeof data.model !== 'string' || !data.model || data.model.length > 200)) || (data.effort !== undefined && (typeof data.effort !== 'string' || !data.effort || !data.model || data.effort.length > 100)) || (prepare ? typeof data.projectId !== 'string' || !data.projectId || data.projectId.length > 4096 || !/^[a-f0-9]{64}$/.test(data.digest || '') : typeof data.text !== 'string' || Buffer.byteLength(data.text) > 32768 || !Array.isArray(data.attachmentIds) || !data.attachmentIds.length || data.attachmentIds.length > 4 || new Set(data.attachmentIds).size !== data.attachmentIds.length || data.attachmentIds.some(id => !uuid.test(id)))) return send(res, 400, { error: 'invalid' });
+        const allowed = prepare ? ['requestId', 'projectId', 'digest', 'model', 'effort', 'title'] : ['requestId', 'text', 'model', 'effort', 'attachmentIds', 'title'];
+        if (!data || Object.keys(data).some(k => !allowed.includes(k)) || (data.title !== undefined && (typeof data.title !== 'string' || !data.title || data.title.length > 80 || data.title !== data.title.trim() || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(data.title))) || !uuid.test(data.requestId || '') || (data.model !== undefined && (typeof data.model !== 'string' || !data.model || data.model.length > 200)) || (data.effort !== undefined && (typeof data.effort !== 'string' || !data.effort || !data.model || data.effort.length > 100)) || (prepare ? typeof data.projectId !== 'string' || !data.projectId || data.projectId.length > 4096 || !/^[a-f0-9]{64}$/.test(data.digest || '') : typeof data.text !== 'string' || Buffer.byteLength(data.text) > 32768 || !Array.isArray(data.attachmentIds) || !data.attachmentIds.length || data.attachmentIds.length > 4 || new Set(data.attachmentIds).size !== data.attachmentIds.length || data.attachmentIds.some(id => !uuid.test(id)))) return send(res, 400, { error: 'invalid' });
         if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
         const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
         if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved?.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
-        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        // Creation may release the helper's temporary owner and wait for the
+        // desktop owner to resume, just like recovery. Keep that bounded wait
+        // inside the response window rather than reporting an unknown write.
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), recoveryResponseTimeoutMs);
         pending.set(id, { res, timer, streaming: false, writing: true, creating: true, hostId: phone.hostId, deviceId: phone.deviceId });
         if (reserved?.reservation) bodyReads.delete(reserved.reservation);
         res.once('close', () => cancel(id));
@@ -355,7 +358,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
         const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
         if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved?.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
-        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), recoveryResponseTimeoutMs);
         pending.set(id, { res, timer, streaming: false, writing: true, creating: true, hostId: phone.hostId, deviceId: phone.deviceId });
         if (reserved?.reservation) bodyReads.delete(reserved.reservation);
         res.once('close', () => cancel(id));

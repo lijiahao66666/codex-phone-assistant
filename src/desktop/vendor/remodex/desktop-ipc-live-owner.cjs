@@ -8,6 +8,7 @@
 // Depends on: net, ./desktop-ipc-conversation-adapter, ./desktop-ipc-owner-transport, ./desktop-ipc-state-patches, ./desktop-ipc-shared
 
 const net = require("net");
+const { randomUUID } = require("crypto");
 const {
   applyRuntimeSettingsToConversation,
   createThreadMutationQueue,
@@ -205,6 +206,7 @@ function createDesktopIpcLiveOwner({
   // A released thread can later resume under the same owner identity.
   let streamRevisionHighWater = 0;
   const followerClientIdsByThreadId = new Map();
+  const phoneFollowerClientIdsByThreadId = new Map();
   const idleReleaseCandidates = new Map();
   const releasingThreadIds = new Set();
   const pendingFollowerRequests = new Map();
@@ -886,6 +888,7 @@ function createDesktopIpcLiveOwner({
     if (followerClientIdsByThreadId.delete(normalizedThreadId)) {
       onFollowerStateChanged?.(normalizedThreadId, false);
     }
+    phoneFollowerClientIdsByThreadId.delete(normalizedThreadId);
     // An active-peer takeover can still drop a non-empty queue (hasActiveLocalTurn
     // only shields idle yields); announce the emptied queue instead of letting
     // clients keep rendering drafts the bridge will never run.
@@ -1432,8 +1435,20 @@ function createDesktopIpcLiveOwner({
     }
 
     const followers = followerClientIdsByThreadId.get(threadId) || new Set();
+    const phoneFollowers = phoneFollowerClientIdsByThreadId.get(threadId) || new Set();
     if (params.following === true) {
-      cancelIdleRelease(threadId);
+      // Admission is already closed and unsubscribe cannot be revoked. A new
+      // viewer must rediscover after release, never receive a ready baseline
+      // from a writer that is already retiring.
+      if (releasingThreadIds.has(threadId)) return;
+      const isPhone = params.remodexFollowerSource === "codex-phone-assistant" || phoneFollowers.has(clientId);
+      // A native viewer may keep viewing while the last phone viewer leaves.
+      // Only a phone returning cancels that explicit handoff candidate.
+      if (isPhone || !idleReleaseCandidates.get(threadId)?.phoneDeparture) cancelIdleRelease(threadId);
+      if (isPhone) {
+        phoneFollowers.add(clientId);
+        phoneFollowerClientIdsByThreadId.set(threadId, phoneFollowers);
+      }
       const wasUnfollowed = followers.size === 0;
       followers.add(clientId);
       followerClientIdsByThreadId.set(threadId, followers);
@@ -1449,11 +1464,14 @@ function createDesktopIpcLiveOwner({
     if (!followers.delete(clientId)) {
       return;
     }
+    const phoneDeparted = phoneFollowers.delete(clientId);
+    if (phoneFollowers.size === 0) phoneFollowerClientIdsByThreadId.delete(threadId);
     if (followers.size === 0) {
       followerClientIdsByThreadId.delete(threadId);
       onFollowerStateChanged?.(threadId, false);
-      rememberLastFollowerDeparture(threadId);
     }
+    if (phoneDeparted && phoneFollowers.size === 0) rememberLastFollowerDeparture(threadId, true);
+    else if (followers.size === 0) rememberLastFollowerDeparture(threadId);
   }
 
   function removeFollowerClient(clientId) {
@@ -1465,11 +1483,15 @@ function createDesktopIpcLiveOwner({
       if (!followers.delete(normalizedClientId)) {
         continue;
       }
+      const phoneFollowers = phoneFollowerClientIdsByThreadId.get(threadId);
+      const phoneDeparted = phoneFollowers?.delete(normalizedClientId) === true;
+      if (phoneFollowers?.size === 0) phoneFollowerClientIdsByThreadId.delete(threadId);
       if (followers.size === 0) {
         followerClientIdsByThreadId.delete(threadId);
         onFollowerStateChanged?.(threadId, false);
-        rememberLastFollowerDeparture(threadId);
       }
+      if (phoneDeparted && phoneFollowers.size === 0) rememberLastFollowerDeparture(threadId, true);
+      else if (followers.size === 0) rememberLastFollowerDeparture(threadId);
     }
   }
 
@@ -1496,11 +1518,14 @@ function createDesktopIpcLiveOwner({
     followerPresenceConnected = connected;
     for (const threadId of idleReleaseCandidates.keys()) cancelIdleRelease(threadId);
     followerClientIdsByThreadId.clear();
+    phoneFollowerClientIdsByThreadId.clear();
   }
 
-  function rememberLastFollowerDeparture(threadId) {
+  function rememberLastFollowerDeparture(threadId, phoneDeparture = false) {
     if (!followerPresenceConnected || typeof unsubscribeIdleThread !== "function") return;
-    idleReleaseCandidates.set(threadId, { generation: followerGeneration, timer: null });
+    phoneDeparture ||= idleReleaseCandidates.get(threadId)?.phoneDeparture === true;
+    cancelIdleRelease(threadId);
+    idleReleaseCandidates.set(threadId, { generation: followerGeneration, phoneDeparture, timer: null });
     touchIdleRelease(threadId);
   }
 
@@ -1516,15 +1541,20 @@ function createDesktopIpcLiveOwner({
   }
 
   function idleThreadCanBeReleased(threadId, candidate) {
+    return followerPresenceConnected && ownerPresenceSocket && !ownerPresenceSocket.destroyed
+      && ownerPresenceSocket.writable && candidate.generation === followerGeneration
+      && idleReleaseCandidates.get(threadId) === candidate
+      && !(candidate.phoneDeparture ? phoneFollowerClientIdsByThreadId.get(threadId)?.size > 0
+        : followerClientIdsByThreadId.get(threadId)?.size > 0)
+      && threadCanPerformAction(threadId);
+  }
+
+  function threadCanPerformAction(threadId) {
     const conversation = conversations.get(threadId);
     let externalStateSafe = false;
     try { externalStateSafe = canReleaseThread(threadId) === true; }
     catch { return false; }
-    return followerPresenceConnected && ownerPresenceSocket && !ownerPresenceSocket.destroyed
-      && ownerPresenceSocket.writable && candidate.generation === followerGeneration
-      && idleReleaseCandidates.get(threadId) === candidate
-      && ownedThreadIds.has(threadId)
-      && !(followerClientIdsByThreadId.get(threadId)?.size > 0)
+    return ownedThreadIds.has(threadId) && !releasingThreadIds.has(threadId)
       && conversation?.threadRuntimeStatus?.type === "idle"
       && conversation.threadGoal?.status !== "active"
       && Array.isArray(conversation.turns)
@@ -1544,6 +1574,18 @@ function createDesktopIpcLiveOwner({
 
   async function releaseIdleThread(threadId, candidate) {
     if (releasingThreadIds.has(threadId) || !idleThreadCanBeReleased(threadId, candidate)) return;
+    try { await releaseThreadOwnership(threadId); }
+    catch { /* Background releases are reported through onIdleReleaseError. */ }
+  }
+
+  async function releaseThreadForHandoff(threadId) {
+    if (typeof unsubscribeIdleThread !== "function" || !threadCanPerformAction(threadId)) {
+      throw Object.assign(new Error("thread-owner-not-idle"), { code: "unavailable" });
+    }
+    return releaseThreadOwnership(threadId);
+  }
+
+  async function releaseThreadOwnership(threadId) {
     // All checks and admission closure happen synchronously before dispatch.
     // Requests admitted earlier are counted, including approvals and reads.
     releasingThreadIds.add(threadId);
@@ -1554,8 +1596,13 @@ function createDesktopIpcLiveOwner({
         throw new Error("Invalid unsubscribe acknowledgement");
       }
       acknowledged = true;
-      removeOwnedThread(threadId, { broadcastRemoval: true, reason: "thread/unsubscribe" });
+      // Desktop does not interpret a removal snapshot as an owner release: it
+      // assigns the snapshot source as owner again and replaces visible history.
+      // Retire only our ownership; stale targeted controls below trigger its
+      // native unavailable-owner recovery without clearing the transcript.
+      removeOwnedThread(threadId);
       onThreadReleased?.(threadId);
+      return true;
     } catch (error) {
       cancelIdleRelease(threadId);
       // A definite RPC rejection leaves the known writer in place. A timeout,
@@ -1563,6 +1610,7 @@ function createDesktopIpcLiveOwner({
       // admission gate closed until this runtime is stopped, never force-unlock.
       if (error?.rpcError && Number.isSafeInteger(error.rpcError.code)) releasingThreadIds.delete(threadId);
       onIdleReleaseError?.(threadId, error);
+      throw error;
     } finally {
       if (acknowledged) releasingThreadIds.delete(threadId);
     }
@@ -1607,6 +1655,12 @@ function createDesktopIpcLiveOwner({
     const method = readString(envelope?.method);
     const params = envelope?.params && typeof envelope.params === "object" ? envelope.params : {};
     const conversationId = readConversationIdFromFollowerParams(params);
+    if (conversationId && !ownedThreadIds.has(conversationId)) {
+      // Targeted requests can arrive after discovery/ownership has expired. The
+      // native Desktop client recognizes this error and resumes the thread on
+      // its own app-server before continuing the original user action.
+      throw new Error("no-client-found: thread stream owner became unavailable");
+    }
     if (!conversationId || !canHandleFollowerRequest(envelope)) {
       throw new Error("conversation-not-owned");
     }
@@ -1707,6 +1761,13 @@ function createDesktopIpcLiveOwner({
     const nextCodexParams = normalizedParams && typeof normalizedParams === "object" && !Array.isArray(normalizedParams)
       ? normalizedParams
       : codexParams;
+    // Desktop followers can omit this optional app-server identity. Give the
+    // actual request and its optimistic prompt the same identity so the echoed
+    // user item cannot become a second bubble (or an apparent mid-turn steer).
+    // Preserve identities supplied by H5 or native clients.
+    if (!readString(nextCodexParams.clientUserMessageId)) {
+      nextCodexParams.clientUserMessageId = randomUUID();
+    }
     markOwnedThread(conversationId);
     const senderRequestId = params.senderRequestId
       || params.sender_request_id
@@ -2103,6 +2164,8 @@ function createDesktopIpcLiveOwner({
 
   return {
     updateThreadSettings: (threadId, params) => applyFollowerThreadSettings(threadId, params, "phone"),
+    canPerformThreadAction: threadCanPerformAction,
+    releaseThreadForHandoff,
     isThreadReleasing: (threadId) => releasingThreadIds.has(threadId),
     noteLocalOperation(threadId) {
       if (threadId) touchIdleRelease(threadId);
@@ -2141,6 +2204,10 @@ function createDisabledDesktopIpcLiveOwner() {
     observeInbound() {},
     observeOutbound() {},
     stopAll() {},
+    canPerformThreadAction() { return false; },
+    async releaseThreadForHandoff() {
+      throw Object.assign(new Error("thread-owner-not-idle"), { code: "unavailable" });
+    },
     isThreadOwned() {
       return false;
     },

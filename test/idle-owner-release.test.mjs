@@ -74,6 +74,36 @@ test('acknowledged idle release and resume advance the same local owner stream r
   } finally { await f.close(); }
 });
 
+test('released ownership preserves Desktop history and stale targeted requests use native owner recovery', async () => {
+  const f = await fixture(page(), { graceMs: 30 });
+  try {
+    await f.resume(); await departed(f);
+    await until(() => unsubscribe(f).length === 1, 'unsubscribe dispatch');
+    const snapshots = f.snapshots().length;
+    const lastSnapshot = f.snapshots().at(-1);
+    assert.ok(lastSnapshot.params.change.conversationState.turns.length);
+    f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
+    await until(() => f.local.releasedThreads.has(threadId), 'acknowledged release');
+    assert.equal(f.snapshots().length, snapshots, 'release must not replace the Desktop transcript');
+    assert.equal(f.snapshots().at(-1), lastSnapshot);
+
+    // Discovery must stop advertising the retired owner. A request addressed to
+    // its old client identity still reaches the real transport handler directly.
+    const discovery = f.nativeDiscovery('thread-owner-discovery', { hostId: 'local' });
+    await until(() => f.frames.some(m => m.type === 'client-discovery-response' && m.requestId === discovery), 'discovery reply');
+    assert.equal(f.frames.find(m => m.type === 'client-discovery-response' && m.requestId === discovery).response.canHandle, false);
+    const requests = f.requests.length;
+    for (const method of ['thread-follower-start-turn', 'thread-follower-load-complete-history', 'thread-owner-discovery']) {
+      const control = f.native(method, { hostId: 'local', turnStart: { request: { input: [{ type: 'text', text: 'continue on Desktop' }] } } });
+      await until(() => f.replyFor(control), 'stale targeted reply');
+      assert.equal(f.replyFor(control).resultType, 'error');
+      assert.match(f.replyFor(control).error, /no-client-found/);
+    }
+    assert.equal(f.requests.length, requests, 'retired controls must not reach the phone app-server');
+    assert.equal(f.snapshots().length, snapshots);
+  } finally { await f.close(); }
+});
+
 test('all physical followers must leave and a late follow cancels the grace period', async () => {
   const f = await fixture(page(), { graceMs: 50 });
   try {
@@ -84,6 +114,100 @@ test('all physical followers must leave and a late follow cancels the grace peri
     f.follower(false, 'two'); await delay(20); f.follower(true, 'late'); await delay(80);
     assert.equal(unsubscribe(f).length, 0);
     f.follower(false, 'late'); await until(() => unsubscribe(f).length === 1, 'last follower release');
+    f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
+  } finally { await f.close(); }
+});
+
+test('last phone departure releases an idle writer while native Desktop keeps viewing', async () => {
+  const f = await fixture(page(), { graceMs: 50 });
+  try {
+    await f.resume();
+    f.follower(true, 'desktop');
+    f.follower(true, 'sidebar', { source: 'codex-phone-sidebar' });
+    f.follower(true, 'phone-one', { phone: true });
+    f.follower(true, 'phone-two', { phone: true });
+    await delay(15);
+    f.follower(false, 'phone-one', { phone: true });
+    await delay(90);
+    assert.equal(unsubscribe(f).length, 0, 'another phone still needs the owner');
+    f.follower(false, 'phone-two', { phone: true });
+    await delay(15);
+    f.follower(true, 'desktop');
+    f.follower(true, 'second-native-viewer');
+    await until(() => unsubscribe(f).length === 1, 'phone departure with native viewers');
+    f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
+    await until(() => f.local.releasedThreads.has(threadId), 'released writer');
+  } finally { await f.close(); }
+});
+
+test('a phone returning cancels handoff even when native Desktop remains', async () => {
+  const f = await fixture(page(), { graceMs: 60 });
+  try {
+    await f.resume();
+    f.follower(true, 'desktop'); f.follower(true, 'phone', { phone: true });
+    await delay(15);
+    f.follower(false, 'phone', { phone: true });
+    await delay(20);
+    f.follower(true, 'phone', { phone: true });
+    await delay(100);
+    assert.equal(unsubscribe(f).length, 0);
+    f.follower(false, 'phone', { phone: true });
+    // Native viewer churn must not erase the phone's departure decision.
+    f.follower(false, 'desktop'); await delay(10); f.follower(true, 'desktop');
+    await until(() => unsubscribe(f).length === 1, 'handoff after second phone departure');
+    f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
+  } finally { await f.close(); }
+});
+
+test('a phone entering after unsubscribe admission closes never gets a retiring ready baseline', async () => {
+  const f = await fixture(page(), { graceMs: 30 });
+  try {
+    await f.resume();
+    f.follower(true, 'desktop'); f.follower(true, 'phone', { phone: true });
+    await delay(15); f.follower(false, 'phone', { phone: true });
+    await until(() => unsubscribe(f).length === 1, 'unsubscribe dispatch');
+    const snapshots = f.snapshots().length;
+    f.follower(true, 'returning-phone', { phone: true });
+    f.follower(true, 'desktop');
+    const barrier = f.native('thread-owner-discovery', { hostId: 'local' });
+    await until(() => f.replyFor(barrier), 'follower messages processed');
+    assert.equal(f.local.owner.isThreadReleasing(threadId), true);
+    assert.equal(f.snapshots().length, snapshots, 'retiring owner cannot announce ready to new viewers');
+    f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
+    await until(() => f.local.releasedThreads.has(threadId), 'confirmed release despite late viewer');
+    assert.equal(f.snapshots().length, snapshots);
+    const stale = f.native('thread-follower-start-turn');
+    await until(() => f.replyFor(stale), 'late viewer recovery response');
+    assert.match(f.replyFor(stale).error, /no-client-found/);
+  } finally { await f.close(); }
+});
+
+test('a disconnected last phone releases but disconnecting one of several phones does not', async () => {
+  const f = await fixture(page(), { graceMs: 35 });
+  try {
+    await f.resume();
+    f.follower(true, 'desktop');
+    f.follower(true, 'phone-one', { phone: true });
+    f.follower(true, 'phone-two', { phone: true });
+    await delay(15);
+    f.disconnectFollower('phone-one');
+    await delay(80); assert.equal(unsubscribe(f).length, 0);
+    f.disconnectFollower('phone-two');
+    await until(() => unsubscribe(f).length === 1, 'last phone disconnected');
+    f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
+  } finally { await f.close(); }
+});
+
+test('phone departure with native viewers waits for actual active turn completion', async () => {
+  const f = await fixture(page(), { graceMs: 30 });
+  try {
+    await f.resume();
+    f.follower(true, 'desktop'); f.follower(true, 'phone', { phone: true });
+    f.notify({ method: 'turn/started', params: { threadId, turn: { id: 'running', status: 'inProgress', items: [] } } });
+    await delay(15); f.follower(false, 'phone', { phone: true });
+    await delay(80); assert.equal(unsubscribe(f).length, 0);
+    f.notify({ method: 'turn/completed', params: { threadId, turn: { id: 'running', status: 'completed', items: [] } } });
+    await until(() => unsubscribe(f).length === 1, 'completed turn handoff');
     f.reply(unsubscribe(f)[0], { status: 'unsubscribed' });
   } finally { await f.close(); }
 });

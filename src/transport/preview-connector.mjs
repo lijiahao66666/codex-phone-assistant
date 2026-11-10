@@ -150,6 +150,14 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
   };
   const listAuthorizedThreads = options => listThreads(phoneOptions(options));
   const sidebarStatus = allowInsecureForTests ? (sidebarStatusForTests || null) : new SidebarStatus();
+  const observedOwner = ownerRouter?.localOwner;
+  const onThreadReleased = threadId => {
+    sidebarStatus?.invalidateThread?.(threadId);
+    // A viewer can return after unsubscribe was dispatched. Rebind only that
+    // conversation, including a new viewer still waiting for its first snapshot.
+    for (const session of streams.values()) if (session.conversationId === threadId) session.ownershipReleased?.();
+  };
+  observedOwner?.on?.('threadReleased', onThreadReleased);
   const threadListChanges = allowInsecureForTests ? (threadListChangesForTests || null) : new ThreadListChanges();
   const statusPriorities = new StatusPriorities();
   function clearImageTimer(id) { clearTimeout(imageTimers.get(id)); imageTimers.delete(id); }
@@ -626,14 +634,12 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         const answer = beginWrite(msg);
         if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || !['archive', 'delete'].includes(action)) return answer('unavailable');
         const owner = ownerRouter?.localOwner;
-        if (!owner || writes.has(id)) return answer('unavailable');
+        if (typeof owner?.threadAction !== 'function' || writes.has(id)) return answer('unavailable');
         writes.add(id);
         try {
-          // Release this bridge's writer first: a thread the assistant still
-          // holds open looks stuck to the desktop app, so its own archive or
-          // delete of a phone-created task never settles.
-          await owner.request('thread/unsubscribe', { threadId: id }).catch(() => {});
-          await owner.request(`thread/${action}`, { threadId: id });
+          // The owning runtime archives/deletes directly. Unsubscribing first
+          // would split writer release from the guarded destructive action.
+          await owner.threadAction(id, action);
           answer('accepted');
         } catch (error) { answer(['unavailable', 'unsupported-state'].includes(error?.code) ? 'unavailable' : 'unknown'); }
         finally { writes.delete(id); }
@@ -960,7 +966,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     });
     ws.on('close', () => { trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
   }
-  return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async beginShutdown() { if (shuttingDown || activeMutations || [...uploadChecks].some(check => check())) throw Object.assign(new Error('Connector writes are active'), { code: 'tasks-active' }); shuttingDown = true; try { if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls(); } catch { shuttingDown = false; throw Object.assign(new Error('Connector replies could not be flushed'), { code: 'tasks-active' }); } }, cancelShutdown() { shuttingDown = false; }, async close() { stopped = true; clearTimeout(timer); closeStreams(); await models?.close(); if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls().catch(() => {}); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
+  return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async beginShutdown() { if (shuttingDown || activeMutations || [...uploadChecks].some(check => check())) throw Object.assign(new Error('Connector writes are active'), { code: 'tasks-active' }); shuttingDown = true; try { if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls(); } catch { shuttingDown = false; throw Object.assign(new Error('Connector replies could not be flushed'), { code: 'tasks-active' }); } }, cancelShutdown() { shuttingDown = false; }, async close() { stopped = true; observedOwner?.off?.('threadReleased', onThreadReleased); clearTimeout(timer); closeStreams(); await models?.close(); if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls().catch(() => {}); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

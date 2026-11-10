@@ -23,7 +23,9 @@ desktop-ipc-conversation-adapter.js
 ```
 
 LocalOwner resumes with `excludeTurns:true` and a descending initial page of
-three summary turns. It supplies no model, effort, or permission overrides.
+three summary turns. Start and resume set `thread_unload_delay_secs: 0` so an
+unsubscribe does not retain the writer for the default unload delay. Resume
+supplies no model, effort, or permission overrides.
 The owner accepts the authoritative page, including a valid empty page, without
 requiring a full `thread/read` baseline. It keeps `nextCursor` as the older-turn
 continuation; the response's different `backwardsCursor` is not substituted.
@@ -73,14 +75,17 @@ real GiB-scale thread can complete that native path within memory/frame limits.
 Three turns are a count limit, not a byte limit on an individual summary, and
 app-server resume itself may still do substantial work. No frame limit is raised.
 
-Idle writer release is restricted to a last follower departure observed on the
-current owner connection. An initially empty follower map is not evidence that
-the task has no viewers. Each new follow cancels the candidate; connection loss
-or reinitialization clears every candidate and the follower map. H5 IPC answers
+Idle writer release requires an observed departure on the current owner
+connection. An initially empty follower map is not evidence that the task has
+no viewers. Phone page subscriptions and sidebar subscriptions have distinct
+source markers. The last phone page departure permits release even if native
+Desktop or sidebar observers remain; another phone page prevents release.
+Unmarked legacy subscriptions retain the all-followers-left rule. A returning
+phone page cancels its departure candidate; connection loss or reinitialization
+clears every candidate and the follower map. H5 IPC answers
 the existing status-request broadcast only for subscriptions already bound to
 that exact owner, thread, and host, restoring presence after owner reconnection.
-Sidebar observers count as followers too; this deliberately keeps the writer
-while a task is still observed by the phone's task list.
+Sidebar observers do not keep a departing phone page's writer alive.
 
 After two seconds without renewed activity, release additionally requires known
 idle runtime, terminal turns, no active goal, unfinished request, queued draft,
@@ -89,16 +94,24 @@ write, unknown write outcome, or unresolved raw response. Existing work can
 finish and start a fresh grace period. A per-task admission gate closes before
 dispatch; it blocks both direct local requests/writes and follower controls.
 The unsubscribe request bypasses inbound projection removal and waits for a
-real `unsubscribed`, `notSubscribed`, or `notLoaded` acknowledgement before
-dropping the owner projection and LocalOwner's tracked thread.
+real acknowledgement. `unsubscribed` and `notSubscribed` additionally require
+the matching `thread/closed` notification; `notLoaded` confirms no loaded writer.
+Only then are the owner projection and LocalOwner's tracked thread removed.
+Release does not broadcast a replacement or removal snapshot that would clear
+Desktop history. Only the released thread's sidebar and live sessions rebind.
 
 A definite unsubscribe RPC rejection retains the known writer. A timeout,
 connection error, or malformed acknowledgement retains an uncertain admission
 gate and prevents normal shutdown; it does not force-unlock or silently retry.
 After acknowledged release, stale local sends require a successful resume.
-This does not add a native archive handoff command: native archive/delete can
-use the released writer only after all viewers have left. An open H5/native
-view, task-list subscription, approval, or queued draft prevents release.
+The explicit `releaseThreadForHandoff` path uses the same idle and pending-work
+checks without waiting for follower departure or the grace period. Production
+phone creation persists an empty named thread, confirms writer release, opens
+`codex://threads/<id>`, and waits for native Desktop ownership before forwarding
+the first input through IPC. H5 can remain open. Opening the route changes the
+conversation displayed by Desktop. Failure does not fall back to a phone turn.
+This creation path does not automatically transfer restored historical threads
+and is not a general native owner-transfer RPC.
 
 The local fork is necessary because the dependency exposes neither an explicit
 initial-page baseline hook nor a pagination hook after compatibility projection.
@@ -111,6 +124,7 @@ Targeted integration and regression checks:
 ```sh
 node --test test/bounded-owner-history.test.mjs test/owner-settings-observer.test.mjs
 node --test test/idle-owner-release.test.mjs test/desktop-ipc.test.mjs test/desktop-ipc-pool.test.mjs
+node --test test/explicit-owner-handoff.test.mjs test/open-thread.test.mjs
 ```
 
 The new integration tests use a temporary socket and fake app-server. A 1 GiB

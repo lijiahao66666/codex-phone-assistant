@@ -41,6 +41,20 @@ async function until(check) { for (let i = 0; i < 100; i++) { if (check()) retur
 const chunks = f => f.requests.filter(request => request.url.includes('/chunks/'));
 const submissions = f => f.requests.filter(request => request.url === '/api/chats/submit');
 
+test('attachment creation sends the same bounded readable title in preparation and submission', async () => {
+  for (const text of [`  first\n\t file ${'x'.repeat(100)}`, '']) {
+    const f = await fixture();
+    f.run(`messageInput.value=${JSON.stringify(text)}`);
+    f.seed(randomBytes(1));
+    await f.submit();
+    const prepare = JSON.parse(f.requests.find(request => request.url === '/api/chats/prepare').options.body);
+    const submit = JSON.parse(submissions(f)[0].options.body);
+    assert.equal(prepare.title, text.trim() ? `first file ${'x'.repeat(100)}`.slice(0, 80) : undefined);
+    assert.equal(submit.title, prepare.title);
+    assert.equal(Object.hasOwn(prepare, 'text'), false, 'preparation sends only the bounded title, never the full first message');
+  }
+});
+
 test('new chat uses negotiated two-chunk uploads and waits for every creation-bound acknowledgement before submit', async () => {
   const pending = new Map(); let active = 0, maximum = 0;
   const f = await fixture((url, options) => {
@@ -54,10 +68,10 @@ test('new chat uses negotiated two-chunk uploads and waits for every creation-bo
   assert.equal(f.requests.some(request => request.url.endsWith('/finish')), false); assert.equal(submissions(f).length, 0);
   pending.get(0)(); await sending;
   const prepare = JSON.parse(f.requests.find(request => request.url === '/api/chats/prepare').options.body);
-  assert.match(prepare.digest, /^[a-f0-9]{64}$/); assert.match(prepare.requestId, /^[a-f0-9-]{36}$/);
+  assert.equal(prepare.title, 'first file'); assert.match(prepare.digest, /^[a-f0-9]{64}$/); assert.match(prepare.requestId, /^[a-f0-9-]{36}$/);
   for (const request of f.requests.filter(request => request.url.includes('/uploads'))) assert.equal(request.options.headers['x-creation-id'], prepare.requestId);
   assert.deepEqual(Buffer.concat(await Promise.all(chunks(f).map(async request => Buffer.from(await request.options.body.arrayBuffer())))), data);
-  assert.deepEqual(JSON.parse(submissions(f)[0].options.body), { requestId: prepare.requestId, text: 'first file', attachmentIds: [attachment] });
+  assert.deepEqual(JSON.parse(submissions(f)[0].options.body), { requestId: prepare.requestId, text: 'first file', attachmentIds: [attachment], title: 'first file' });
 });
 
 test('new chat refreshes stale capabilities before the first upload and preserves original bytes in legacy serial chunks', async () => {

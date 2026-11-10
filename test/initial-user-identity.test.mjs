@@ -9,6 +9,39 @@ const image = path => [{ type: 'localImage', path }];
 const user = (id, content, clientId) => ({ type: 'userMessage', id, content, ...(clientId ? { clientId } : {}) });
 const users = state => desktopView(state, { imageHandles: new Map([['/first.png', 'first-image'], ['/second.png', 'second-image']]) }).turns[0].items.filter(i => i.type === 'userMessage');
 
+test('native follower starts without a client identity correlate the initial echo while retaining a genuine identical steer', async () => {
+  const f = await fixture({ data: [], nextCursor: null });
+  try {
+    await f.resume();
+    const request = f.native('thread-follower-start-turn', { turnStart: { request: { threadId, input: text('你好') } } });
+    await until(() => f.replyFor(request), 'native start acknowledgement');
+    const start = f.requests.find(r => r.method === 'turn/start');
+    assert.match(start.params.clientUserMessageId, /^[a-f0-9-]{36}$/);
+    assert.equal(f.state().turns[0].params.clientUserMessageId, start.params.clientUserMessageId);
+    f.notify({ method: 'turn/started', params: { threadId, turn: { id: 'native', items: [], itemsView: 'notLoaded', status: 'inProgress' } } });
+    const initial = user('native-initial', text('你好'), start.params.clientUserMessageId);
+    f.notify({ method: 'item/started', params: { threadId, turnId: 'native', item: initial } });
+    f.notify({ method: 'item/completed', params: { threadId, turnId: 'native', item: initial } });
+    f.notify({ method: 'item/completed', params: { threadId, turnId: 'native', item: user('native-steer', text('你好'), 'another-client') } });
+    f.notify({ method: 'turn/completed', params: { threadId, turn: { id: 'native', itemsView: 'summary', status: 'completed', items: [{ type: 'agentMessage', id: 'answer', text: 'done' }] } } });
+    await until(() => f.state().turns[0]?.status === 'completed', 'native completion');
+    assert.equal(f.state().turns.length, 1);
+    assert.deepEqual(users(f.state()).map(i => i.text), ['你好', '你好']);
+    assert.deepEqual(f.state().turns[0].items.filter(i => i.type === 'userMessage').map(i => i.id), ['native-steer']);
+  } finally { await f.close(); }
+});
+
+test('native follower starts preserve a supplied client identity', async () => {
+  const f = await fixture({ data: [], nextCursor: null });
+  try {
+    await f.resume();
+    const request = f.native('thread-follower-start-turn', { turnStart: { request: { threadId, input: text('hello'), clientUserMessageId: 'existing-client' } } });
+    await until(() => f.replyFor(request), 'native identified start acknowledgement');
+    assert.equal(f.requests.find(r => r.method === 'turn/start').params.clientUserMessageId, 'existing-client');
+    assert.equal(f.state().turns[0].params.clientUserMessageId, 'existing-client');
+  } finally { await f.close(); }
+});
+
 test('image-only initial prompt and a second image retain both attachments across completion', async () => {
   const f = await fixture({ data: [], nextCursor: null });
   try {
@@ -68,6 +101,20 @@ test('unidentified legacy echoes are retained instead of discarding a possible r
   }
   assert.deepEqual(users(state).map(i => i.text), ['repeat', 'repeat']);
   assert.deepEqual(state.turns[0].items.map(i => i.id), ['unknown']);
+});
+
+test('fresh authoritative hydration repairs an unidentified legacy initial prompt while warm cached params remain ambiguous', () => {
+  const { buildConversationStateFromThread: build } = adapter;
+  const cached = build({ id: threadId, turns: [{ id: 'legacy', items: [], status: 'completed' }] });
+  cached.turns[0].params.input = text('hello');
+  const authoritative = { id: threadId, turns: [{ id: 'legacy', status: 'completed', itemsView: 'full', items: [
+    user('actual-initial', text('hello')),
+    { type: 'agentMessage', id: 'answer', text: 'done' },
+  ] }] };
+  assert.equal(users(build(authoritative, { previous: cached })).length, 2, 'a warm rebuild cannot infer whether the uncorrelated item repeats its cached prompt');
+  const fresh = build(authoritative);
+  assert.equal(users(fresh).length, 1, 'a new owner with no cached prompt adopts the authoritative initial item');
+  assert.equal(fresh.turns[0].remodexInitialUserMessageId, 'actual-initial');
 });
 
 test('a mismatching client identity cannot consume a pending initial echo', async () => {
