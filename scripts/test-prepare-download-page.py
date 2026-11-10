@@ -58,7 +58,10 @@ class DownloadPageTest(unittest.TestCase):
         self.assertIn(f'href="{self.dmg}"', candidate)
         self.assertIn("版本 0.3.0 · build 48 · stable48 · 发布于 2026-11-10", candidate)
         self.assertIn("首次使用更新功能", candidate)
-        self.assertIn("SHA256SUMS.txt?v=stable48", candidate)
+        self.assertNotIn("SHA-256", candidate)
+        self.assertNotIn("SHA256SUMS", candidate)
+        self.assertNotIn("shasum", candidate)
+        self.assertIn("版本说明与已知限制", candidate)
         # The only changes outside the Mac card are the script's cache version.
         original_suffix = PAGE[PAGE.index('<article class="download"><h2>Windows'):]
         candidate_suffix = candidate[candidate.index('<article class="download"><h2>Windows'):]

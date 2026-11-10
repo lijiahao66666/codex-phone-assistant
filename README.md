@@ -8,7 +8,7 @@
 >
 > 仓库目前为私有。图片、GIF 和 Release 附件需要登录有访问权限的 GitHub 账号；第三方 Markdown 阅读器可能无法加载私有仓库媒体。
 
-> 发布状态：stable48 的 H5、中转及本机候选已用于验收；正式 Mac 安装包、自动更新源和下载页仍待签名及发布。当前下载页的安装包不是 stable48。详见 [发布与服务器目录状态](docs/release-and-server-status.md)。
+> 当前提供 macOS Apple Silicon 版和 Windows x64 版。各平台的版本、下载方式和验证范围见下方说明；最新发布状态见 [发布与服务器目录状态](docs/release-and-server-status.md)。
 
 ![电脑与手机同时查看同一 Codex 任务](docs/assets/desktop-phone-view.png)
 
@@ -25,7 +25,7 @@
 - [手机助手下载页](https://codex.air-inc.top/download/)
 - [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)
 
-stable48 的 Mac 与 H5 已完成专项实机/隔离验收；Windows 0.3.49 已完成构建、更新器组件测试与 Windows 回归，尚缺第二台真实电脑的公网跨版本升级验收。
+macOS 0.3.0 已发布并在本机安装验证；Windows 0.3.49 已完成构建、更新器组件测试与 Windows 回归，尚缺第二台真实电脑的公网跨版本升级验收。Mac 下载页提供公开安装包，Windows 安装包及便携版见 Windows 说明。
 
 安装步骤：
 
@@ -53,7 +53,7 @@ stable48 的 Mac 与 H5 已完成专项实机/隔离验收；Windows 0.3.49 已�
 
 - Windows 10/11 宿主、便携包、ZIP 和 NSIS 安装器
 - macOS 原生窗口和 `.app` 构建脚本
-- macOS 菜单栏检查更新与签名更新包验证（首次需手动安装支持更新的版本）
+- macOS 窗口和菜单栏检查更新与签名更新包验证（首次需手动安装支持更新的版本）
 - Windows 托盘检查更新、签名清单、SHA-256 校验、静默安装与重启
 - WebView2 与 WKWebView 本地面板
 - 关闭到托盘、单实例运行和再次启动唤回窗口
@@ -145,4 +145,4 @@ Windows 图片能力默认关闭；文字配对、历史、发送和停止不依
 - 助手持有写入权时，桌面主动接管及归档仍有限制；礼品卡聊天的旧恢复锁仍保留，均留到下一期处理。
 - 部分历史图片只能显示数量，无法预览。多人长期负载和实际手机键盘、安全区等场景尚未完成验证。
 
-版本变更、测试证据与覆盖边界见 [stable48 验收记录](docs/stable48-release-notes-2026-11-09.md) 和 [历史验收记录](docs/stable41-acceptance-report-2026-11-09.md)。中转配置见 [运行中转服务](docs/RELAY.md)；历史快照不作为当前启动入口。仓库不授予再分发许可，公开或商业发布前仍需确定许可证、检查图标与第三方依赖授权。
+版本变更、测试证据与覆盖边界见 [文档索引](docs/README.md)。中转配置见 [运行中转服务](docs/RELAY.md)；历史快照不作为当前启动入口。仓库不授予再分发许可，公开或商业发布前仍需确定许可证、检查图标与第三方依赖授权。

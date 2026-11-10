@@ -68,10 +68,7 @@ def prepare(baseline, release, output, date, notes_url):
                f'<p>版本 {version} · build {build} · {label} · 发布于 {date}</p>'
                '<p>首次使用更新功能，请先手动安装本版。之后可在菜单栏选择“检查更新…”；'
                '自动检查更新默认开启，安装仍需确认。助手持有的任务运行中或操作正在处理时，会阻止退出和安装。</p>'
-               f'<p><a href="SHA256SUMS.txt?v={label}">SHA-256 校验文件</a> · '
-               f'<a href="{html.escape(notes_url, quote=True)}">版本说明与已知限制</a></p>'
-               f'<p>Mac DMG 的 SHA-256：<code style="overflow-wrap:anywhere">{artifacts[dmg]["sha256"]}</code></p>'
-               '<p>下载后可在终端运行 <code>shasum -a 256 安装包路径</code>，与上述值核对。</p></div>')
+               f'<p><a href="{html.escape(notes_url, quote=True)}">版本说明与已知限制</a></p></div>')
     new_card = re.sub(link_pattern, lambda _: link + details, card.group(), count=1, flags=re.S)
     updated = page[:card.start()] + new_card + page[card.end():]
     script_tag = '<script src="downloads.js"></script>'
