@@ -5,7 +5,7 @@ Windows 更新链独立于 macOS Sparkle。修改 Windows 版本、签名或发�
 ## 客户端行为
 
 - 版本信息来自程序集 `AssemblyVersion` 和 `AssemblyMetadata` 中的构建号。
-- 启动 8 秒后检查一次稳定通道；自动检查默认开启，之后每 6 小时检查。
+- 配置更新源后，启动 8 秒检查一次，之后每 6 小时检查。
 - 托盘菜单可手动检查，也可关闭自动检查。
 - 检查更新只读取 HTTPS 清单，不自动下载。
 - 发现更高构建号后显示确认框；用户确认后才下载。
@@ -14,23 +14,17 @@ Windows 更新链独立于 macOS Sparkle。修改 Windows 版本、签名或发�
 - NSIS 安装版通过独立更新助手完成退出等待、静默安装和重启；便携版只下载和校验。
 - 失败日志位于 `%LOCALAPPDATA%\codex-phone-assistant\Updates\update.log`。
 
-## 固定更新地址
+## 当前更新地址
 
-当前稳定源：
-
-- 清单：<https://codex.air-inc.top/download/windows/latest.json>
-- 清单签名：<https://codex.air-inc.top/download/windows/latest.json.sig>
-- 安装包：<https://codex.air-inc.top/download/windows/codex-phone-assistant-windows-x64-setup.exe>
+Windows `0.3.51` 默认不配置更新源。因轻量服务器带宽不足，`https://codex.air-inc.top/download/windows/` 下的安装包、ZIP 和更新清单已经撤除。
 
 清单和签名必须是同一批字节。上传后不能重新格式化清单，否则签名会失效。
 
-GitHub Release 中的 Windows 文件只作为手动下载镜像；由于仓库当前为私有，客户端不能把 GitHub Release 直接当作匿名更新源。生产更新仍使用上述公开 HTTPS 路径。
-
-2026-11-10 已从公网下载完整安装包并核对大小 `128687994` 字节、SHA-256 `e0a3b61b7e8fb111071cdaded6e3ff070728cd562a62f32f8fc7a964f21e5b49`；公网 `latest.json` 的 ECDSA 签名验证通过。本次本机完整下载耗时约 279 秒，约 462 KB/s。
+GitHub Release 中的 Windows 文件只作为手动下载入口；由于仓库当前为私有，客户端不能把 GitHub Release 直接当作匿名更新源。若要重新启用自动更新，需要公开 GitHub 发布仓库、GitHub Pages、对象存储/CDN 或其他公开静态源。
 
 ## 发布版本
 
-先更新 [version.json](version.json)，至少修改 `version` 和 `build`。构建号必须严格递增；版本说明 URL、更新源和安装包 URL 也在同一文件中维护。不要复用旧构建号发布不同字节。
+先更新 [version.json](version.json)，至少修改 `version` 和 `build`。构建号必须严格递增。`updateFeedUrl` 和 `installerUrl` 为空时生成手动安装包，不生成更新清单；配置两者后才会签名并生成自动更新元数据。
 
 发布私钥使用 PKCS#8 ECDSA P-256 文件，不得提交到仓库、放入安装包或上传到下载服务器。构建脚本依次读取：
 

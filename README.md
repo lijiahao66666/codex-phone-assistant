@@ -25,7 +25,7 @@
 - [手机助手下载页](https://codex.air-inc.top/download/)
 - [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)
 
-macOS 0.3.0 已发布并在本机安装验证；Windows 0.3.50 已发布并完成本机运行中覆盖安装测试，尚缺第二台真实电脑的公网跨版本升级验收。Mac 下载页提供公开安装包，Windows 安装包及便携版见 Windows 说明。
+macOS 0.3.0（构建号 50）已发布并在本机安装验证；Windows 0.3.51 已完成构建、运行中覆盖保护和安装后自动启动测试。Windows 安装包及便携版通过 GitHub Release 手动下载，自动更新源暂未配置，避免占用轻量服务器带宽。
 
 安装步骤：
 
@@ -54,7 +54,7 @@ macOS 0.3.0 已发布并在本机安装验证；Windows 0.3.50 已发布并完�
 - Windows 10/11 宿主、便携包、ZIP 和 NSIS 安装器
 - macOS 原生窗口和 `.app` 构建脚本
 - macOS 窗口和菜单栏检查更新与签名更新包验证（首次需手动安装支持更新的版本）
-- Windows 托盘检查更新、签名清单、SHA-256 校验、静默安装与重启
+- Windows 更新器组件（ECDSA 清单、SHA-256、静默安装与重启）；公网更新源暂未配置
 - WebView2 与 WKWebView 本地面板
 - 关闭到托盘、单实例运行和再次启动唤回窗口
 - 配对凭据私有目录、POSIX 权限或 Windows 用户 ACL

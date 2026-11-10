@@ -32,8 +32,13 @@ $releaseNotesUrl = [string]$releaseConfig.releaseNotesUrl
 $updatePublicKey = [string]$releaseConfig.updatePublicKey
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must contain three numeric components: $Version" }
 if ($BuildNumber -le 0) { throw "BuildNumber must be a positive integer" }
-if (-not [Uri]::IsWellFormedUriString($UpdateFeedUrl, [UriKind]::Absolute) -or ([Uri]$UpdateFeedUrl).Scheme -ne 'https') { throw "UpdateFeedUrl must be an HTTPS URL" }
-if (-not [Uri]::IsWellFormedUriString($InstallerUrl, [UriKind]::Absolute) -or ([Uri]$InstallerUrl).Scheme -ne 'https') { throw "InstallerUrl must be an HTTPS URL" }
+$updateEnabled = -not [string]::IsNullOrWhiteSpace($UpdateFeedUrl)
+if ($updateEnabled) {
+  if (-not [Uri]::IsWellFormedUriString($UpdateFeedUrl, [UriKind]::Absolute) -or ([Uri]$UpdateFeedUrl).Scheme -ne 'https') { throw "UpdateFeedUrl must be an HTTPS URL" }
+  if (-not [Uri]::IsWellFormedUriString($InstallerUrl, [UriKind]::Absolute) -or ([Uri]$InstallerUrl).Scheme -ne 'https') { throw "InstallerUrl must be an HTTPS URL" }
+} elseif (-not [string]::IsNullOrWhiteSpace($InstallerUrl)) {
+  throw "InstallerUrl requires an UpdateFeedUrl"
+}
 if (-not $updatePublicKey) { throw "version.json must contain updatePublicKey" }
 $fileVersion = "$Version.0"
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -136,7 +141,12 @@ if ($LASTEXITCODE -ne 0) { throw "Windows update self-test failed with exit code
 if ($LASTEXITCODE -ne 0) { throw "Windows updater helper self-test failed with exit code $LASTEXITCODE" }
 
 $installerPath = Join-Path $buildRoot 'codex-phone-assistant-windows-x64-setup.exe'
-if (Test-Path -LiteralPath $installerPath) {
+$manifestPath = Join-Path $buildRoot 'latest.json'
+$signaturePath = Join-Path $buildRoot 'latest.json.sig'
+if (-not $updateEnabled) {
+  Remove-Item -LiteralPath $manifestPath, $signaturePath -Force -ErrorAction SilentlyContinue
+  Write-Warning "Windows update feed is not configured; installer and portable ZIP are manual-download builds."
+} elseif (Test-Path -LiteralPath $installerPath) {
   $installerHash = Get-Sha256 $installerPath
   $manifest = [ordered]@{
     schemaVersion = 1
@@ -152,8 +162,6 @@ if (Test-Path -LiteralPath $installerPath) {
     }
     releaseNotesUrl = $releaseNotesUrl
   }
-  $manifestPath = Join-Path $buildRoot 'latest.json'
-  $signaturePath = Join-Path $buildRoot 'latest.json.sig'
   [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), $utf8NoBom)
   if (-not $UpdatePrivateKeyPath) {
     $candidate = Join-Path $env:USERPROFILE '.codex\secrets\codex-phone-windows-update-ecdsa.pk8'

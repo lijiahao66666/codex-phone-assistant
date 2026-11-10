@@ -10,18 +10,18 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
-    <Version>0.3.50</Version>
-    <AssemblyVersion>0.3.50.0</AssemblyVersion>
-    <FileVersion>0.3.50.0</FileVersion>
-    <UpdateBuildNumber>50</UpdateBuildNumber>
-    <UpdateFeedUrl>https://codex.air-inc.top/download/windows/latest.json</UpdateFeedUrl>
+    <Version>0.3.51</Version>
+    <AssemblyVersion>0.3.51.0</AssemblyVersion>
+    <FileVersion>0.3.51.0</FileVersion>
+    <UpdateBuildNumber>51</UpdateBuildNumber>
+    <UpdateFeedUrl></UpdateFeedUrl>
     <UpdatePublicKey>MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/w67b2seFuKYKIz3NUZDm/kov/H4iruzcQblSxkz+oryE4tNYlAyxtn51IB4Py2NZTuDyFfFstRdEiGOLskoeQ==</UpdatePublicKey>
-    <UpdateReleaseNotesUrl>https://github.com/lijiahao66666/codex-phone-assistant/blob/main/docs/windows-0.3.50-release-notes.md</UpdateReleaseNotesUrl>
+    <UpdateReleaseNotesUrl>https://github.com/lijiahao66666/codex-phone-assistant/blob/main/docs/windows-0.3.51-release-notes.md</UpdateReleaseNotesUrl>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
     <AssemblyMetadata Include="CodexPhone.BuildNumber" Value="$(UpdateBuildNumber)" />
-    <AssemblyMetadata Include="CodexPhone.UpdateFeedUrl" Value="$(UpdateFeedUrl)" />
+    <AssemblyMetadata Include="CodexPhone.UpdateFeedUrl" Value="$(UpdateFeedUrl)" Condition="'$(UpdateFeedUrl)' != ''" />
     <AssemblyMetadata Include="CodexPhone.UpdatePublicKey" Value="$(UpdatePublicKey)" />
     <AssemblyMetadata Include="CodexPhone.ReleaseNotesUrl" Value="$(UpdateReleaseNotesUrl)" />
   </ItemGroup>

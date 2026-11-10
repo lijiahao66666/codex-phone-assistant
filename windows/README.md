@@ -6,15 +6,15 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
 ## 当前版本
 
-当前 Windows 构建为 `0.3.50`（构建号 50）。本版修正安装器覆盖运行中应用时 DLL 被占用的问题，并允许安装器通过本地退出事件请求助手正常退出；首次使用必须手动安装。
+当前 Windows 构建为 `0.3.51`（构建号 51）。本版在安装完成页默认勾选“启动 codex手机助手”，并保留运行中覆盖保护与正常退出事件。
 
 ## 下载
 
-- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/codex-phone-assistant-windows-x64-setup.exe)
-- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/codex-phone-assistant-windows-x64.zip)
-- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/SHA256SUMS-windows.txt)
+- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.3.51-windows/codex-phone-assistant-windows-x64-setup.exe)
+- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.3.51-windows/codex-phone-assistant-windows-x64.zip)
+- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/v0.3.51-windows/SHA256SUMS-windows.txt)
 
-仓库当前为私有，GitHub 下载需要已授权账号。公网固定更新源 <https://codex.air-inc.top/download/windows/latest.json> 已上线并通过签名与摘要核验。安装包内自带 Node 和 .NET 运行时，当前公网完整下载实测约 279 秒，首次下载会明显慢于后续启动。
+仓库当前为私有，GitHub 下载需要已授权账号。Windows 大文件不再放在轻量服务器；本版默认未配置自动更新源，托盘检查更新会显示“未配置”。安装包内自带 Node 和 .NET 运行时，因此体积约 123 MiB。
 
 ## 系统要求
 
@@ -29,20 +29,18 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 1. 运行 `codex-phone-assistant-windows-x64-setup.exe`。
 2. 安装位置为 `%LOCALAPPDATA%\Programs\codex-phone-assistant`，无需管理员权限。
 3. 如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，先确认文件来源和 SHA-256。当前安装器没有 Authenticode 商业证书签名。只对这一发布文件选择“更多信息” → “仍要运行”，不要绕过来源不明的同名文件。
-4. 从开始菜单启动 `codex手机助手`。
+4. 安装完成页默认勾选“启动 codex手机助手”；取消勾选时可稍后从开始菜单启动。
 
 ![Windows 客户端配对界面](../docs/assets/windows-pairing.png)
 
 ## 自动更新
 
-托盘菜单提供：
+托盘菜单保留更新入口，但当前构建没有默认更新源：
 
-- **检查更新…**：立即读取稳定通道清单。
-- **自动检查更新**：默认开启。启动后检查一次，之后每 6 小时检查。
+- **检查更新…**：当前显示更新源未配置，不发网络请求。
+- **自动检查更新**：开关保留；未配置更新源时不会周期检查。
 
-发现新版本后，应用会先显示版本号和版本说明链接，经用户确认才下载。更新清单使用独立 ECDSA P-256 签名，安装包还会校验 SHA-256。下载完成后，更新助手等待当前应用退出，再以静默模式运行 NSIS 安装器并重新启动应用。
-
-更新文件位于 `%LOCALAPPDATA%\codex-phone-assistant\Updates`，失败日志为其中的 `update.log`。便携版可以下载并校验更新，但自动安装只支持 NSIS 安装版。
+自动更新实现仍在代码中，但需要重新选择一个不占用轻量服务器带宽的公开 HTTPS 分发源后才能启用。此前放在 `codex.air-inc.top` 的 Windows 文件及清单已撤除。
 
 签名、发布顺序和故障边界见 [Windows 自动更新说明](windows-updates.md)。
 
