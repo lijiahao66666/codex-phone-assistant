@@ -34,10 +34,32 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "Copyright lijiahao66666"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+Function QuitRunningAssistant
+  FindWindow $0 "" "codex手机助手"
+  StrCmp $0 0 done
+  ExecWait '"$INSTDIR\codex-phone-assistant.exe" --quit'
+  Sleep 800
+  FindWindow $0 "" "codex手机助手"
+  StrCmp $0 0 done
+  MessageBox MB_ICONSTOP|MB_OK "codex手机助手正在运行，Windows 无法覆盖被占用的程序文件。$\r$\n$\r$\n请从系统托盘右键选择“退出”，然后重新运行安装包。"
+  Abort
+  done:
+FunctionEnd
+
+Function .onInit
+  Call QuitRunningAssistant
+FunctionEnd
+
 Function un.onInit
-  StrCmp $INSTDIR "$LOCALAPPDATA\Programs\codex-phone-assistant" +3
+  FindWindow $0 "" "codex手机助手"
+  StrCmp $0 0 unNotRunning
+  MessageBox MB_ICONSTOP|MB_OK "卸载前请先从系统托盘退出 codex手机助手。"
+  Abort
+  unNotRunning:
+  StrCmp $INSTDIR "$LOCALAPPDATA\Programs\codex-phone-assistant" unPathOk
   MessageBox MB_ICONSTOP "卸载程序不在预期的安装目录中。"
   Abort
+  unPathOk:
 FunctionEnd
 
 Section "Install"

@@ -6,13 +6,13 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
 ## 当前版本
 
-当前 Windows 构建为 `0.3.49`（stable48，构建号 49）。这是首个包含应用内更新能力的 Windows 版本，首次使用必须手动安装；后续版本会在托盘菜单中提示更新。
+当前 Windows 构建为 `0.3.50`（构建号 50）。本版修正安装器覆盖运行中应用时 DLL 被占用的问题，并允许安装器通过本地退出事件请求助手正常退出；首次使用必须手动安装。
 
 ## 下载
 
-- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/codex-phone-assistant-windows-x64-setup.exe)
-- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/codex-phone-assistant-windows-x64.zip)
-- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/SHA256SUMS-windows.txt)
+- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/codex-phone-assistant-windows-x64-setup.exe)
+- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/codex-phone-assistant-windows-x64.zip)
+- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/windows-stable50/SHA256SUMS-windows.txt)
 
 仓库当前为私有，GitHub 下载需要已授权账号。公网固定更新源 <https://codex.air-inc.top/download/windows/latest.json> 已上线并通过签名与摘要核验。安装包内自带 Node 和 .NET 运行时，当前公网完整下载实测约 279 秒，首次下载会明显慢于后续启动。
 
@@ -28,7 +28,7 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
 1. 运行 `codex-phone-assistant-windows-x64-setup.exe`。
 2. 安装位置为 `%LOCALAPPDATA%\Programs\codex-phone-assistant`，无需管理员权限。
-3. 如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，先确认文件来源和 SHA-256。当前安装器没有 Authenticode 商业证书签名，不要绕过来源不明的警告。
+3. 如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，先确认文件来源和 SHA-256。当前安装器没有 Authenticode 商业证书签名。只对这一发布文件选择“更多信息” → “仍要运行”，不要绕过来源不明的同名文件。
 4. 从开始菜单启动 `codex手机助手`。
 
 ![Windows 客户端配对界面](../docs/assets/windows-pairing.png)
@@ -129,4 +129,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1 -Force -Sk
 
 ## 验证范围
 
-Windows 11 x64 构建已覆盖高 DPI、命名管道连接、H5 配对、历史、发送、停止、托盘唤回、安装/卸载和更新器组件测试。没有使用第二台真实 Windows 电脑执行公网生产更新，因此首次正式发布后仍需做一次真实的旧版到新版升级验收。
+Windows 11 x64 构建已覆盖高 DPI、命名管道连接、H5 配对、历史、发送、停止、托盘唤回、运行中覆盖保护、安装/卸载和更新器组件测试。没有使用第二台真实 Windows 电脑执行公网生产更新，因此首次正式发布后仍需做一次真实的旧版到新版升级验收。

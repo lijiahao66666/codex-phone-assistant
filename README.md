@@ -25,7 +25,7 @@
 - [手机助手下载页](https://codex.air-inc.top/download/)
 - [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)
 
-macOS 0.3.0 已发布并在本机安装验证；Windows 0.3.49 已完成构建、更新器组件测试与 Windows 回归，尚缺第二台真实电脑的公网跨版本升级验收。Mac 下载页提供公开安装包，Windows 安装包及便携版见 Windows 说明。
+macOS 0.3.0 已发布并在本机安装验证；Windows 0.3.50 的安装退出保护正在发布准备中，尚缺第二台真实电脑的公网跨版本升级验收。Mac 下载页提供公开安装包，Windows 安装包及便携版见 Windows 说明。
 
 安装步骤：
 
