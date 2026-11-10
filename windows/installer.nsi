@@ -1,9 +1,9 @@
 Unicode true
 !ifndef VERSION
-  !define VERSION "0.3.49"
+  !define VERSION "1.0.0"
 !endif
 !ifndef FILEVERSION
-  !define FILEVERSION "0.3.49.0"
+  !define FILEVERSION "1.0.0.0"
 !endif
 !ifndef APP_ICON
   !define APP_ICON "app.ico"
@@ -68,9 +68,13 @@ Section "Install"
   SetOutPath "$INSTDIR"
   File /r "dist\*"
   WriteUninstaller "$INSTDIR\卸载.exe"
-  CreateDirectory "$SMPROGRAMS\codex手机助手"
-  CreateShortcut "$SMPROGRAMS\codex手机助手\codex手机助手.lnk" "$INSTDIR\codex-phone-assistant.exe"
-  CreateShortcut "$SMPROGRAMS\codex手机助手\卸载.lnk" "$INSTDIR\卸载.exe"
+  SetShellVarContext current
+  CreateShortcut "$SMPROGRAMS\codex手机助手.lnk" "$INSTDIR\codex-phone-assistant.exe" "" "$INSTDIR\app.ico" 0 SW_SHOWNORMAL "" "Codex 手机助手"
+  CreateShortcut "$DESKTOP\codex手机助手.lnk" "$INSTDIR\codex-phone-assistant.exe" "" "$INSTDIR\app.ico" 0 SW_SHOWNORMAL "" "Codex 手机助手"
+  ; Remove the nested Start Menu shortcuts created by older installers.
+  Delete "$SMPROGRAMS\codex手机助手\codex手机助手.lnk"
+  Delete "$SMPROGRAMS\codex手机助手\卸载.lnk"
+  RMDir "$SMPROGRAMS\codex手机助手"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexPhoneAssistant" "DisplayName" "codex手机助手"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexPhoneAssistant" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexPhoneAssistant" "Publisher" "lijiahao66666"
@@ -81,6 +85,9 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  SetShellVarContext current
+  Delete "$SMPROGRAMS\codex手机助手.lnk"
+  Delete "$DESKTOP\codex手机助手.lnk"
   Delete "$SMPROGRAMS\codex手机助手\codex手机助手.lnk"
   Delete "$SMPROGRAMS\codex手机助手\卸载.lnk"
   RMDir "$SMPROGRAMS\codex手机助手"

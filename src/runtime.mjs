@@ -37,7 +37,6 @@ function startConnector() {
 async function startConnectorOnce() {
   const next = await createPairedDesktopConnector({ credentialPath: configPath, imagePreview, imageUpload: process.env.HUB_IMAGE_UPLOAD === '1',
     async createOwnerRouter(hostId) {
-      if (process.platform !== 'darwin') return undefined;
       try { ownerRuntime = await createOwnerRuntime({ hostId }); return ownerRuntime.router; }
       catch { console.error('新聊天服务不可用，已有桌面聊天仍可查看。'); return undefined; }
     },
