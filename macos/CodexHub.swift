@@ -64,15 +64,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "codex手机助手"
+        window.minSize = NSSize(width: 320, height: 300)
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.center()
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(self, name: "pairRequest")
-        webView = WKWebView(frame: window.contentView!.bounds, configuration: configuration)
+        let container = NSView(frame: window.contentView!.bounds)
+        let actions = NSStackView()
+        actions.orientation = .horizontal
+        actions.alignment = .centerY
+        actions.spacing = 8
+        actions.translatesAutoresizingMaskIntoConstraints = false
+        let checkButton = NSButton(title: "检查更新…", target: self, action: #selector(checkForUpdates))
+        checkButton.isEnabled = UpdateConfiguration.isValid(Bundle.main.infoDictionary ?? [:])
+        actions.addArrangedSubview(checkButton)
+        actions.addArrangedSubview(NSButton(title: "退出助手", target: self, action: #selector(quitApp)))
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.translatesAutoresizingMaskIntoConstraints = false
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
-        window.contentView = webView
+        container.addSubview(actions)
+        container.addSubview(webView)
+        NSLayoutConstraint.activate([
+            actions.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            actions.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            webView.topAnchor.constraint(equalTo: actions.bottomAnchor, constant: 8),
+            webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        window.contentView = container
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -121,6 +143,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         updater.automaticallyChecksForUpdates.toggle()
         sender.state = updater.automaticallyChecksForUpdates ? .on : .off
     }
+
+    @objc private func checkForUpdates() { updaterController?.checkForUpdates(nil) }
 
     @objc private func showWindow() {
         window.makeKeyAndOrderFront(nil)
