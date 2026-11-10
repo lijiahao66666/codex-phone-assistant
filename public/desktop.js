@@ -2229,6 +2229,9 @@ function openFilePreview(path, threadId, turnId, itemId, index, linked = false) 
     } catch { if (panel.isConnected !== false) content.textContent = '文件不可预览，可能已删除、不是文本或超过 512 KB'; }
   })();
 }
+function hasReasoningSummary(item) {
+  return Array.isArray(item.summary) && item.summary.some(text => typeof text === 'string' && text.trim());
+}
 function renderAgentHistoryTurn(turn) {
   const row = element('article', 'turn');
   if (turn.status === 'interrupted' || turn.status === 'failed') row.append(element('div', 'turn-meta', turn.status === 'interrupted' ? '已中断' : '失败'));
@@ -2236,6 +2239,7 @@ function renderAgentHistoryTurn(turn) {
   const finalIndex = turn.status === 'completed' ? items.findLastIndex(item => item.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim()) : -1;
   let work = null;
   for (const [index, item] of items.entries()) {
+    if (item.type === 'reasoning' && !hasReasoningSummary(item)) continue;
     const activity = ['reasoning', 'commandExecution', 'fileChange', 'mcpToolCall', 'subAgentActivity', 'collabAgentToolCall'].includes(item.type);
     if (activity && finalIndex >= 0 && index < finalIndex) {
       if (!work) { work = element('details', 'work-activity'); work.append(element('summary', 'work-title', '工作过程')); row.append(work); }
@@ -3391,6 +3395,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     const groups = [];
     let currentGroup = null;
     for (const [index, item] of turnItems.entries()) {
+      if (item?.type === 'reasoning' && !hasReasoningSummary(item)) continue;
       if (!['userMessage', 'agentMessage', 'reasoning', 'subAgentActivity', 'collabAgentToolCall', 'mcpToolCall', 'commandExecution', 'fileChange', 'imageView', 'imageGeneration', 'error'].includes(item?.type)) continue;
       if (!isWorkActivity(item, index)) { currentGroup = null; continue; }
       if (!currentGroup) groups.push(currentGroup = { ids: [], stable: true, items: [] });
@@ -3413,6 +3418,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     }
     if (stableTurn) priorWorkGroups.set(scope, groups.map((group, index) => ({ ids: group.ids, key: groupKeys[index] })));
     for (const [itemIndex, item] of turnItems.entries()) {
+      if (item?.type === 'reasoning' && !hasReasoningSummary(item)) continue;
       const stableVideoItem = typeof turnDisplayKey === 'string' && turnDisplayKey && turnKeyCounts.get(turnDisplayKey) === 1 && typeof item.id === 'string' && item.id && itemIdCounts.get(item.id) === 1;
       const videoOccurrence = index => stableVideoItem ? JSON.stringify([turnDisplayKey, item.id, index]) : Symbol('video');
       const types = { userMessage: '你', agentMessage: 'Codex', reasoning: '思考', subAgentActivity: '子智能体', collabAgentToolCall: '子智能体', mcpToolCall: '工具', commandExecution: '命令', fileChange: '文件变更', imageView: '图片', imageGeneration: '图片', error: '错误' };
@@ -3448,7 +3454,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         row.append(workGroup);
       }
       let destination = workGroup || row;
-      const groupable = candidate => candidate && ['reasoning', 'commandExecution', 'fileChange', 'mcpToolCall'].includes(candidate.type);
+      const groupable = candidate => candidate && ['reasoning', 'commandExecution', 'fileChange', 'mcpToolCall'].includes(candidate.type) && (candidate.type !== 'reasoning' || hasReasoningSummary(candidate));
       const settled = candidate => groupable(candidate) && !['inProgress', 'failed', 'interrupted', 'declined'].includes(candidate.status) && !(candidate.type === 'subAgentActivity' && candidate.kind === 'interrupted');
       let start = itemIndex, end = itemIndex;
       while (start > 0 && settled(turnItems[start - 1])) start--;
