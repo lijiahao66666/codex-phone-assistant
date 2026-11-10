@@ -6,7 +6,7 @@ macOS 客户端使用 Swift、WKWebView 和菜单栏入口，随包 Node 后台�
 
 ## 下载
 
-从[项目下载页](https://codex.air-inc.top/download/)或 [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)获取 macOS Apple Silicon 安装包和对应的 SHA-256 校验值。
+从[项目下载页](https://codex.air-inc.top/download/)或 [GitHub 发行版](https://github.com/lijiahao66666/codex-phone-assistant/releases)获取 macOS Apple Silicon 安装包。
 
 ## 系统要求
 
@@ -16,7 +16,7 @@ macOS 客户端使用 Swift、WKWebView 和菜单栏入口，随包 Node 后台�
 
 Intel Mac 当前未提供安装包。
 
-> 本版使用本地 ad-hoc 签名，未经过 Apple 公证，也没有 Developer ID 签名。只有在确认来源可信、SHA-256 正确时才继续打开；无法验证来源时应停止安装。
+> 本版使用本地 ad-hoc 签名，未经过 Apple 公证，也没有 Developer ID 签名。请确认安装包来自项目下载页或 GitHub 发行版；来源不明时不要继续安装。
 
 ## 安装与首次打开
 
@@ -67,9 +67,13 @@ Intel Mac 当前未提供安装包。
 
 手机端是电脑版 Codex 的伴生界面。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入，目标信息目前只能查看。H5 暂时隐藏未读蓝点；跨端已读同步、桌面主动接管与持有写入权时归档仍有限制。完整边界见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
 
-## 托盘与退出
+## 检查更新
 
-- 窗口顶部提供“检查更新…”和“退出助手”按钮；更新安装需要确认。
+窗口和菜单栏提供“检查更新…”；自动检查默认开启。发现新版本时，助手提示打开下载页，由用户选择下载并手动安装。版本检查需要已部署且签名有效的版本信息，发布配置见 [macOS 更新说明](UPDATES.md)。
+
+## 菜单栏与退出
+
+- 窗口顶部提供“检查更新…”和“退出助手”按钮。
 - 关闭窗口会隐藏到菜单栏，后台服务和手机连接继续运行。
 - 从菜单栏图标选择“打开 codex手机助手”可恢复窗口。
 - 从菜单栏选择“退出 codex手机助手”会结束窗口和随包 Node 进程。助手持有的任务仍在运行、存在未确认写入或状态无法确认，以及操作或附件仍在处理时，会保留进程并提示。
@@ -96,7 +100,7 @@ npm run build:macos
 
 ## 故障排查
 
-- **点击打开后没有反应**：确认安装包来自 GitHub Release 或项目下载页，并核对 SHA-256。
+- **点击打开后没有反应**：确认安装包来自 GitHub 发行版或项目下载页。
 - **被 macOS 阻止**：按上面的“隐私与安全性”步骤操作；不要在无法确认来源时绕过系统保护。
 - **一直显示“电脑未连接”**：确认 Codex Desktop 已登录且手机助手后台仍在运行。
 - **图片或文件按钮未出现**：检查桌面端媒体能力开关和所访问文件的权限范围。
