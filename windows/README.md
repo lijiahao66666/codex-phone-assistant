@@ -26,9 +26,18 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
 ## 安装与首次打开
 
-1. 运行 `codex-phone-assistant-windows-x64-setup.exe`。
-2. 安装位置为 `%LOCALAPPDATA%\Programs\codex-phone-assistant`，无需管理员权限。
-3. 如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，先确认文件来源和 SHA-256。当前安装器没有 Authenticode 商业证书签名。只对这一发布文件选择“更多信息” → “仍要运行”，不要绕过来源不明的同名文件。
+1. 运行从项目下载页或 GitHub 发行版获取的 Windows 安装程序。当前安装器没有 Authenticode 商业证书签名，Windows 可能显示“Windows 已保护你的电脑”。确认文件来源可信后，点击“更多信息”。
+
+   ![Windows 安全提示中的更多信息](../docs/assets/windows-smartscreen-more-info.png)
+
+2. 确认显示的程序是下载的手机助手安装包后，选择“仍要运行”。来源不明时不要继续。
+
+   ![Windows 安全提示中的仍要运行](../docs/assets/windows-smartscreen-run.png)
+
+3. 在安装程序中点击“安装”。默认安装在 `%LOCALAPPDATA%\Programs\codex-phone-assistant`，无需管理员权限。
+
+   ![Windows 安装程序欢迎界面](../docs/assets/windows-installer-welcome.png)
+
 4. 安装完成页默认勾选“启动 codex手机助手”；取消勾选时可稍后从开始菜单启动。
 
 ![Windows 客户端配对界面](../docs/assets/windows-pairing.png)

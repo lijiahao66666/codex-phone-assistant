@@ -122,7 +122,7 @@ if (Test-Path -LiteralPath $makensis) {
   }
   Write-Output "Installer: $(Join-Path $buildRoot 'codex-phone-assistant-windows-x64-setup.exe')"
 } else {
-  Write-Warning "NSIS was not found at $makensis; portable app and ZIP were built."
+  throw "NSIS was not found at $makensis; cannot build or publish an installer."
 }
 
 $toolsOutput = Join-Path $buildRoot 'update-tools'
