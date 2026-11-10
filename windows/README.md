@@ -14,7 +14,7 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 - [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/codex-phone-assistant-windows-x64.zip)
 - [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/SHA256SUMS-windows.txt)
 
-仓库当前为私有，GitHub 下载需要已授权账号。公网下载页的 Windows 固定更新源仍在部署中；在 `https://codex.air-inc.top/download/windows/latest.json` 上线前，应用内检查更新会提示无法连接。不要混用旧安装器和新版运行目录。
+仓库当前为私有，GitHub 下载需要已授权账号。公网固定更新源 <https://codex.air-inc.top/download/windows/latest.json> 已上线并通过签名与摘要核验。安装包内自带 Node 和 .NET 运行时，当前公网完整下载实测约 279 秒，首次下载会明显慢于后续启动。
 
 ## 系统要求
 
