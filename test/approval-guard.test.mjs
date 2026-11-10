@@ -28,3 +28,17 @@ test('rejects missing details, unsupported permission scopes and decision sets',
   assert.equal(inspectApproval({ ...file, params: { ...file.params, grantRoot: '/tmp' } }, 'thread'), null);
   assert.equal(inspectApproval({ ...file, params: { ...file.params, itemId: '' } }, 'thread'), null);
 });
+
+test('real command approval offers only one-time accept and cancel without applying an amendment', () => {
+  const request = { ...command, params: { ...command.params, proposedExecpolicyAmendment: ['pwd'], availableDecisions: ['accept', { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['pwd'] } }, 'cancel'] } };
+  const state = { id: 'thread', requests: [request] };
+  assert.deepEqual(inspectApproval(request, 'thread').decisions, ['accept', 'cancel']);
+  assert.ok(matchApproval(state, 7, 'command', 'accept'));
+  assert.ok(matchApproval(state, 7, 'command', 'cancel'));
+  assert.equal(matchApproval(state, 7, 'command', 'decline'), null);
+  assert.equal(matchApproval(state, 7, 'command', 'acceptForSession'), null);
+  assert.equal(inspectApproval({ ...request, params: { ...request.params, proposedExecpolicyAmendment: { bad: true } } }, 'thread'), null);
+  assert.equal(inspectApproval({ ...request, params: { ...request.params, networkApprovalContext: {} } }, 'thread'), null);
+  assert.equal(inspectApproval({ ...request, params: { ...request.params, availableDecisions: ['accept'] } }, 'thread'), null);
+  assert.equal(matchApproval({ id: 'thread', requests: [file] }, 'request', 'file', 'cancel'), null);
+});

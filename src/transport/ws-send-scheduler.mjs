@@ -7,13 +7,19 @@ export function createWebSocketSendScheduler({ socket, maxMessageBytes = 8 * 102
   if (!socket || typeof socket.send !== 'function' || typeof onError !== 'function' || typeof now !== 'function') throw new Error('Invalid scheduler');
   const controls = [], busy = new Map(), streams = new Map();
   let controlBytes = 0, running = false, scheduled = false, closed = false, controlsSent = 0, flightTimer;
+  const drainWaiters = new Set();
+  function settleDrain(error) {
+    if (!error && (running || controls.length || busy.size)) return;
+    for (const waiter of drainWaiters) error ? waiter.reject(error) : waiter.resolve();
+    drainWaiters.clear();
+  }
   const report = (code, key, error) => { try { onError({ code, key, error }); } catch {} };
   function schedule() {
     if (closed || running || scheduled) return;
     scheduled = true;
     queueMicrotask(pump);
   }
-  function close() { closed = true; clearTimeout(flightTimer); controls.length = 0; controlBytes = 0; busy.clear(); streams.clear(); }
+  function close() { closed = true; clearTimeout(flightTimer); controls.length = 0; controlBytes = 0; busy.clear(); streams.clear(); settleDrain(new Error('scheduler closed')); }
   function clearExpiredBusy() { for (const [key, item] of busy) if (item.expires <= now()) busy.delete(key); }
   function pump() {
     scheduled = false;
@@ -38,7 +44,7 @@ export function createWebSocketSendScheduler({ socket, maxMessageBytes = 8 * 102
         if (bytes > maxStreamMessageBytes) { report('message-too-large', key); schedule(); return; }
         item = { data, key };
       } catch (error) { report('factory-failed', key, error); schedule(); return; }
-    } else return;
+    } else { settleDrain(); return; }
     running = true;
     flightTimer = setTimeout(() => { if (closed) return; close(); report('send-timeout', item.key); }, sendTimeoutMs);
     flightTimer.unref?.();
@@ -48,6 +54,7 @@ export function createWebSocketSendScheduler({ socket, maxMessageBytes = 8 * 102
         clearTimeout(flightTimer);
         running = false;
         if (error) { close(); report('send-failed', item.key, error); return; }
+        settleDrain();
         schedule();
       });
     } catch (error) { running = false; close(); report('send-failed', item.key, error); }
@@ -81,6 +88,11 @@ export function createWebSocketSendScheduler({ socket, maxMessageBytes = 8 * 102
       streams.set(key, factory); schedule(); return true;
     },
     cancelStream(key) { return streams.delete(key); },
+    drainControls() {
+      if (closed) return Promise.reject(new Error('scheduler closed'));
+      if (!running && !controls.length && !busy.size) return Promise.resolve();
+      return new Promise((resolve, reject) => drainWaiters.add({ resolve, reject }));
+    },
     close,
   };
 }

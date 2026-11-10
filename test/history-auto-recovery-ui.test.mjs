@@ -594,18 +594,21 @@ test('sidebar observation remains bounded even when many task rows share the vie
   assert.equal(f.run('new Set(visibleStatusIds()).size'),32);
 });
 
-test('folded directory summary includes hidden child statuses and distinguishes unknown from running',async()=>{
+test('directory summary only shows confirmed running tasks while folded',async()=>{
   const ids=Array.from({length:6},(_,index)=>`${String(index+2).padStart(8,'0')}-3333-4333-8333-333333333333`);
   const f=await fixture();
   f.run(`selectedId=null;projectList.append(renderGroup('project:summary','project',${JSON.stringify(ids.map((id,index)=>({id,title:'task',status:index===5?'active':'idle'})))},false,false))`);
   assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.hidden"),false);
   assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.dataset.status"),'active');
   assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.title"),'目录内有任务进行中');
+  f.run("projectStatusGroups.get('project:summary').heading.listeners.click()");
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.hidden"),true);
+  f.run("projectStatusGroups.get('project:summary').heading.listeners.click()");
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.hidden"),false);
   f.run(`acceptSidebarStatuses(${JSON.stringify(Object.fromEntries(ids.map(id=>[id,'idle'])))})`);
   assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.hidden"),true);
   f.run(`acceptSidebarStatuses(${JSON.stringify({[ids[0]]:'unknown'})})`);
-  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.dataset.status"),'checking');
-  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.title"),'目录任务状态更新中');
+  assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.hidden"),true);
   f.run(`updateLiveTaskStatus('${ids[5]}','active')`);
   assert.equal(f.run("projectStatusGroups.get('project:summary').indicator.dataset.status"),'active');
 });
@@ -642,7 +645,7 @@ test('directory status survives list rerender without changing selection and bec
   assert.equal(f.run('projectStatusGroups.size'),1);
   assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.dataset.status"),'active');
   f.run('stopSidebarStatuses()');
-  assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.dataset.status"),'checking');
+  assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.hidden"),true);
   f.run(`acceptSidebarStatuses({'${id}':'idle'})`);
   assert.equal(f.run("projectStatusGroups.get('project:folder').indicator.hidden"),true);
   f.run('invalidateThreadList()');

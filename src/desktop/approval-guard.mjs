@@ -15,12 +15,16 @@ export function inspectApproval(request, threadId) {
   const kind = methods.get(request.method);
   if (kind === 'command' && (p.kind && p.kind !== 'command' ||
       typeof p.command !== 'string' || !p.command.trim() ||
-      p.additionalPermissions || p.networkApprovalContext || p.proposedNetworkPolicyAmendments || p.proposedExecpolicyAmendment)) return null;
+      p.additionalPermissions || p.networkApprovalContext || p.proposedNetworkPolicyAmendments)) return null;
   if (kind === 'file' && p.grantRoot) return null;
-  const decisions = ['accept', 'decline'];
+  let decisions = ['accept', 'decline'];
   if (kind === 'command' && Array.isArray(p.availableDecisions)) {
-    for (const decision of decisions) if (!p.availableDecisions.includes(decision)) return null;
+    if (!p.availableDecisions.includes('accept')) return null;
+    if (p.availableDecisions.includes('decline')) decisions = ['accept', 'decline'];
+    else if (p.availableDecisions.includes('cancel')) decisions = ['accept', 'cancel'];
+    else return null;
   }
+  if (kind === 'command' && p.proposedExecpolicyAmendment != null && (!Array.isArray(p.proposedExecpolicyAmendment) || p.proposedExecpolicyAmendment.some(part => typeof part !== 'string') || !Array.isArray(p.availableDecisions))) return null;
   return { id: request.id, kind, turnId: p.turnId, itemId: p.itemId,
     ...(kind === 'command' ? { command: p.command, cwd: typeof p.cwd === 'string' ? p.cwd : null } : {}),
     reason: typeof p.reason === 'string' ? p.reason : null, decisions };
@@ -28,7 +32,7 @@ export function inspectApproval(request, threadId) {
 
 export function matchApproval(state, requestId, kind, decision) {
   if (!state || typeof state.id !== 'string' || !Array.isArray(state.requests) ||
-      !['command', 'file'].includes(kind) || !['accept', 'decline'].includes(decision)) return null;
+      !['command', 'file'].includes(kind) || !['accept', 'decline', 'cancel'].includes(decision)) return null;
   const matches = state.requests.filter(request => request?.id === requestId);
   if (matches.length !== 1) return null;
   const approval = inspectApproval(matches[0], state.id);

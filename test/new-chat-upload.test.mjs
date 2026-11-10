@@ -8,7 +8,7 @@ const thread = '11111111-1111-4111-8111-111111111111';
 const upload = '22222222-2222-4222-8222-222222222222';
 const attachment = '33333333-3333-4333-8333-333333333333';
 const tick = () => new Promise(resolve => setImmediate(resolve));
-const response = (status = 200, value = {}) => ({ ok: status >= 200 && status < 300, status, json: async () => value });
+const response = (status = 200, value = {}) => ({ ok: status >= 200 && status < 300, status, json: async () => value, clone: () => response(status, value) });
 async function fixture(handler, { compression = false } = {}) {
   class Element {
     constructor() { this.children = []; this.dataset = {}; this.listeners = {}; this.value = ''; this.style = {}; this.classList = { toggle() {}, contains() { return false; } }; }
@@ -91,6 +91,23 @@ test('new chat aborts a failed upload sibling and a manual retry retains its pre
   failing = false; await f.submit();
   assert.equal(f.requests.filter(request => request.url === '/api/chats/prepare').length, 1);
   assert.equal(JSON.parse(submissions(f)[0].options.body).requestId, requestId);
+});
+
+for (const path of ['/api/chats/prepare', '/api/chats/submit']) test(`${path} explicit not-dispatched stays retryable`, async () => {
+  let reject = true;
+  const f = await fixture(url => url === path && reject ? response(409, { error: 'not-dispatched' }) : undefined);
+  f.seed(Buffer.from('file')); await f.submit();
+  assert.equal(f.run('newDraft.uncertain'), false);
+  assert.match(f.run('newDraft.message'), /稍后重试/);
+  reject = false; await f.submit();
+  assert.equal(f.run('newDraft'), null);
+});
+
+test('text-only creation with explicit not-dispatched stays retryable', async () => {
+  let reject = true;
+  const f = await fixture(url => url === '/api/chats' ? (reject ? response(409, { error: 'not-dispatched' }) : response(202, { threadId: thread })) : undefined);
+  await f.submit(); assert.equal(f.run('newDraft.uncertain'), false); assert.match(f.run('newDraft.message'), /稍后重试/);
+  reject = false; await f.submit(); assert.equal(f.run('newDraft'), null);
 });
 
 test('new chat skips later compression after an ineffective first chunk without changing bytes', async () => {

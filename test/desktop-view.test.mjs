@@ -140,7 +140,7 @@ test('projects only known desktop runtime states', () => {
 
 test('maps canonical history through its ordered entity references', () => {
   const view = desktopView({ id: 'thread', title: 'Test', turns: [], requests: [{ id: 7, method: 'approval', params: { secret: 'not projected' } }],
-    turnHistory: { kind: 'canonical', history: { isComplete: true, islands: [{ entries: [{ value: 'b' }, { value: 'a' }] }], entitiesByKey: {
+    turnHistory: { kind: 'canonical', history: { isComplete: true, islands: [{ newerBoundary: { status: 'exhausted' }, entries: [{ value: 'b' }, { value: 'a' }] }], entitiesByKey: {
       a: { turnId: 'one', status: 'completed', items: [{ type: 'agentMessage', id: 'm', text: 'hello', ignored: 'private' }] },
       b: { turnId: 'two', status: 'inProgress', items: [{ type: 'error', message: 'test failure' }] },
     } } } });

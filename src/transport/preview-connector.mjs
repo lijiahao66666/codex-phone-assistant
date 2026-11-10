@@ -129,7 +129,8 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1) throw new Error('Invalid heartbeat timeout');
   if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
-  const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(); let ws, scheduler, timer, stopped = false;
+  const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(), uploadChecks = new Set(); let ws, scheduler, timer, stopped = false, shuttingDown = false, activeMutations = 0;
+  const mutationTypes = new Set(['recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
   const models = modelRequest ? createModelService({ request: modelRequest, writes, journal: modelJournal, hostId, ...(allowInsecureForTests ? {} : { createObserver: id => createSession({ conversationId: id, hostId: 'local' }) }), sessionFor: (deviceId, id) => [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === deviceId) }) : null;
   const recoveryLocked = id => {
     try { return ownerRouter ? ownerRouter.isRecoveryLocked(id) !== false : false; }
@@ -188,6 +189,14 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     scheduler = connectionScheduler;
     const deviceCleanups = new Map(), deviceTransitions = new Map(), deviceEpochs = new Map();
     const uploads = new Map(), staged = new Map(), revoked = new Set(), inflightUploads = new Map(), readRequests = new Map(), writeReplies = new Map(), pendingClaims = new Set(), sidebarStreams = new Map();
+    let currentUploadContext;
+    const uploadsBusy = () => {
+      if (!currentUploadContext) return uploads.size > 0 || staged.size > 0;
+      for (const [id, scope] of uploads) if (typeof currentUploadContext.receiver.has === 'function' && !currentUploadContext.receiver.has(id, scope)) uploads.delete(id);
+      for (const [id, scope] of staged) if (!currentUploadContext.store.resolve({ id, ...scope })) staged.delete(id);
+      return uploads.size > 0 || staged.size > 0;
+    };
+    uploadChecks.add(uploadsBusy);
     const removeSidebarStream = id => { const stream = sidebarStreams.get(id); if (!stream) return; sidebarStreams.delete(id); clearTimeout(stream.timer); clearTimeout(stream.listTimer); sidebarStatus?.off('change', stream.notify); threadListChanges?.off('change', stream.listNotify); connectionScheduler.cancelStream(`sidebar:${id}`); connectionScheduler.cancelStream(`thread-list:${id}`); if (!sidebarStreams.size) threadListChanges?.stop(); };
     const addSidebarStream = (id, deviceId) => {
       const stream = { deviceId, timer: null, notify: null };
@@ -255,6 +264,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           helperPath: fileURLToPath(new URL('../../validate-image', import.meta.url)), ...(imageValidator ? { validator: imageValidator } : {}) }) };
         })();
         uploadContext = pending;
+        void pending.then(context => { currentUploadContext = context; }).catch(() => {});
         void pending.catch(() => { if (uploadContext === pending) uploadContext = undefined; });
       }
       return uploadContext;
@@ -274,6 +284,13 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     ws.on('message', async raw => {
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return connection.close(1007); }
       if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return connection.close(1007);
+      const mutation = mutationTypes.has(msg.type);
+      if (mutation && shuttingDown) {
+        if (msg.type !== 'cancel-upload') send(msg.type === 'upload' ? { type: 'response', id: msg.id, ok: false } : { type: 'response', id: msg.id, status: ['create-chat', 'prepare-chat', 'submit-chat'].includes(msg.type) ? 'not-dispatched' : 'unavailable' }, connection, { deviceId: msg.deviceId, cancellable: true });
+        return;
+      }
+      if (mutation) activeMutations++;
+      try {
       if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
       if (msg.type === 'device-restored' && typeof msg.deviceId === 'string') {
         const epoch = (deviceEpochs.get(msg.deviceId) || 0) + 1; deviceEpochs.set(msg.deviceId, epoch);
@@ -649,7 +666,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (msg.type === 'approve') {
         const id = msg.conversationId;
         const answer = beginWrite(msg);
-        if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || !['command', 'file'].includes(msg.kind) || !['accept', 'decline'].includes(msg.decision) || !['string', 'number'].includes(typeof msg.requestId)) return answer('unavailable');
+        if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || !['command', 'file'].includes(msg.kind) || !['accept', 'decline', 'cancel'].includes(msg.decision) || !['string', 'number'].includes(typeof msg.requestId)) return answer('unavailable');
         const session = [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === msg.deviceId);
         if (!session || writes.has(id)) return answer('unavailable');
         writes.add(id);
@@ -936,10 +953,11 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         void refreshImages();
       });
       try { session.start(); } catch { streams.delete(msg.id); void closeSession(session); send({ type: 'end', id: msg.id }, connection); }
+      } finally { if (mutation) activeMutations--; }
     });
-    ws.on('close', () => { trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }); if (!stopped) timer = setTimeout(connect, retryMs); });
+    ws.on('close', () => { trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
   }
-  return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async close() { stopped = true; clearTimeout(timer); closeStreams(); await models?.close(); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
+  return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async beginShutdown() { if (shuttingDown || activeMutations || [...uploadChecks].some(check => check())) throw Object.assign(new Error('Connector writes are active'), { code: 'tasks-active' }); shuttingDown = true; try { if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls(); } catch { shuttingDown = false; throw Object.assign(new Error('Connector replies could not be flushed'), { code: 'tasks-active' }); } }, cancelShutdown() { shuttingDown = false; }, async close() { stopped = true; clearTimeout(timer); closeStreams(); await models?.close(); if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls().catch(() => {}); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

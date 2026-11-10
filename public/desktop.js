@@ -414,7 +414,7 @@ async function scopedFetch(url, options = {}) {
   return response;
 }
 function resetHistoryScope(clearStored = false) {
-  cancelOutgoingForScopeChange(); clearToolOutputEntries(); historyRequest?.abort(); historyRequest = null; recordedHistory = null; historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
+  cancelOutgoingForScopeChange(); cancelAsyncQuestionWrites(); clearToolOutputEntries(); historyRequest?.abort(); historyRequest = null; recordedHistory = null; historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
 }
 // Unknown writes remain bound to their original device; switching never retries them.
 const deviceCreationDrafts = new Map(), deviceSubmissionGuards = new Map(), deviceConversationDrafts = new Map();
@@ -921,6 +921,14 @@ function selectDraftProject(value) { if (newDraft && availableProjects.some(proj
 newProject.addEventListener('change', () => selectDraftProject(newProject.value));
 currentProject.addEventListener('change', () => selectDraftProject(currentProject.value));
 const inputDrafts = new Map();
+const asyncQuestionWrites = new Map();
+function cancelAsyncQuestionWrites() {
+  for (const write of asyncQuestionWrites.values()) {
+    write.controller.abort();
+    write.draft.feedback = '结果暂不确定，请查看电脑上的任务状态'; write.draft.outcome = '结果待确认';
+  }
+  asyncQuestionWrites.clear();
+}
 const skippedAsyncQuestions = new Set();
 const approvalDrafts = new Map();
 let previewGeneration = 0;
@@ -1973,6 +1981,7 @@ composerForm.addEventListener('submit', async event => {
           const digest = hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ text, model, effort, files }))));
           creationDispatched = true;
           response = await scopedFetch('/api/chats/prepare', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: draft.requestId, projectId: draft.projectId, digest, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }) });
+          if (response.status === 409 && (await response.clone().json().catch(() => null))?.error === 'not-dispatched') { if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed'); creationDispatched = false; draft.message = '助手正在退出，请稍后重试'; return; }
           if (!response.ok) throw new Error(response.status >= 500 ? 'uncertain' : 'prepare');
           preparedThread = (await response.json()).threadId;
           if (!uuid.test(preparedThread || '')) throw new Error('uncertain');
@@ -2043,6 +2052,7 @@ composerForm.addEventListener('submit', async event => {
       }
       if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed');
       if (!response.ok) {
+        if (response.status === 409 && (await response.clone().json().catch(() => null))?.error === 'not-dispatched') { if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed'); draft.message = '助手正在退出，请稍后重试'; return; }
         if (response.status === 504) {
           const result = await response.json().catch(() => null);
           if (draftScopeGeneration !== historyScopeGeneration) throw new Error('scope-changed');
@@ -2120,7 +2130,7 @@ async function responseError(response, fallback) {
   return fallback;
 }
 let displayedHistoryId = null, homeErrorSource = null;
-function clearConversation() { clearToolOutputEntries(); cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
+function clearConversation() { cancelAsyncQuestionWrites(); clearToolOutputEntries(); cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
 function diffStats(changes) {
   let added = 0, removed = 0;
   for (const change of changes || []) {
@@ -2289,8 +2299,75 @@ function assistantContent(text, fileContext) {
   } catch { node.textContent = text; }
   return node;
 }
-function questionReplyParts(turns, turnIndex, itemIndex, text) {
+function questionBodyWithoutLabels(text, questions) {
+  // Only remove standalone copies of the form's labels. Keep explanatory
+  // prose, and keep code blocks even when a line matches an option.
+  const labelText = value => {
+    let result = String(value || '').trim().replace(/^#{1,6}\s+/, '').replace(/^(?:[-+*]|\d+[.)、])\s+/, '').trim();
+    const wrapped = /^(\*\*|__|`)([\s\S]*?)\1$/.exec(result);
+    if (wrapped) result = wrapped[2].trim();
+    return result.replace(/\s+/g, ' ');
+  };
+  const lines = String(text || '').split(/\r?\n/), protectedLines = [], removed = new Set();
+  let fence = null;
+  for (const line of lines) {
+    const marker = /^[ \t]*(`{3,}|~{3,})/.exec(line)?.[1];
+    protectedLines.push(Boolean(fence) || Boolean(marker) || /^(?: {4}|\t)/.test(line));
+    if (marker) { if (!fence) fence = marker; else if (fence[0] === marker[0] && marker.length >= fence.length && line.trim() === marker) fence = null; }
+  }
+  for (let start = 0; start < lines.length; start++) {
+    if (removed.has(start) || protectedLines[start] || !lines[start].trim()) continue;
+    for (const question of questions) {
+      const title = labelText(question.question), spans = new Set([1, String(question.question || '').trim().split(/\r?\n/).length]);
+      let end = null;
+      for (const span of spans) if (start + span <= lines.length && !protectedLines.slice(start, start + span).some(Boolean) && labelText(lines.slice(start, start + span).join('\n')) === title) { end = start + span; break; }
+      if (end === null) continue;
+      const options = question.options || [];
+      let cursor = end, complete = true;
+      for (const option of options) {
+        while (cursor < lines.length && !lines[cursor].trim()) cursor++;
+        if (cursor >= lines.length || protectedLines[cursor] || labelText(lines[cursor]) !== labelText(option)) { complete = false; break; }
+        cursor++;
+      }
+      // A title followed by the complete ordered option list proves a duplicate
+      // form block. Isolated option words elsewhere may be real explanation.
+      const titleOnly = labelText(String(text || '')) === title;
+      const isolatedTitle = !options.length && (!lines[start - 1]?.trim()) && (!lines[end]?.trim());
+      if (!complete && !titleOnly) continue;
+      if (!options.length && !titleOnly && !isolatedTitle) continue;
+      for (let index = start; index < (complete && options.length ? cursor : end); index++) removed.add(index);
+      break;
+    }
+  }
+  return lines.filter((line, index) => !removed.has(index)).join('\n').trim();
+}
+function answeredQuestionIds(turns, questionLookup) {
+  const counts = new Map(), replies = new Set();
+  for (const [t, turn] of turns.entries()) for (const [i, item] of (turn.items || []).entries()) {
+    if (item.type === 'agentMessage') for (const question of item.questions || []) {
+      if (typeof question.id === 'string' && question.id) {
+        counts.set(question.id, (counts.get(question.id) || 0) + 1);
+        questionLookup?.set(question.id, counts.get(question.id) === 1 ? { question, t, i } : null);
+      }
+    }
+    if (item.type === 'userMessage' && Array.isArray(item.questionReplyIds)) for (const id of item.questionReplyIds) if (typeof id === 'string' && id) replies.add(id);
+  }
+  return new Set([...replies].filter(id => counts.get(id) === 1));
+}
+function questionReplyParts(turns, turnIndex, itemIndex, text, replyIds, questionLookup) {
   if (typeof text !== 'string') return null;
+  if (replyIds !== undefined) {
+    if (!Array.isArray(replyIds) || replyIds.length !== 1 || typeof replyIds[0] !== 'string' || !replyIds[0]) return null;
+    const matches = questionLookup ? [questionLookup.get(replyIds[0])].filter(Boolean) : [];
+    if (!questionLookup) for (const [t, turn] of turns.entries()) for (const [i, item] of (turn.items || []).entries()) {
+      if (item?.type === 'agentMessage') for (const question of item.questions || []) if (question.id === replyIds[0]) matches.push({ question, t, i });
+    }
+    if (matches.length !== 1 || matches[0].t > turnIndex || (matches[0].t === turnIndex && matches[0].i >= itemIndex)) return null;
+    const question = matches[0].question.question;
+    if (typeof question !== 'string' || !question || !text.startsWith(`${question}\n`)) return null;
+    const answer = text.slice(question.length + 1);
+    return answer.trim() ? { question, answer } : null;
+  }
   for (let t = turnIndex; t >= 0; t--) {
     const items = turns[t]?.items || [];
     for (let i = t === turnIndex ? itemIndex - 1 : items.length - 1; i >= 0; i--) {
@@ -2419,9 +2496,9 @@ function applySidebarStatuses() {
   applyProjectStatuses();
 }
 function applyProjectStatuses() {
-  for (const { tasks, indicator } of projectStatusGroups.values()) {
+  for (const [key, { tasks, indicator }] of projectStatusGroups) {
     const states = tasks.map(task => liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : sidebarStatusSnapshot?.get(task.id) ?? task.status?.type ?? task.status ?? 'unknown');
-    const state = states.some(taskStatusIsActive) ? 'active' : states.some(value => value !== 'idle') ? 'checking' : 'idle';
+    const state = !groupExpanded.get(key) && states.some(taskStatusIsActive) ? 'active' : 'idle';
     setTaskIndicator(indicator, state);
     indicator.className += ' project-status';
     indicator.title = state === 'active' ? '目录内有任务进行中' : state === 'checking' ? '目录任务状态更新中' : '';
@@ -2582,6 +2659,7 @@ function renderGroup(key, name, tasks, recent = false, initialExpanded = recent)
     contents.hidden = next;
     heading.setAttribute('aria-expanded', String(!next));
     groupExpanded.set(key, !next);
+    applyProjectStatuses();
     scheduleVisibleStatusRefresh();
   });
   const valid = tasks.filter(task => task && uuid.test(task.id));
@@ -3201,19 +3279,22 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         if (draft.completed) { card.append(element('p', '', draft.message)); fragment.append(card); continue; }
         card.append(element('p', '', request.kind === 'command' ? `需要确认命令：${request.command}` : '需要确认文件变更'));
         const actions = element('div', 'approval-actions');
-        for (const [decision, label] of [['accept', '允许'], ['decline', '拒绝']]) {
+        const decisions = Array.isArray(request.decisions) ? request.decisions : ['accept', 'decline'];
+        const labels = { accept: decisions.includes('cancel') ? '允许一次' : '允许', decline: '拒绝', cancel: '拒绝并中断' };
+        for (const decision of decisions.filter(value => Object.hasOwn(labels, value))) {
+          const label = labels[decision];
           const button = element('button', decision === 'accept' ? 'approval-accept' : 'approval-decline', label);
           button.type = 'button';
-          guardRecoveryControl(button, () => draft.pending || draft.completed);
+          guardRecoveryControl(button, () => draft.pending || draft.completed || draft.uncertain);
           button.addEventListener('click', async () => {
-            if (selectedId !== threadId || draft.pending || draft.completed || recoveryBlocksWrite()) return;
+            if (selectedId !== threadId || draft.pending || draft.completed || draft.uncertain || recoveryBlocksWrite()) return;
             draft.pending = true; updateRecoveryGuardedControls();
             try {
               const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/approvals`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: request.id, kind: request.kind, decision }) });
               if (!response.ok) throw new Error();
               draft.completed = true; draft.message = decision === 'accept' ? '已允许，等待任务更新' : '已拒绝，等待任务更新';
               draft.card.replaceChildren(element('p', '', draft.message));
-            } catch { draft.card.append(element('p', 'list-error', '处理失败，请查看任务状态')); }
+            } catch { draft.uncertain = true; draft.card.append(element('p', 'list-error', '结果待确认，请查看电脑上的任务状态')); }
             finally { draft.pending = false; updateRecoveryGuardedControls(); }
           });
           actions.append(button);
@@ -3225,6 +3306,14 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   }
   let hasLiveActivityHeading = false;
   const renderedWorkScopes = new Set();
+  const questionLookup = new Map();
+  const answeredQuestions = answeredQuestionIds(view.turns || [], questionLookup);
+  const asyncItemCounts = new Map(), asyncQuestionCounts = new Map();
+  for (const sourceTurn of controlTurns) for (const sourceItem of sourceTurn.items || []) {
+    if (sourceItem?.type !== 'agentMessage' || !sourceItem.questions?.length) continue;
+    asyncItemCounts.set(sourceItem.id, (asyncItemCounts.get(sourceItem.id) || 0) + 1);
+    for (const question of sourceItem.questions) asyncQuestionCounts.set(question.id, (asyncQuestionCounts.get(question.id) || 0) + 1);
+  }
   const turnKeyCounts = new Map();
   for (const turn of view.turns || []) { const key = turn.viewKey || turn.id; turnKeyCounts.set(key, (turnKeyCounts.get(key) || 0) + 1); }
   for (const [turnIndex, turn] of (view.turns || []).entries()) {
@@ -3233,6 +3322,8 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     if (turn.status === 'interrupted' || turn.status === 'failed') row.append(element('div', 'turn-meta', turn.status === 'interrupted' ? '已中断' : '失败'));
     const turnItems = turn.items || [];
     const controlTurn = live ? controlTurns.find(candidate => (candidate.viewKey || candidate.id) === (turn.viewKey || turn.id)) : null;
+    const controlItems = new Map();
+    for (const candidate of controlTurn?.items || []) controlItems.set(candidate?.id, controlItems.has(candidate?.id) ? null : candidate);
     const liveTurn = Boolean(controlTurn && controlTurn.status === 'inProgress');
     const lastMessageIndex = liveTurn ? turnItems.findLastIndex(item => item?.type === 'agentMessage' || item?.type === 'userMessage') : -1;
     const liveReasoningIndex = liveTurn ? turnItems.findLastIndex((item, index) => index > lastMessageIndex && item?.type === 'reasoning' && Array.isArray(item.summary) && item.summary.some(text => typeof text === 'string' && text.trim())) : -1;
@@ -3444,10 +3535,17 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
       }
       else if (item.type === 'error') content = item.message || '';
       const asyncQuestions = item.type === 'agentMessage' && Array.isArray(item.questions) ? item.questions : [];
-      const pendingAsync = asyncQuestions.length && live && controlTurn === controlTurns.at(-1) && controlTurn?.items?.some(candidate => candidate.id === item.id) && !turnItems.slice(itemIndex + 1).some(entry => entry.type === 'userMessage' || entry.questions?.length);
-      const skipKey = asyncQuestions.length === 1 && item.id ? JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id]) : null;
+      const controlItem = controlItems.get(item.id);
+      const pendingIds = Array.isArray(controlItem?.pendingQuestionIds) ? controlItem.pendingQuestionIds : null;
+      const knownPending = pendingIds !== null && new Set(pendingIds).size === pendingIds.length && asyncQuestions.every(question => typeof question.id === 'string' && question.id && asyncQuestionCounts.get(question.id) === 1) && pendingIds.every(id => typeof id === 'string' && asyncQuestions.filter(question => question.id === id).length === 1);
+      const formQuestions = knownPending ? asyncQuestions.filter(question => pendingIds.includes(question.id)) : asyncQuestions;
+      const remoteSubmitting = Array.isArray(controlItem?.submittingQuestionIds) && formQuestions.some(question => controlItem.submittingQuestionIds.includes(question.id));
+      const pendingAsync = asyncQuestions.length && live && controlItem && asyncItemCounts.get(item.id) === 1 && (remoteSubmitting || (pendingIds !== null ? knownPending && formQuestions.length > 0 : controlTurn === controlTurns.at(-1) && !turnItems.slice(itemIndex + 1).some(entry => entry.type === 'userMessage' || entry.questions?.length)));
+      const skipKey = formQuestions.length === 1 && item.id ? JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id, formQuestions[0].id]) : null;
       if (skipKey && !pendingAsync) skippedAsyncQuestions.delete(skipKey);
-      const duplicateQuestion = pendingAsync && asyncQuestions.length === 1 && content?.trim() === asyncQuestions[0].question.trim();
+      const showAsyncForm = pendingAsync && (remoteSubmitting || !(skipKey && skippedAsyncQuestions.has(skipKey)));
+      const answeredAsync = asyncQuestions.length && ((knownPending && !pendingIds.length) || asyncQuestions.every(question => answeredQuestions.has(question.id)));
+      if (showAsyncForm || answeredAsync) content = questionBodyWithoutLabels(content, asyncQuestions);
       if (!content && !images.length && !videos.length && !asyncQuestions.length) continue;
       if (item.type === 'reasoning') {
         const summaries = (Array.isArray(item.summary) ? item.summary : []).filter(text => typeof text === 'string' && text.trim());
@@ -3465,7 +3563,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
       const section = element('div', item.type === 'userMessage' ? 'item user-message' : item.type === 'agentMessage' ? 'item assistant-message' : 'item');
       if (item.type !== 'userMessage' && item.type !== 'agentMessage' && !(['imageView', 'imageGeneration'].includes(item.type) && (images.length || videos.length))) section.append(element('div', 'item-label', types[item.type]));
       else section.setAttribute('aria-label', item.type === 'userMessage' ? '你' : 'Codex');
-      const questionReply = item.type === 'userMessage' && !images.length ? questionReplyParts(view.turns || [], turnIndex, itemIndex, content) : null;
+      const questionReply = item.type === 'userMessage' && !images.length ? questionReplyParts(view.turns || [], turnIndex, itemIndex, content, item.questionReplyIds, questionLookup) : null;
       if (questionReply) {
         const question = element('button', 'question-reply-question', questionReply.question); question.type = 'button';
         question.setAttribute('aria-expanded', 'false'); question.title = questionReply.question;
@@ -3483,11 +3581,18 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           toggle.textContent = expandedMessages.has(key) ? '收起' : '查看更多';
         });
         section.append(text, toggle);
-      } else if (content && !duplicateQuestion) section.append(item.type === 'agentMessage' ? assistantContent(content, live && turn.id && item.id ? { threadId: selectedId, turnId: turn.id, itemId: item.id } : null) : element('p', item.type === 'commandExecution' ? 'item-code' : 'item-text', content));
-      if (pendingAsync && !(skipKey && skippedAsyncQuestions.has(skipKey))) {
+      } else if (content) section.append(item.type === 'agentMessage' ? assistantContent(content, live && turn.id && item.id ? { threadId: selectedId, turnId: turn.id, itemId: item.id } : null) : element('p', item.type === 'commandExecution' ? 'item-code' : 'item-text', content));
+      if (item.type === 'userMessage' && item.questionReplyPendingIds?.length) section.append(element('p', 'file-change-empty', '结果待确认'));
+      if (showAsyncForm) {
         const threadId = selectedId, key = JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId, 'async', item.id]);
         let draft = inputDrafts.get(key);
         if (!draft) { draft = { answers: Object.create(null), pending: false }; inputDrafts.set(key, draft); }
+        if (knownPending && draft.pending && draft.sentQuestionIds?.every(id => !pendingIds.includes(id))) {
+          draft.pending = false; draft.feedback = ''; draft.outcome = ''; draft.attempt = null;
+        }
+        const scopeGeneration = historyScopeGeneration, deviceId = currentDeviceId;
+        const writeKey = JSON.stringify([deviceId, scopeGeneration, threadId]);
+        if (draft.pending && draft.pendingGeneration !== scopeGeneration) { draft.feedback = '结果暂不确定，请查看电脑上的任务状态'; draft.outcome = '结果待确认'; }
         const card = element('div', 'question-card');
         const heading = element('div', 'question-card-heading');
         heading.append(element('div', 'question-card-title', '问题'));
@@ -3495,62 +3600,78 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         collapse.type = 'button'; collapse.setAttribute('aria-expanded', String(!draft.collapsed));
         heading.append(collapse); card.append(heading);
         const form = element('form', 'user-input-form');
+        const isCurrentScope = () => selectedId === threadId && currentDeviceId === deviceId && historyScopeGeneration === scopeGeneration && inputDrafts.get(key) === draft && connected;
+        const isCurrentForm = () => isCurrentScope() && draft.controls?.form === form;
         form.hidden = Boolean(draft.collapsed);
         collapse.addEventListener('click', () => {
+          if (!isCurrentForm()) return;
           draft.collapsed = !draft.collapsed;
           form.hidden = draft.collapsed;
           collapse.textContent = draft.collapsed ? '展开问题' : '收起问题';
           collapse.setAttribute('aria-expanded', String(!draft.collapsed));
         });
-        for (const question of asyncQuestions) {
+        for (const question of formQuestions) {
           const group = element('fieldset', 'user-input-question'); group.append(element('legend', '', question.question));
+          const compact = question.options.length >= 2 && question.options.length <= 4 && question.options.every(option => option.length <= 12);
+          const choices = element('div', `user-input-choices${compact ? ' compact' : ''}`);
           for (const option of question.options) {
             const label = element('label', 'user-input-option'); const radio = element('input'); radio.type = 'radio'; radio.name = question.id; radio.value = option;
             radio.checked = draft.answers[question.id] === option;
             radio.addEventListener('change', () => {
+              if (!isCurrentForm()) return;
               draft.answers[question.id] = option;
               const other = group.querySelectorAll('.user-input-text')[0];
               if (other) other.value = '';
             });
-            label.append(radio, element('span', '', option)); group.append(label);
+            label.append(radio, element('span', '', option)); choices.append(label);
           }
+          if (question.options.length) group.append(choices);
           const input = element('input', 'user-input-text'); input.type = 'text'; input.placeholder = question.options.length ? '其他回答' : '输入回答';
           input.dataset.inputDraftKey = key; input.dataset.inputQuestionId = question.id;
           input.value = question.options.includes(draft.answers[question.id]) ? '' : (draft.answers[question.id] || '');
-          input.addEventListener('input', () => { draft.answers[question.id] = input.value; for (const radio of group.querySelectorAll('input[type=radio]')) radio.checked = false; });
+          input.addEventListener('input', () => { if (!isCurrentForm()) return; draft.answers[question.id] = input.value; for (const radio of group.querySelectorAll('input[type=radio]')) radio.checked = false; });
           group.append(input); form.append(group);
         }
-        const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending);
-        const feedback = element('p', 'list-error', draft.feedback || '');
+        const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : remoteSubmitting ? '结果待确认' : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending || remoteSubmitting || asyncQuestionWrites.has(writeKey) || !isCurrentScope());
+        const feedback = element('p', 'list-error', draft.feedback || (remoteSubmitting ? '回答结果待确认，请查看电脑上的任务状态' : ''));
         const actions = element('div', 'question-actions');
         if (skipKey) {
-          const skip = element('button', 'question-skip', '跳过'); skip.type = 'button'; skip.disabled = draft.pending;
+          const skip = element('button', 'question-skip', '跳过'); skip.type = 'button'; skip.disabled = draft.pending || remoteSubmitting;
           skip.addEventListener('click', () => {
-            if (draft.pending || selectedId !== threadId || skipKey !== JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id])) return;
+            if (draft.pending || remoteSubmitting || !isCurrentForm() || skipKey !== JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id, formQuestions[0].id])) return;
             if (skippedAsyncQuestions.size >= 1024) skippedAsyncQuestions.delete(skippedAsyncQuestions.values().next().value);
-            skippedAsyncQuestions.add(skipKey); delete draft.answers[asyncQuestions[0].id]; card.remove();
+            skippedAsyncQuestions.add(skipKey); delete draft.answers[formQuestions[0].id]; card.remove();
             if (!questionPanel.querySelector('.question-card, .pending-request')) questionPanel.hidden = true;
           });
           actions.append(skip);
         }
         actions.append(submit); form.append(actions, feedback);
-        draft.controls = { submit, status: feedback };
+        draft.controls = { submit, status: feedback, form };
         form.addEventListener('submit', async event => {
           event.preventDefault();
-          if (draft.pending || selectedId !== threadId || recoveryBlocksWrite()) return;
-          if (!asyncQuestions.every(q => draft.answers[q.id]?.trim())) { feedback.textContent = '请回答所有问题'; return; }
-          draft.pending = true; submit.disabled = true;
+          if (draft.pending || remoteSubmitting || asyncQuestionWrites.has(writeKey) || !isCurrentForm() || recoveryBlocksWrite()) return;
+          if (!formQuestions.every(q => draft.answers[q.id]?.trim())) { feedback.textContent = '请回答所有问题'; return; }
+          const attempt = {}; draft.attempt = attempt;
+          draft.pending = true; draft.pendingGeneration = scopeGeneration; draft.sentQuestionIds = formQuestions.map(question => question.id); submit.disabled = true;
+          const write = { attempt, draft, controller: new AbortController() }; asyncQuestionWrites.set(writeKey, write);
+          updateRecoveryGuardedControls();
           try {
-            const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/async-question`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: item.id, answers: draft.answers }) });
+            const answers = Object.fromEntries(formQuestions.map(question => [question.id, draft.answers[question.id]]));
+            const response = await scopedFetch(`/api/threads/${encodeURIComponent(threadId)}/async-question`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: write.controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: item.id, answers }) });
+            if (write.controller.signal.aborted || !isCurrentScope() || draft.attempt !== attempt) return;
             if (!response.ok) throw new Error();
             draft.feedback = '已提交，等待任务更新'; draft.outcome = '已提交';
-          } catch { draft.feedback = '结果暂不确定，请查看电脑上的任务状态'; draft.outcome = '结果待确认'; }
+          } catch { if (write.controller.signal.aborted || !isCurrentScope() || draft.attempt !== attempt) return; draft.feedback = '结果暂不确定，请查看电脑上的任务状态'; draft.outcome = '结果待确认'; }
+          finally {
+            if (asyncQuestionWrites.get(writeKey) === write) asyncQuestionWrites.delete(writeKey);
+            if (isCurrentScope()) updateRecoveryGuardedControls();
+          }
           draft.controls.status.textContent = draft.feedback;
           draft.controls.submit.textContent = draft.outcome;
         });
         card.append(form); questionFragment.append(card); pendingQuestionCount++;
       }
-      if (pendingAsync && (!content || duplicateQuestion) && !images.length && !videos.length) continue;
+      if (!content && !images.length && !videos.length) continue;
       if (item.type === 'userMessage' && images.length) {
         const group = element('div', 'user-message-group');
         const imageRow = element('div', 'user-message-images');
@@ -3702,7 +3823,7 @@ function queueDeltaRender(view) {
 }
 function controlSignature(view) {
   return JSON.stringify([view.runtimeStatus, view.collaborationMode, view.model, view.reasoningEffort, view.goal, view.requests,
-    (view.turns || []).map(turn => [turn.id, turn.status, (turn.items || []).filter(item => item?.questions?.length || item?.type === 'userMessage').map(item => [item.id, item.type, item.questions])])]);
+    (view.turns || []).map(turn => [turn.id, turn.status, (turn.items || []).filter(item => item?.questions?.length || item?.type === 'userMessage').map(item => [item.id, item.type, item.questions, item.pendingQuestionIds, item.questionReplyIds, item.submittingQuestionIds, item.questionReplyPendingIds])])]);
 }
 const recentViews = new Map();
 let recentViewBytes = 0;

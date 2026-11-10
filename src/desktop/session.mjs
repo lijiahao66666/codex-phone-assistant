@@ -5,7 +5,7 @@ import { isAbsolute } from 'node:path';
 import { matchApproval } from './approval-guard.mjs';
 import { matchUserInput } from './user-input-guard.mjs';
 import { desktopView } from './view.mjs';
-import { formatQuestionReply } from './async-question-guard.mjs';
+import { formatQuestionReply, pendingAsyncQuestions } from './async-question-guard.mjs';
 import { trace } from './diagnostics.mjs';
 import { desktopIpcPool } from './ipc-pool.mjs';
 
@@ -115,10 +115,9 @@ export class DesktopSession extends EventEmitter {
   async replyAsyncQuestions(itemId, answers) {
     if (this.status !== 'ready' || !this.client || this.value?.id !== this.conversationId) throw Object.assign(new Error('Session unavailable'), { code: 'unavailable' });
     const view = desktopView(this.value);
-    const turn = view.turns.at(-1);
-    const index = turn?.items.findIndex(item => item.id === itemId && item.type === 'agentMessage' && item.questions?.length);
-    if (index == null || index < 0 || turn.items.slice(index + 1).some(item => item.type === 'userMessage' || item.questions?.length)) throw Object.assign(new Error('Question unavailable'), { code: 'unavailable' });
-    const text = formatQuestionReply(turn.items[index].questions, answers);
+    const questions = pendingAsyncQuestions(view, itemId);
+    if (!questions) throw Object.assign(new Error('Question unavailable'), { code: 'unavailable' });
+    const text = formatQuestionReply(questions, answers);
     if (!text) throw Object.assign(new Error('Invalid answers'), { code: 'unavailable' });
     return this.sendText(text);
   }

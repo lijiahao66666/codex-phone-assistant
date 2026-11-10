@@ -1,6 +1,7 @@
 import Cocoa
 import WebKit
 import Darwin
+import Sparkle
 
 private final class RuntimeStderrTail {
     private let handle: FileHandle
@@ -55,6 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var statusItem: NSStatusItem!
     private var terminationRequested = false
     private var terminationTimeout: DispatchWorkItem?
+    private var terminationWaitAlert: NSAlert?
+    private var updaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 620),
@@ -81,11 +84,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         }
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "打开 codex手机助手", action: #selector(showWindow), keyEquivalent: ""))
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        let versionItem = NSMenuItem(title: "版本 \(version) (\(build))", action: nil, keyEquivalent: "")
+        menu.addItem(versionItem)
+        configureUpdater(in: menu)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出 codex手机助手", action: #selector(quitApp), keyEquivalent: ""))
-        for item in menu.items { item.target = self }
+        for item in menu.items where item.target == nil && item.action != nil { item.target = self }
         statusItem.menu = menu
         startRuntime()
+    }
+
+    private func configureUpdater(in menu: NSMenu) {
+        guard UpdateConfiguration.isValid(Bundle.main.infoDictionary ?? [:]) else {
+            menu.addItem(NSMenuItem(title: "检查更新（未配置）", action: nil, keyEquivalent: ""))
+            return
+        }
+        let controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        updaterController = controller
+        let check = NSMenuItem(title: "检查更新…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        check.target = controller
+        menu.addItem(check)
+        let automatic = NSMenuItem(title: "自动检查更新", action: #selector(toggleAutomaticUpdateChecks(_:)), keyEquivalent: "")
+        automatic.target = self
+        automatic.state = controller.updater.automaticallyChecksForUpdates ? .on : .off
+        menu.addItem(automatic)
+        // Sparkle requests normal NSApplication termination and waits for this
+        // application's actual exit before replacing its bundle. Do not bypass
+        // applicationShouldTerminate or the runtime's STOP_BLOCKED handshake.
+        // Silent automatic installation is disabled in the sealed Info.plist.
+    }
+
+    @objc private func toggleAutomaticUpdateChecks(_ sender: NSMenuItem) {
+        guard let updater = updaterController?.updater else { return }
+        updater.automaticallyChecksForUpdates.toggle()
+        sender.state = updater.automaticallyChecksForUpdates ? .on : .off
     }
 
     @objc private func showWindow() {
@@ -147,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.terminationTimeout?.cancel()
+                self.dismissTerminationWaitAlert()
                 if self.terminationRequested { NSApp.reply(toApplicationShouldTerminate: true) }
                 else {
                     self.recordRuntimeExit(child, at: exitedAt, stderrTail: tail)
@@ -220,6 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         terminationRequested = false
         terminationTimeout?.cancel()
         terminationTimeout = nil
+        dismissTerminationWaitAlert()
         NSApp.reply(toApplicationShouldTerminate: false)
         showWindow()
         let alert = NSAlert()
@@ -227,6 +263,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         alert.informativeText = message
         alert.addButton(withTitle: "知道了")
         alert.beginSheetModal(for: window)
+    }
+
+    private func dismissTerminationWaitAlert() {
+        if let alert = terminationWaitAlert { window.endSheet(alert.window); terminationWaitAlert = nil }
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -244,8 +284,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         guard let child = process, child.isRunning else { return .terminateNow }
         if terminationRequested { return .terminateLater }
         terminationRequested = true
+        // A sent SIGTERM cannot be revoked while runtime shutdown is in flight.
+        // Wait for STOP_BLOCKED or actual exit instead of falsely cancelling.
         let timeout = DispatchWorkItem { [weak self] in
-            self?.cancelTermination(message: "助手尚未完成退出，请稍后再试。")
+            guard let self = self, self.terminationRequested else { return }
+            let alert = NSAlert()
+            alert.messageText = "正在等待助手退出"
+            alert.informativeText = "助手仍在完成退出，请稍候。"
+            self.terminationWaitAlert = alert
+            alert.beginSheetModal(for: self.window) { [weak self] _ in self?.terminationWaitAlert = nil }
         }
         terminationTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeout)
@@ -257,8 +304,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+@main
+private enum CodexHubMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.regular)
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}

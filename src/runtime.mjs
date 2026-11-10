@@ -68,9 +68,11 @@ async function stop() {
   stopChecking = true;
   try { await startPromise; }
   catch (error) { stopChecking = false; throw error; }
+  try { await connector?.beginShutdown(); }
+  catch (error) { stopChecking = false; if (error.code === 'tasks-active') { console.log('STOP_BLOCKED'); return; } throw error; }
   if (ownerRuntime) {
     try { await ownerRuntime.close(); }
-    catch (error) { stopChecking = false; if (error.code === 'tasks-active') { console.log('STOP_BLOCKED'); return; } throw error; }
+    catch (error) { connector?.cancelShutdown(); stopChecking = false; if (error.code === 'tasks-active') { console.log('STOP_BLOCKED'); return; } throw error; }
   }
   stopping = true;
   await panel.close();

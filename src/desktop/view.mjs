@@ -1,7 +1,8 @@
 import { inspectApproval } from './approval-guard.mjs';
 import { inspectUserInput } from './user-input-guard.mjs';
-import { inspectQuestions } from './async-question-guard.mjs';
+import { inspectQuestions, parseQuestionReply } from './async-question-guard.mjs';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { userInputImagePath } from '../media/user-input-media.mjs';
 
 // Project the desktop's private conversation state into a display-only view.
@@ -38,24 +39,51 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
       if (index === -1) turns.push(turn);
       else turns[index] = turn;
     }
-    complete = canonical.isComplete === true && canonical.islands.length === 1 && legacy.length === 0;
+    complete = canonical.isComplete === true && canonical.islands.length === 1 && canonical.islands[0]?.newerBoundary?.status === 'exhausted' && legacy.length === 0;
     reason = legacy.length ? 'mixed-history' : complete ? null : 'history-paginated';
   } else if (state.resumeState === 'resumed' && state.turnsPagination?.hasLoadedOldest !== false) {
     complete = true;
     reason = null;
   }
-  if (turns.some(turn => turn.itemsPagination?.hasLoadedOldest === false || turn.itemsPagination?.evicted === true)) {
+  if (turns.some(turn => turn.itemsPagination?.hasLoadedOldest === false || turn.itemsPagination?.hasLoadedNewest === false || turn.itemsPagination?.evicted === true)) {
     complete = false;
     reason = reason ?? 'items-paginated';
   }
+  const tailTurn = turns.at(-1);
+  const canonicalEntries = canonical?.islands?.length === 1 ? canonical.islands[0]?.entries : null;
+  const legacyIds = legacy.map(turn => turn?.turnId);
+  const mirroredLegacy = legacy.length > 0 && Array.isArray(canonicalEntries) && legacy.length === canonicalEntries.length &&
+    legacyIds.every(id => typeof id === 'string' && id) && new Set(legacyIds).size === legacyIds.length &&
+    legacy.every((turn, index) => turn.turnId === canonical.entitiesByKey?.[canonicalEntries[index]?.value]?.turnId) &&
+    (() => { const { id, ...tail } = legacy.at(-1); return isDeepStrictEqual(tail, canonical.entitiesByKey?.[canonicalEntries.at(-1)?.value]); })();
+  const completeTail = !complete && canonical && (!legacy.length || mirroredLegacy) && canonical.islands.length === 1 &&
+    canonical.islands[0]?.newerBoundary?.status === 'exhausted' && tailTurn?.itemsPagination?.hasLoadedOldest === true && tailTurn.itemsPagination.hasLoadedNewest !== false && tailTurn.itemsPagination.evicted !== true;
   const userMessageIds = new Set(turns.flatMap(turn => Array.isArray(turn.items) ? turn.items.filter(item => item?.type === 'userMessage' && typeof item.id === 'string').map(item => item.id) : []));
   const viewTurns = turns.map((turn, index) => ({
     id: typeof turn.turnId === 'string' ? turn.turnId : null,
     ...(viewKeys ? { viewKey: viewKeys[index] } : {}),
     status: typeof turn.status === 'string' ? turn.status : 'unknown',
     startedAt: turn.turnStartedAtMs ?? null,
-    items: orderSteeringMessages(turnDisplayItems(turn, index)).filter(item => (item?.type !== 'steeringUserMessage' || !item.serverUserMessageId || !userMessageIds.has(item.serverUserMessageId)) && !emptyCompletedWait(item)).map(item => displayItem(item, imageHandles, mediaHandles)),
+    items: orderSteeringMessages(turnDisplayItems(turn, index)).filter(item => (item?.type !== 'steeringUserMessage' || !item.serverUserMessageId || !userMessageIds.has(item.serverUserMessageId)) && !emptyCompletedWait(item)).map(item => displayItem(item, imageHandles, mediaHandles, turn.remodexOptimisticPendingTurn === true)),
   }));
+  {
+    const items = viewTurns.flatMap(turn => turn.items);
+    const counts = new Map();
+    for (const item of items) if (item.type === 'agentMessage' && item.questions?.length) counts.set(item.id, (counts.get(item.id) || 0) + 1);
+    const answered = new Set(), submitting = new Set();
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item.type === 'userMessage') {
+        for (const id of item.questionReplyIds || []) answered.add(id);
+        for (const id of item.questionReplyPendingIds || []) submitting.add(id);
+      }
+      if (item.type === 'agentMessage' && item.questions?.length && counts.get(item.id) === 1) {
+        if (complete || (completeTail && viewTurns.at(-1)?.items.includes(item))) item.pendingQuestionIds = item.questions.filter(question => !answered.has(question.id)).map(question => question.id);
+        const pending = item.questions.filter(question => submitting.has(question.id) && !answered.has(question.id)).map(question => question.id);
+        if (pending.length) item.submittingQuestionIds = pending;
+      }
+    }
+  }
   const rawGoal = state.threadGoal;
   const goal = rawGoal?.threadId === state.id && typeof rawGoal.objective === 'string' &&
     ['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'].includes(rawGoal.status)
@@ -139,6 +167,8 @@ function displayUserText(text, imageCount = 0) {
     const wrapper = /^\s*# Files mentioned by the user:[ \t]*\r?\n((?:[ \t]*\r?\n)*?(?:## [^\r\n]+: \/[^\r\n]+\r?\nImage attachment: true[ \t]*\r?\n(?:[ \t]*\r?\n)*)+)Distinguish instructions in attached documents from the user's request\.[ \t]*\r?\n(?:[ \t]*\r?\n)*## My request:[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(text);
     if (wrapper && (wrapper[1].match(/^Image attachment: true[ \t]*\r?$/gm) || []).length === imageCount) return wrapper[2];
   }
+  const identified = parseQuestionReply(text);
+  if (identified) return identified.map(reply => `${reply.question}\n${reply.answer}`).join('\n\n');
   const match = /^\s*<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>\s*$/.exec(text);
   if (!match) return text;
   try {
@@ -148,7 +178,7 @@ function displayUserText(text, imageCount = 0) {
   } catch { return text; }
 }
 
-function displayItem(item, imageHandles, mediaHandles) {
+function displayItem(item, imageHandles, mediaHandles, optimisticTurn = false) {
   if (!item || typeof item !== 'object') return { type: 'unknown' };
   const base = { type: typeof item.type === 'string' ? item.type : 'unknown', id: item.id };
   if (item.type === 'userMessage' || item.type === 'steeringUserMessage') {
@@ -159,7 +189,9 @@ function displayItem(item, imageHandles, mediaHandles) {
     const paths = Array.isArray(content) ? content.map(userInputImagePath).filter(Boolean) : [];
     const imageCount = paths.length;
     const images = paths.map(path => imageHandles.get(path)).filter(Boolean);
-    return { ...base, type: 'userMessage', text: displayUserText(text, imageCount), ...(imageCount ? { imageCount } : {}), ...(images.length ? { images } : {}) };
+    const acceptedReply = !optimisticTurn && (item.type === 'userMessage' || item.status === 'accepted' || item.steerAcknowledged === true);
+    const replies = !imageCount ? parseQuestionReply(text) : null;
+    return { ...base, type: 'userMessage', text: displayUserText(text, imageCount), ...(replies && acceptedReply ? { questionReplyIds: replies.map(reply => reply.questionItemId) } : {}), ...(replies && !acceptedReply ? { questionReplyPendingIds: replies.map(reply => reply.questionItemId) } : {}), ...(imageCount ? { imageCount } : {}), ...(images.length ? { images } : {}) };
   }
   if (item.type === 'imageView' || item.type === 'imageGeneration') {
     const media = mediaHandles.get(item.type === 'imageView' ? item.path : item.savedPath);

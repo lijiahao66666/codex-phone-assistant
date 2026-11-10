@@ -63,6 +63,10 @@ export class ChunkUploads {
     if (!e || e.hostId !== scope.hostId || e.deviceId !== scope.deviceId || e.threadId !== scope.threadId) throw new Error('Upload unavailable');
     return e;
   }
+  has(id, scope) {
+    const entry = this.#entries.get(id);
+    return Boolean(entry && entry.hostId === scope.hostId && entry.deviceId === scope.deviceId && entry.threadId === scope.threadId);
+  }
   #cancel(e, error = new Error('Upload cancelled')) {
     if (!this.#entries.delete(e.id)) return;
     e.cancelled = true;
