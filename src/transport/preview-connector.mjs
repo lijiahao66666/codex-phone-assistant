@@ -761,8 +761,8 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (recoveryStatus) {
         const answer = beginRead(msg);
         try {
-          if (!ownerRouter || revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === recoveryStatus[1] && s.uploadDeviceId === msg.deviceId)) return answer(false);
-          answer(true, { locked: ownerRouter.isRecoveryLocked(recoveryStatus[1]) });
+          if (revoked.has(msg.deviceId) || ![...streams.values()].some(s => s.conversationId === recoveryStatus[1] && s.uploadDeviceId === msg.deviceId)) return answer(false);
+          answer(true, { locked: recoveryLocked(recoveryStatus[1]) });
         } catch { answer(false); }
         return;
       }

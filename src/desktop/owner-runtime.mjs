@@ -75,8 +75,9 @@ async function releaseStaleAppServer(pidFile) {
 
 export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '.codex'), dataDir = join(homedir(), '.config/codex-hub'), ownerOptions = {}, projects = () => localProjects(codexHome) }) {
   const bundled = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
-  const socketPath = ownerOptions.socketPath ?? join(codexHome, 'ipc/ipc.sock');
-  const sharedClient = () => socketPath === join(homedir(), '.codex', 'ipc/ipc.sock')
+  const defaultSocketPath = process.platform === 'win32' ? '\\\\.\\pipe\\codex-ipc' : join(codexHome, 'ipc/ipc.sock');
+  const socketPath = ownerOptions.socketPath ?? defaultSocketPath;
+  const sharedClient = () => socketPath === defaultSocketPath
     ? desktopIpcPool.acquire() : new DesktopIpc({ socketPath, timeout: 1500 });
   const pidFile = join(dataDir, 'app-server.pid');
   await releaseStaleAppServer(pidFile);
