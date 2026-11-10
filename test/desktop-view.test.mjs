@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { desktopView } from '../src/desktop/view.mjs';
 import { referencedMediaPaths } from '../src/media/media-resolver.mjs';
 
@@ -57,17 +59,20 @@ test('native initial IDs preserve recorded identity while invalid or colliding i
 });
 
 test('initial image prompts use scoped handles and authorize only structured local image references', () => {
+  const root = process.platform === 'win32' ? 'C:\\private' : '/private';
+  const first = join(root, 'first.png');
+  const second = join(root, 'second photo.png');
   const state = { id: 'thread', turns: [{ turnId: 'turn', params: { input: [
     { type: 'text', text: 'look at /private/unmentioned.png' },
-    { type: 'localImage', path: '/private/first.png' },
-    { type: 'image', url: 'file:///private/second%20photo.png' },
+    { type: 'localImage', path: first },
+    { type: 'image', url: pathToFileURL(second).href },
     { type: 'image', url: 'https://example.com/private/remote.png' },
     { type: 'image', url: 'file://remote-host/private/remote.png' },
   ] }, items: [] }] };
-  const view = desktopView(state, { imageHandles: new Map([['/private/first.png', 'first-handle'], ['/private/second photo.png', 'second-handle']]) });
+  const view = desktopView(state, { imageHandles: new Map([[first, 'first-handle'], [second, 'second-handle']]) });
   assert.deepEqual(view.turns[0].items[0].images, ['first-handle', 'second-handle']);
   assert.equal(view.turns[0].items[0].imageCount, 2);
-  assert.deepEqual([...referencedMediaPaths(state)], ['/private/first.png', '/private/second photo.png']);
+  assert.deepEqual([...referencedMediaPaths(state)], [first, second]);
   assert.doesNotMatch(JSON.stringify(view), /second%20|second photo|https:|file:/);
   const canonical = { id: 'thread', turnHistory: { kind: 'canonical', history: { islands: [{ entries: [{ value: 'key' }] }], entitiesByKey: { key: state.turns[0] } } } };
   assert.deepEqual([...referencedMediaPaths(canonical)], [...referencedMediaPaths(state)]);

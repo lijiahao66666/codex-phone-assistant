@@ -4,6 +4,8 @@ build/
 dist/
 windows/Shell/bin/
 windows/Shell/obj/
+windows/UpdateTools/bin/
+windows/UpdateTools/obj/
 *.app/
 *.dmg
 *.exe

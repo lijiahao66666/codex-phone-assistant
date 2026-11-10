@@ -25,7 +25,7 @@
 - [手机助手下载页](https://codex.air-inc.top/download/)
 - [GitHub Releases](https://github.com/lijiahao66666/codex-phone-assistant/releases)
 
-本次验收针对 macOS 助手与 H5；Windows 的功能和安装包以其对应版本说明为准。
+stable48 的 Mac 与 H5 已完成专项实机/隔离验收；Windows 0.3.49 已完成构建、更新器组件测试与 Windows 回归，尚缺第二台真实电脑的公网跨版本升级验收。
 
 安装步骤：
 
@@ -41,7 +41,7 @@
 | 查看历史、工具活动、文件变更和子智能体摘要 | 在手机上选择目标模式 |
 | 发送消息、补充输入、停止任务，确认恢复历史聊天（macOS） | 选择插件、Apps、MCP 或连接器 |
 | 切换 `Plan`/`Default` 协作模式 | 选择 cwd、分支、worktree 或执行环境 |
-| 回复问题和处理已支持的命令/文件审批 | Windows 默认启用图片/文件上传 |
+| 回复问题和处理已支持的命令/文件审批 | Windows 默认关闭图片/文件上传；文字消息不受影响 |
 
 目标信息仍是只读展示：手机端可以看到已有目标的状态、内容和计时，但不能创建、修改、暂停、恢复或清除目标。
 
@@ -53,7 +53,8 @@
 
 - Windows 10/11 宿主、便携包、ZIP 和 NSIS 安装器
 - macOS 原生窗口和 `.app` 构建脚本
-- macOS 菜单栏检查更新与签名更新包验证（候选已实现，正式更新源待发布；首次需手动安装支持更新的版本）
+- macOS 菜单栏检查更新与签名更新包验证（首次需手动安装支持更新的版本）
+- Windows 托盘检查更新、签名清单、SHA-256 校验、静默安装与重启
 - WebView2 与 WKWebView 本地面板
 - 关闭到托盘、单实例运行和再次启动唤回窗口
 - 配对凭据私有目录、POSIX 权限或 Windows 用户 ACL
@@ -88,7 +89,7 @@ npm test
 
 ## Windows 构建
 
-Windows 构建需要 `.NET 8 SDK`。安装器打包还需要 NSIS；构建脚本会优先使用项目内 `.tools/dotnet` 和 `.tools/nsis`，也可使用系统安装版本。
+Windows 构建需要 `.NET 8 SDK`。安装器打包还需要 NSIS；构建脚本会优先使用项目内 `.tools/dotnet` 和 `.tools/nsis`，也可使用系统安装版本。发布构建还需要 Windows 更新签名私钥，格式和发布顺序见 [Windows 自动更新](windows/windows-updates.md)。
 
 ```powershell
 npm run build:windows

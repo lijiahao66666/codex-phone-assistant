@@ -3,6 +3,17 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
+async function readWindowsProcessStartIdentity(pid) {
+  const script = [
+    '$ErrorActionPreference = "Stop"',
+    `$process = Get-Process -Id ${pid}`,
+    '$start = $process.StartTime.ToUniversalTime().ToFileTimeUtc()',
+    '[Console]::Out.Write(("{0}|{1}" -f $start, $process.ProcessName))',
+  ].join('; ');
+  const { stdout } = await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { timeout: 4000, maxBuffer: 8192, windowsHide: true });
+  return stdout.trim();
+}
+
 // PID alone is insufficient: the operating system may reuse it after a crash.
 // A failed inspection is unknown; only ESRCH establishes that it is absent.
 export async function readProcessStartIdentity(pid) {
@@ -10,8 +21,9 @@ export async function readProcessStartIdentity(pid) {
   try { process.kill(pid, 0); }
   catch (error) { if (error.code === 'ESRCH') return null; throw error; }
   try {
-    const { stdout } = await run('/bin/ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'comm='], { timeout: 2000, maxBuffer: 8192 });
-    const identity = stdout.trim();
+    const identity = process.platform === 'win32'
+      ? await readWindowsProcessStartIdentity(pid)
+      : (await run('/bin/ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'comm='], { timeout: 2000, maxBuffer: 8192 })).stdout.trim();
     if (identity) return identity;
   } catch (error) {
     try { process.kill(pid, 0); }
