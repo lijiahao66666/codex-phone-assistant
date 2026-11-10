@@ -24,6 +24,8 @@ Windows 更新链独立于 macOS Sparkle。修改 Windows 版本、签名或发�
 
 清单和签名必须是同一批字节。上传后不能重新格式化清单，否则签名会失效。
 
+GitHub Release 中的 Windows 文件只作为手动下载镜像；由于仓库当前为私有，客户端不能把 GitHub Release 直接当作匿名更新源。生产更新仍使用上述公开 HTTPS 路径。
+
 ## 发布版本
 
 先更新 [version.json](version.json)，至少修改 `version` 和 `build`。构建号必须严格递增；版本说明 URL、更新源和安装包 URL 也在同一文件中维护。不要复用旧构建号发布不同字节。

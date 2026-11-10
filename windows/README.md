@@ -8,7 +8,13 @@ Windows 客户端是 WinForms + WebView2 宿主，负责启动随包 Node 后台
 
 当前 Windows 构建为 `0.3.49`（stable48，构建号 49）。这是首个包含应用内更新能力的 Windows 版本，首次使用必须手动安装；后续版本会在托盘菜单中提示更新。
 
-当前公开下载页中的 Windows 文件可能仍是旧版。以本页和发布记录标注的版本、SHA-256 为准，不要混用旧安装器和新版运行目录。
+## 下载
+
+- [Windows 安装包](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/codex-phone-assistant-windows-x64-setup.exe)
+- [Windows 便携版 ZIP](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/codex-phone-assistant-windows-x64.zip)
+- [SHA-256 校验值](https://github.com/lijiahao66666/codex-phone-assistant/releases/download/stable48/SHA256SUMS-windows.txt)
+
+仓库当前为私有，GitHub 下载需要已授权账号。公网下载页的 Windows 固定更新源仍在部署中；在 `https://codex.air-inc.top/download/windows/latest.json` 上线前，应用内检查更新会提示无法连接。不要混用旧安装器和新版运行目录。
 
 ## 系统要求
 

@@ -23,7 +23,7 @@
 
 ## 仍需实机验证
 
-尚未在第二台真实 Windows 电脑上完成“旧安装版通过生产 HTTPS 更新到新安装版”的完整升级。发布前仍需上传并核对：
+Windows 安装包、ZIP、校验文件和签名清单已附加到 GitHub `stable48` Release。尚未在第二台真实 Windows 电脑上完成“旧安装版通过生产 HTTPS 更新到新安装版”的完整升级。公网更新源仍需上传并核对：
 
 - `latest.json`
 - `latest.json.sig`
@@ -31,4 +31,4 @@
 - `codex-phone-assistant-windows-x64.zip`
 - `SHA256SUMS.txt`
 
-当前安装器和主程序没有 Authenticode 商业证书签名；更新清单签名和 SHA-256 用于验证更新内容，但不能替代 Windows SmartScreen 的发布者信誉。首次安装支持更新的版本必须手动完成。
+当前安装器和主程序没有 Authenticode 商业证书签名；更新清单签名和 SHA-256 用于验证更新内容，但不能替代 Windows SmartScreen 的发布者信誉。首次安装支持更新的版本必须手动完成。GitHub 仓库为私有，Release 附件是手动下载镜像，不能作为客户端匿名更新源。
