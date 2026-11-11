@@ -12,6 +12,7 @@ import { CreationJournal } from '../src/desktop/creation-journal.mjs';
 import { readProcessStartIdentity } from '../src/desktop/recovery-execution.mjs';
 
 const writerSource = `const readline=require('node:readline');process.on('SIGTERM',()=>{});readline.createInterface({input:process.stdin}).on('line',line=>{const value=JSON.parse(line);if(value.method==='initialize')process.stdout.write(JSON.stringify({id:value.id,result:{}})+'\\n');});`;
+const windowsSignalSkip = process.platform === 'win32' && 'Windows terminates the process directly instead of running Node SIGTERM handlers';
 const optionsFor = (directory, hostId) => ({ hostId, codexHome: directory, dataDir: directory, projects: async () => [],
   ownerOptions: { binary: process.execPath, args: ['-e', writerSource], cwd: directory, timeout: 5000, socketPath: join(directory, 'isolated.sock') } });
 
@@ -36,7 +37,8 @@ test('explicit force close confirms its busy writer exits and preserves unrelate
     const tables = ['message_writes', 'model_writes', 'raw_request_experiment'];
     const before = tables.map(table => journalBefore.db.prepare(`SELECT * FROM ${table}`).all());
     await Promise.all([runtime.close({ force: true }), runtime.close({ force: true })]);
-    assert.equal(writer.signalCode, 'SIGKILL', 'a writer ignoring SIGTERM is actually reaped');
+    if (process.platform === 'win32') assert.ok(['SIGTERM', 'SIGKILL'].includes(writer.signalCode), 'the busy writer is actually reaped');
+    else assert.equal(writer.signalCode, 'SIGKILL', 'a writer ignoring SIGTERM is actually reaped');
     assert.equal(await readProcessStartIdentity(writer.pid), null);
     assert.notEqual(await readProcessStartIdentity(native.pid), null, 'native Desktop or any other process is never terminated');
     journal = new CreationJournal(join(directory, 'creations.sqlite'));
@@ -79,7 +81,7 @@ test('force close does not wait for a stalled route and retains its journal unti
   }
 });
 
-test('the real helper signal handler exits despite busy state and reaps its app-server', async () => {
+test('the real helper signal handler exits despite busy state and reaps its app-server', { skip: windowsSignalSkip }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'helper-signal-exit-')), host = randomUUID();
   const runtimeSource = await readFile(new URL('../src/runtime.mjs', import.meta.url), 'utf8');
   const shutdownSource = runtimeSource.slice(runtimeSource.indexOf('async function stop()'));
@@ -119,7 +121,7 @@ test('the real helper signal handler exits despite busy state and reaps its app-
   }
 });
 
-test('the helper exit deadline kills its exact child when enrollment startup is stuck initializing', { timeout: 10000 }, async () => {
+test('the helper exit deadline kills its exact child when enrollment startup is stuck initializing', { timeout: 10000, skip: windowsSignalSkip }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'helper-startup-exit-')), host = randomUUID();
   const marker = join(directory, 'writer.pid');
   const runtimeSource = await readFile(new URL('../src/runtime.mjs', import.meta.url), 'utf8');

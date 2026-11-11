@@ -19,7 +19,7 @@
 - [macOS 安装与使用](macos/README.md)：Apple Silicon，macOS 12 或更新版本。
 - [Windows 安装与使用](windows/README.md)：Windows 10/11 x64。
 
-Windows 1.0.1 安装包将在 Windows 电脑完成构建后补充到本次发行版。
+Windows 1.0.1 安装包见 [v1.0.1 发行版](https://github.com/lijiahao66666/codex-phone-assistant/releases/tag/v1.0.1)。
 
 安装并登录 Codex Desktop 后，在电脑上打开手机助手并生成配对码；在手机浏览器打开 [codex.air-inc.top](https://codex.air-inc.top/) 输入配对码，或扫描二维码完成配对。
 

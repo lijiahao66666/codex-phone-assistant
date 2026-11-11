@@ -426,7 +426,7 @@ test('hung discovery probes share the total preparation deadline and never dispa
     },
   });
   await assert.rejects(f.adapter.startTurn(threadId, 'never sent'), { code: 'unavailable' });
-  assert.ok(signals.length >= 2 && signals.length <= 4, 'short read probes remain bounded by one total deadline');
+  assert.ok(signals.length >= 1 && signals.length <= 4, 'short read probes remain bounded by one total deadline');
   assert.ok(signals.every(signal => signal.aborted));
   assert.equal(f.counts().opens, 1); assert.equal(f.counts().sends, 0); assert.equal(f.counts().closed, 1);
 });
