@@ -3337,7 +3337,9 @@ function mergeHistoryTurns(older, newer) {
     // identical text can be separate messages and must remain separate rows.
     const aliases = new Map();
     for (const item of [...(old.items || []), ...(turn.items || [])]) {
-      if (item?.type === 'userMessage' && typeof item.id === 'string' && item.id && typeof item.serverUserMessageId === 'string' && item.serverUserMessageId) aliases.set(item.id, item.serverUserMessageId);
+      if (item?.type !== 'userMessage' || typeof item.id !== 'string' || !item.id) continue;
+      if (typeof item.serverUserMessageId === 'string' && item.serverUserMessageId) aliases.set(item.id, item.serverUserMessageId);
+      if (typeof item.initialPromptId === 'string' && item.initialPromptId.startsWith('initial-user:') && item.initialPromptId !== item.id) aliases.set(item.initialPromptId, item.id);
     }
     const itemKey = item => typeof item.id === 'string' && item.id ? aliases.get(item.id) || item.id : null;
     const linkedIds = new Set([...aliases.keys(), ...aliases.values()]);
@@ -3352,7 +3354,7 @@ function mergeHistoryTurns(older, newer) {
           const index = positions.get(id);
           // Retain the first recorded position and the acknowledged live row's
           // local identity, attachments and explicit server link.
-          if (item.serverUserMessageId || !result[index].serverUserMessageId) result[index] = item;
+          if (item.serverUserMessageId || item.initialPromptId || !(result[index].serverUserMessageId || result[index].initialPromptId)) result[index] = item;
         }
       }
       return result;

@@ -11,6 +11,9 @@ const maxClearedReminders = 1024;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const validPair = (hostId, deviceId) => uuid.test(hostId ?? '') && uuid.test(deviceId ?? '');
 const invalid = () => { throw new TypeError('Invalid push subscription'); };
+const failureCategory = error => ['ETIMEDOUT', 'ESOCKETTIMEDOUT'].includes(error?.code) ? 'timeout'
+  : ['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE'].includes(error?.code) ? 'network' : 'push-error';
+const httpStatus = value => Number.isInteger(value) && value >= 100 && value <= 599 ? value : null;
 
 function key(value, size) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value)) invalid();
@@ -54,13 +57,15 @@ export async function generateVapidKeys() {
 }
 
 export class PushService {
-  constructor({ database = ':memory:', isActiveDevice, vapidDetails, sendNotification, deliverForeground = () => false, now = Date.now, maxAgeMs = 120000, maxSubscriptions = 4, maxInFlight = 32 } = {}) {
+  constructor({ database = ':memory:', isActiveDevice, vapidDetails, sendNotification, deliverForeground = () => false, onDelivery, now = Date.now, maxAgeMs = 120000, maxSubscriptions = 4, maxInFlight = 32 } = {}) {
     if (typeof isActiveDevice !== 'function' || typeof database !== 'string' || !database || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1000 || maxAgeMs > 300000 || !Number.isSafeInteger(maxSubscriptions) || maxSubscriptions < 1 || maxSubscriptions > 8 || !Number.isSafeInteger(maxInFlight) || maxInFlight < 1 || maxInFlight > 128) throw new TypeError('Invalid push service configuration');
     this.now = now;
     this.isActiveDevice = isActiveDevice;
     this.sendNotification = sendNotification ?? createWebPushSender(vapidDetails);
     if (typeof deliverForeground !== 'function') throw new TypeError('Invalid foreground delivery');
     this.deliverForeground = deliverForeground;
+    if (onDelivery !== undefined && typeof onDelivery !== 'function') throw new TypeError('Invalid push diagnostics callback');
+    this.onDelivery = onDelivery;
     this.publicKey = vapidDetails?.publicKey ?? null;
     this.maxAgeMs = maxAgeMs;
     this.maxSubscriptions = maxSubscriptions;
@@ -150,16 +155,28 @@ export class PushService {
   // live transitions. Initial snapshots/reconnected history must not call this.
   // A delivery is claimed before I/O; a failure is intentionally not replayed.
   async notify(hostId, event) {
-    if (this.closed) return { sent: 0, skipped: 'closed' };
+    let claimedEvent = false;
+    const deliveries = this.onDelivery ? [] : null;
+    const finish = (result, skip) => {
+      if (this.onDelivery) {
+        try {
+          this.onDelivery({ type: 'push-delivery', hostHash: hash(typeof hostId === 'string' ? hostId : ''), eventHash: hash(typeof event?.eventId === 'string' ? event.eventId : ''), kind: kinds.has(event?.kind) ? event.kind : 'unknown', claimed: claimedEvent,
+            sent: result.sent ?? 0, failed: result.failed ?? 0, foreground: result.foreground ?? 0, skip: result.skipped ?? skip ?? null, deliveries });
+        } catch { /* Diagnostics must never change delivery behavior. */ }
+      }
+      return result;
+    };
+    if (this.closed) return finish({ sent: 0, skipped: 'closed' });
     const now = this.now();
-    if (!uuid.test(hostId ?? '') || !event || typeof event.eventId !== 'string' || !event.eventId.length || event.eventId.length > 512 || !uuid.test(event.threadId ?? '') || !kinds.has(event.kind) || !Number.isSafeInteger(event.createdAt)) throw new TypeError('Invalid push event');
-    if (event.createdAt < now - this.maxAgeMs || event.createdAt > now + 5000) return { sent: 0, skipped: 'stale' };
+    if (!uuid.test(hostId ?? '') || !event || typeof event.eventId !== 'string' || !event.eventId.length || event.eventId.length > 512 || !uuid.test(event.threadId ?? '') || !kinds.has(event.kind) || !Number.isSafeInteger(event.createdAt)) { finish({ sent: 0 }, 'invalid-event'); throw new TypeError('Invalid push event'); }
+    if (event.createdAt < now - this.maxAgeMs || event.createdAt > now + 5000) return finish({ sent: 0, skipped: 'stale' });
     this.#pruneClears(now);
-    if (this.#isCleared(hostId, event)) return { sent: 0, skipped: 'cleared' };
+    if (this.#isCleared(hostId, event)) return finish({ sent: 0, skipped: 'cleared' });
     this.db.prepare('DELETE FROM push_events WHERE seen_at < ?').run(now - 86400000);
     const claimed = this.db.prepare('INSERT OR IGNORE INTO push_events (host_id, event_hash, seen_at) VALUES (?, ?, ?)').run(hostId, hash(event.eventId), now);
-    if (!claimed.changes) return { sent: 0, skipped: 'duplicate' };
-    if (this.inFlight >= this.maxInFlight) return { sent: 0, skipped: 'busy' };
+    if (!claimed.changes) return finish({ sent: 0, skipped: 'duplicate' });
+    claimedEvent = true;
+    if (this.inFlight >= this.maxInFlight) return finish({ sent: 0, skipped: 'busy' });
     this.inFlight++;
     let sent = 0, failed = 0, foreground = 0;
     const foregroundDevices = new Set(), checkedDevices = new Set();
@@ -179,6 +196,7 @@ export class PushService {
           try {
             if (await this.deliverForeground(hostId, row.device_id, { eventId: event.eventId, threadId: event.threadId, kind: event.kind, createdAt: event.createdAt }) === true) {
               foregroundDevices.add(row.device_id); foreground++;
+              deliveries?.push({ deviceHash: hash(row.device_id), outcome: 'foreground-ack' });
             }
           } catch { /* A failed foreground transport falls back to system push. */ }
         }
@@ -189,14 +207,17 @@ export class PushService {
         if (!this.#currentRevision(row)) continue;
         const payload = JSON.stringify({ title: titles[event.kind], body: '打开手机助手查看任务。', eventId: event.eventId, createdAt: event.createdAt, kind: event.kind, hostId, deviceId: row.device_id, threadId: event.threadId, tag: 'codex-' + hash(hostId + ':' + event.eventId).slice(0, 32) });
         try {
-          await this.sendNotification(subscription, payload, { TTL: 120, urgency: 'normal', timeout: 10000 });
+          const response = await this.sendNotification(subscription, payload, { TTL: 120, urgency: 'normal', timeout: 10000 });
           sent++;
+          deliveries?.push({ deviceHash: hash(row.device_id), outcome: 'system-accepted', status: httpStatus(response?.statusCode) });
         } catch (error) {
           failed++;
+          const status = httpStatus(error?.statusCode);
+          deliveries?.push({ deviceHash: hash(row.device_id), outcome: 'system-failed', ...(status ? { status } : { error: failureCategory(error) }) });
           if (!this.closed && [404, 410].includes(error?.statusCode)) this.#removeRevision(row);
         }
       }
-      return { sent, failed, ...(foreground ? { foreground } : {}) };
+      return finish({ sent, failed, ...(foreground ? { foreground } : {}) }, sent || failed || foreground ? null : subscriptions.length ? 'no-eligible-subscriptions' : 'no-subscriptions');
     } finally { this.inFlight--; }
   }
 

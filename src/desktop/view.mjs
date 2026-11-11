@@ -122,19 +122,27 @@ function turnDisplayItems(turn, index) {
   // Equal content can be a genuine follow-up. Only a confirmed server/client
   // identity authorizes removing the echo of the prompt rendered from params.
   const initialClientId = turn.params?.clientUserMessageId;
+  const validItemId = id => typeof id === 'string' && id.length > 0 && id.length <= 1024 && !/[\x00-\x20\x7f]/.test(id);
   const nativeId = turn.remodexInitialUserMessageId;
-  const initialId = typeof nativeId === 'string' && nativeId.length > 0 && nativeId.length <= 1024 &&
-    !/[\x00-\x20\x7f]/.test(nativeId) && !items.some(item => item?.id === nativeId && item.type !== 'userMessage') ? nativeId : null;
-  const isEcho = item => item?.type === 'userMessage' && (
-    (initialId && item.id === initialId) ||
-    (typeof initialClientId === 'string' && initialClientId && (item.clientId ?? item.client_id) === initialClientId)
-  );
-  let promptId = initialId || `initial-user:${turn.turnId ?? index}`;
-  if (!initialId) {
-    const ids = new Set(items.map(item => item?.id));
-    while (ids.has(promptId)) promptId += ':prompt';
-  }
-  const prompt = { type: 'userMessage', id: promptId, content: input };
+  const clientEchoes = typeof initialClientId === 'string' && initialClientId
+    ? items.filter(item => item?.type === 'userMessage' && (item.clientId ?? item.client_id) === initialClientId) : [];
+  // Native canonical turns may carry only the client correlation, without the
+  // adapter's remodexInitialUserMessageId. Retain that confirmed server ID so
+  // recorded history and live projection describe the same message.
+  const echo = clientEchoes.length === 1 && validItemId(clientEchoes[0].id)
+    && items.filter(item => item?.id === clientEchoes[0].id).length === 1
+    && inputIdentity(clientEchoes[0].content) === inputIdentity(input) ? clientEchoes[0] : null;
+  const initialId = validItemId(nativeId) && !items.some(item => item?.id === nativeId && item.type !== 'userMessage')
+    ? nativeId : echo?.id ?? null;
+  const isEcho = item => item?.type === 'userMessage' && initialId && item.id === initialId;
+  const syntheticId = `initial-user:${turn.turnId ?? index}`;
+  const ids = new Set(items.map(item => item?.id));
+  let promptId = initialId || syntheticId;
+  if (!initialId) while (ids.has(promptId)) promptId += ':prompt';
+  // Explicitly link the pre-acknowledgement placeholder already retained by
+  // H5 history. Never claim a synthetic ID that is a real loaded item ID.
+  const initialIdentity = initialId && !ids.has(syntheticId) ? { initialPromptId: syntheticId } : {};
+  const prompt = { type: 'userMessage', id: promptId, content: input, ...initialIdentity };
   return [prompt, ...items.filter(item => !isEcho(item))];
 }
 
@@ -192,7 +200,8 @@ function displayItem(item, imageHandles, mediaHandles, optimisticTurn = false) {
     const replies = !imageCount ? parseQuestionReply(text) : null;
     const serverIdentity = item.type === 'steeringUserMessage' && typeof item.serverUserMessageId === 'string' && item.serverUserMessageId
       ? { serverUserMessageId: item.serverUserMessageId } : {};
-    return { ...base, type: 'userMessage', ...serverIdentity, text: displayUserText(text, imageCount), ...(replies && acceptedReply ? { questionReplyIds: replies.map(reply => reply.questionItemId) } : {}), ...(replies && !acceptedReply ? { questionReplyPendingIds: replies.map(reply => reply.questionItemId) } : {}), ...(imageCount ? { imageCount } : {}), ...(images.length ? { images } : {}) };
+    const initialIdentity = typeof item.initialPromptId === 'string' && item.initialPromptId.startsWith('initial-user:') && item.initialPromptId !== item.id ? { initialPromptId: item.initialPromptId } : {};
+    return { ...base, type: 'userMessage', ...serverIdentity, ...initialIdentity, text: displayUserText(text, imageCount), ...(replies && acceptedReply ? { questionReplyIds: replies.map(reply => reply.questionItemId) } : {}), ...(replies && !acceptedReply ? { questionReplyPendingIds: replies.map(reply => reply.questionItemId) } : {}), ...(imageCount ? { imageCount } : {}), ...(images.length ? { images } : {}) };
   }
   if (item.type === 'imageView' || item.type === 'imageGeneration') {
     const media = mediaHandles.get(item.type === 'imageView' ? item.path : item.savedPath);

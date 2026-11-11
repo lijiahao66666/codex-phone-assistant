@@ -118,6 +118,39 @@ test('recorded history and a live prompt share native identity without collapsin
   assert.deepEqual(rendered(f).filter(value => value === 'repeat'), ['repeat', 'repeat']);
 });
 
+test('canonical native prompt and recorded history render one row using their confirmed client correlation', async () => {
+  const content = [{ type: 'text', text: 'current user sentence' }];
+  const nativeTurn = { turnId: 'shared', params: { input: content, clientUserMessageId: 'client' }, items: [
+    { type: 'userMessage', id: 'server-initial', clientId: 'client', content },
+    { type: 'userMessage', id: 'real-repeat', clientId: 'another-client', content },
+    { type: 'agentMessage', id: 'answer', text: 'done' },
+  ] };
+  const recorded = page([turn('shared', nativeTurn.items.map(item => ({ ...item, text: item.text || 'current user sentence' })))]);
+  const live = desktopView({ id, turnHistory: { kind: 'canonical', history: { isComplete: true,
+    islands: [{ entries: [{ value: 'native' }] }], entitiesByKey: { native: nativeTurn } } } });
+  const f = await fixture(() => response(recorded));
+  f.show(recorded);
+  f.run(`streamView=${JSON.stringify(live)};showState(streamView);showState(streamView)`);
+  assert.deepEqual(rendered(f).filter(text => text === 'current user sentence'), ['current user sentence', 'current user sentence']);
+  assert.equal(f.run("streamView.turns[0].items.filter(item=>item.id==='server-initial').length"), 1);
+  assert.equal(f.run("streamView.turns[0].items.filter(item=>item.id==='initial-user:shared').length"), 0);
+});
+
+test('acknowledged prompt replaces its retained synthetic placeholder and late recorded pages stay deduplicated', async () => {
+  const f = await fixture(() => response(page([])));
+  const live = desktopView({ id, turns: [{ turnId: 'shared', params: {
+    input: [{ type: 'text', text: 'hello' }], clientUserMessageId: 'client' }, items: [
+      { type: 'userMessage', id: 'server', clientId: 'client', content: [{ type: 'text', text: 'hello' }] },
+      { type: 'agentMessage', id: 'answer', text: 'done' },
+    ] }] });
+  f.run(`const stale=[{id:'shared',items:[{id:'initial-user:shared',type:'userMessage',text:'hello'},{id:'answer',type:'agentMessage',text:'working'}]}];const accepted=${JSON.stringify(live.turns)};const acceptedMerge=mergeHistoryTurns(stale,accepted);const recordedMerge=mergeHistoryTurns([{id:'shared',items:[{id:'server',type:'userMessage',text:'hello'}]}],acceptedMerge);const repeatedMerge=mergeHistoryTurns(recordedMerge,accepted)`);
+  for (const name of ['acceptedMerge', 'recordedMerge', 'repeatedMerge']) {
+    assert.equal(f.run(`${name}[0].items.filter(item=>item.type==='userMessage').length`), 1);
+    assert.equal(f.run(`${name}[0].items.find(item=>item.type==='userMessage').id`), 'server');
+    assert.equal(f.run(`${name}[0].items.find(item=>item.type==='userMessage').initialPromptId`), 'initial-user:shared');
+  }
+});
+
 test('recorded and live steering identities reconcile without collapsing genuinely repeated user messages', async () => {
   const f = await fixture(() => response(page([])));
   const content = [{ type: 'text', text: 'repeat' }];

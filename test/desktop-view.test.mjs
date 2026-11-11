@@ -43,7 +43,52 @@ test('initial client identity removes only its echo and retains identical uncorr
     { type: 'agentMessage', id: 'answer', text: 'done' },
     { type: 'userMessage', id: 'late-echo', clientId: 'initial-client', content },
   ] }] });
-  assert.deepEqual(view.turns[0].items.map(item => item.id), ['initial-user:turn', 'real-repeat', 'answer']);
+  assert.deepEqual(view.turns[0].items.map(item => item.id), ['late-echo', 'real-repeat', 'answer']);
+  assert.equal(view.turns[0].items[0].initialPromptId, 'initial-user:turn');
+});
+
+test('canonical client correlation retains the server prompt identity without the adapter marker', () => {
+  const native = { turnId: 'turn', params: { input: [{ type: 'input_text', text: 'hello' }], clientUserMessageId: 'client' }, items: [
+    { type: 'userMessage', id: 'server', clientId: 'client', content: [{ type: 'text', text: 'hello' }] },
+    { type: 'agentMessage', id: 'answer', text: 'done' },
+  ] };
+  const view = desktopView({ id: 'thread', turnHistory: { kind: 'canonical', history: { isComplete: true,
+    islands: [{ entries: [{ value: 'turn' }] }], entitiesByKey: { turn: native } } } });
+  assert.deepEqual(view.turns[0].items.map(item => item.id), ['server', 'answer']);
+  assert.equal(view.turns[0].items[0].initialPromptId, 'initial-user:turn');
+  assert.equal(native.items.length, 2);
+});
+
+test('ambiguous or mismatched initial client correlations never remove independently loaded messages', () => {
+  const content = [{ type: 'text', text: 'hello' }];
+  const project = items => desktopView({ id: 'thread', turns: [{ turnId: 'turn',
+    params: { input: content, clientUserMessageId: 'client' }, items }] }).turns[0].items;
+  const echo = { type: 'userMessage', id: 'server', clientId: 'client', content };
+  for (const items of [
+    [{ ...echo, clientId: 'different-client' }],
+    [{ ...echo, content: [{ type: 'text', text: 'different input' }] }],
+    [echo, { ...echo, id: 'another-server' }],
+    [echo, { type: 'agentMessage', id: 'server', text: 'conflicting identity' }],
+    [{ ...echo, id: 'bad identity' }],
+  ]) {
+    const projected = project(items);
+    assert.equal(projected[0].id, 'initial-user:turn');
+    assert.equal(projected[0].initialPromptId, undefined);
+    assert.equal(projected.length, items.length + 1);
+  }
+  const snakeCase = project([{ ...echo, clientId: undefined, client_id: 'client' }]);
+  assert.equal(snakeCase[0].id, 'server');
+});
+
+test('initial prompt aliases never claim an independently loaded synthetic-looking item', () => {
+  const content = [{ type: 'text', text: 'hello' }];
+  const view = desktopView({ id: 'thread', turns: [{ turnId: 'turn',
+    params: { input: content, clientUserMessageId: 'client' }, items: [
+      { type: 'userMessage', id: 'server', clientId: 'client', content },
+      { type: 'userMessage', id: 'initial-user:turn', clientId: 'other', content },
+    ] }] });
+  assert.deepEqual(view.turns[0].items.map(item => item.id), ['server', 'initial-user:turn']);
+  assert.equal(view.turns[0].items[0].initialPromptId, undefined);
 });
 
 test('native initial IDs preserve recorded identity while invalid or colliding identities remain synthetic', () => {

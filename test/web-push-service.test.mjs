@@ -18,6 +18,50 @@ const now = 1794382000000;
 const event = (overrides = {}) => ({ eventId: randomUUID(), threadId: randomUUID(), kind: 'completed', createdAt: now, ...overrides });
 const options = (extra = {}) => ({ isActiveDevice: () => true, now: () => now, sendNotification: async () => {}, ...extra });
 
+test('optional delivery diagnostics distinguish accepted, failed, foreground and skipped outcomes without leaking inputs', async () => {
+  const diagnostics = [], sent = [];
+  let mode = 'accepted', foreground = false;
+  const sub = subscription(), live = event({ eventId: 'private-event-id' });
+  const service = new PushService(options({ onDelivery: result => diagnostics.push(result), deliverForeground: () => foreground,
+    sendNotification: async (subscription, payload) => {
+      sent.push({ subscription, payload });
+      if (mode === 'http') throw Object.assign(new Error('PRIVATE upstream body ' + sub.endpoint), { statusCode: 403, body: 'PRIVATE response' });
+      if (mode === 'network') throw Object.assign(new Error('PRIVATE network error'), { code: 'ETIMEDOUT' });
+      return { statusCode: 201, headers: { authorization: 'PRIVATE token' } };
+    } }));
+  try {
+    service.subscribe(host, device, sub);
+    assert.deepEqual(await service.notify(host, live), { sent: 1, failed: 0 });
+    assert.deepEqual(diagnostics[0].deliveries.map(({ outcome, status }) => ({ outcome, status })), [{ outcome: 'system-accepted', status: 201 }]);
+    assert.equal(diagnostics[0].claimed, true); assert.equal(diagnostics[0].kind, 'completed');
+    assert.equal(JSON.parse(sent[0].payload).eventId, live.eventId, 'diagnostics must not alter the actual notification');
+    await service.notify(host, live); assert.equal(diagnostics.at(-1).skip, 'duplicate'); assert.equal(diagnostics.at(-1).claimed, false);
+    mode = 'http'; await service.notify(host, event());
+    assert.equal(diagnostics.at(-1).failed, 1); assert.equal(diagnostics.at(-1).deliveries[0].status, 403);
+    mode = 'network'; await service.notify(host, event());
+    assert.equal(diagnostics.at(-1).deliveries[0].error, 'timeout');
+    foreground = true; await service.notify(host, event());
+    assert.equal(diagnostics.at(-1).foreground, 1); assert.equal(diagnostics.at(-1).deliveries[0].outcome, 'foreground-ack');
+    service.unsubscribe(host, device, sub.endpoint); await service.notify(host, event());
+    assert.equal(diagnostics.at(-1).skip, 'no-subscriptions');
+    await service.notify(host, event({ createdAt: now - 120001 })); assert.equal(diagnostics.at(-1).skip, 'stale');
+    assert.equal(diagnostics.length, 7, 'exactly one final diagnostic is emitted for each invocation');
+    const serialized = JSON.stringify(diagnostics);
+    for (const secret of [host, device, live.eventId, live.threadId, sub.endpoint, sub.keys.auth, sub.keys.p256dh, 'PRIVATE']) assert.equal(serialized.includes(secret), false);
+    assert.match(diagnostics[0].hostHash, /^[0-9a-f]{64}$/); assert.match(diagnostics[0].eventHash, /^[0-9a-f]{64}$/); assert.match(diagnostics[0].deliveries[0].deviceHash, /^[0-9a-f]{64}$/);
+  } finally { service.close(); }
+});
+
+test('a failing diagnostics callback cannot turn an accepted push into a delivery failure', async () => {
+  let attempts = 0;
+  const service = new PushService(options({ onDelivery() { throw new Error('logger unavailable'); }, sendNotification: async () => { attempts++; } }));
+  try {
+    service.subscribe(host, device, subscription());
+    assert.deepEqual(await service.notify(host, event()), { sent: 1, failed: 0 });
+    assert.equal(attempts, 1);
+  } finally { service.close(); }
+});
+
 test('exact reminder clears persist, isolate hosts and do not send or suppress a newer event', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'codex-clear-')), database = join(directory, 'push.sqlite');
   let attempts = 0, active = true, service;

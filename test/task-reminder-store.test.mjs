@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 
 const source = await readFile(new URL('../public/task-reminder-store.js', import.meta.url), 'utf8');
 const workerSource = await readFile(new URL('../public/notification-worker.js', import.meta.url), 'utf8');
+const presenceSource = await readFile(new URL('../public/notification-presence.js', import.meta.url), 'utf8');
 const pairA = { hostId: randomUUID(), deviceId: randomUUID() };
 const pairB = { hostId: randomUUID(), deviceId: randomUUID() };
 const event = (threadId = randomUUID(), eventId = randomUUID(), kind = 'completed') => ({ threadId, eventId, kind });
@@ -235,6 +236,98 @@ test('with no H5 windows, push waits for IndexedDB persistence and the worker ba
   const second = event(); await restarted.push(pairA, second);
   assert.equal(restarted.displayed.length, 1); assert.equal(badges.at(-1), 2);
   assert.deepEqual(plain(await context(db).list(pairA)), [first, second]);
+});
+
+test('closing the page after its unread commit but before foreground ACK still displays fallback once across worker restarts', async () => {
+  const db = indexedDbFixture(); let releaseBadge, delayed = false;
+  const page = context(db, { async setAppBadge(count) {
+    if (count && !delayed) { delayed = true; await new Promise(resolve => { releaseBadge = resolve; }); }
+  } });
+  await page.activate(pairA);
+  const notice = { ...event(), createdAt: 200 }, calls = [], listeners = {};
+  let stream;
+  const document = { visibilityState: 'visible', addEventListener(type, listener) { listeners[type] = listener; } };
+  const window = {
+    getNotificationThreadId: () => null, addEventListener() {},
+    async taskNotificationReceipt(value) { await page.put(pairA, value); return true; },
+  };
+  vm.runInNewContext(presenceSource, { document, window, crypto: { randomUUID }, AbortController, URLSearchParams, TextDecoder,
+    setTimeout() { return 0; }, clearTimeout() {},
+    async fetch(url, options) {
+      calls.push({ url, ...options });
+      if (!url.startsWith('/api/notifications/events?')) return { ok: true };
+      const body = new ReadableStream({ start(controller) { stream = controller; } });
+      options.signal.addEventListener('abort', () => { try { stream.error(Error('Page hidden')); } catch {} });
+      return { ok: true, body };
+    },
+  });
+  window.setTaskNotificationSession(pairA, true);
+  while (!stream) await new Promise(resolve => setImmediate(resolve));
+  stream.enqueue(new TextEncoder().encode(`event: connected\ndata: {}\n\nevent: task-notification\ndata: ${JSON.stringify({ ...notice, ackId: randomUUID() })}\n\n`));
+  while (!releaseBadge) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(plain(await page.inspectEvent(pairA, notice)), { status: 'seen', stored: true }, 'foreground storage does not claim OS display');
+  document.visibilityState = 'hidden'; listeners.visibilitychange(); releaseBadge();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(call => call.url.endsWith('/ack')).length, 0);
+  const worker = pushWorkerContext(db);
+  await worker.push(pairA, notice);
+  assert.equal(worker.displayed.length, 1); assert.equal(worker.displayed[0].closed, false);
+  assert.deepEqual(plain(await page.inspectEvent(pairA, notice)), { status: 'seen', stored: true, shown: true });
+  await worker.push(pairA, notice);
+  assert.equal(worker.displayed.length, 1);
+  const restarted = pushWorkerContext(db); await restarted.push(pairA, notice);
+  assert.equal(restarted.displayed.length, 0);
+  assert.deepEqual(plain(await page.list(pairA)), [notice]);
+});
+
+test('a failed OS display leaves foreground-only persistence eligible for a later successful push', async () => {
+  const db = indexedDbFixture(), page = context(db); await page.activate(pairA);
+  const notice = { ...event(), createdAt: 200 }; await page.put(pairA, notice);
+  const failed = pushWorkerContext(db, {}, () => { throw Error('OS display failed'); });
+  await assert.rejects(failed.push(pairA, notice), /OS display failed/);
+  assert.deepEqual(plain(await page.inspectEvent(pairA, notice)), { status: 'seen', stored: true });
+  const retry = pushWorkerContext(db); await retry.push(pairA, notice);
+  assert.equal(retry.displayed.length, 1); assert.equal(retry.displayed[0].closed, false);
+  assert.deepEqual(plain(await page.inspectEvent(pairA, notice)), { status: 'seen', stored: true, shown: true });
+});
+
+test('a read while the worker waits for its badge update closes the display and retains the durable read receipt', async () => {
+  const db = indexedDbFixture(), page = context(db); await page.activate(pairA);
+  let releaseBadge;
+  const worker = pushWorkerContext(db, { async setAppBadge() { await new Promise(resolve => { releaseBadge = resolve; }); }, async clearAppBadge() {} });
+  const notice = { ...event(), createdAt: 200 }, work = worker.push(pairA, notice);
+  while (!releaseBadge) await new Promise(resolve => setImmediate(resolve));
+  await page.removeEvent(pairA, notice);
+  releaseBadge(); await work;
+  assert.equal(worker.displayed[0].closed, true);
+  assert.deepEqual(plain(await page.inspectEvent(pairA, notice)), { status: 'seen', stored: false, shown: true });
+  const restarted = pushWorkerContext(db); await restarted.push(pairA, notice);
+  assert.equal(restarted.displayed.length, 0);
+  assert.deepEqual(plain(await page.list(pairA)), []);
+});
+
+test('OS display receipts are bounded and isolated from other paired computers', async () => {
+  const db = indexedDbFixture(), store = context(db); await store.activate(pairA);
+  const notices = Array.from({ length: 515 }, (_, index) => ({ ...event(), createdAt: index }));
+  for (const notice of notices) await store.recordShown(pairA, notice);
+  const entries = [...db.committed].filter(([key]) => key.startsWith('shown:'));
+  assert.equal(entries.length, 1); assert.equal(entries[0][1].length, 512);
+  assert.equal(entries[0][1][0], JSON.stringify([notices[3].threadId, notices[3].eventId]));
+  await store.activate(pairB);
+  assert.deepEqual(plain(await store.inspectEvent(pairB, notices.at(-1))), { status: 'new' });
+  assert.deepEqual(plain(await store.recordShown(pairA, notices.at(-1))), { ignored: true });
+  assert.deepEqual(plain(await store.list(pairB)), []);
+});
+
+test('a surviving OS receipt cannot restore a read reminder after unrelated receipts evict its general tombstone', async () => {
+  const db = indexedDbFixture(), store = context(db); await store.activate(pairA);
+  const notice = { ...event(), createdAt: 200 }; await store.recordShown(pairA, notice);
+  await store.removeEvent(pairA, notice);
+  for (let index = 0; index < 512; index++) await store.removeEvent(pairA, { ...event(), createdAt: index });
+  const worker = pushWorkerContext(db); await worker.push(pairA, notice);
+  assert.equal(worker.displayed.length, 0);
+  assert.deepEqual(plain(await store.list(pairA)), []);
+  assert.deepEqual(plain(await store.inspectEvent(pairA, notice)), { status: 'seen', stored: false, shown: true });
 });
 
 test('a pairing revoked while the OS display is pending cannot restore its badge and its late notification is closed', async () => {

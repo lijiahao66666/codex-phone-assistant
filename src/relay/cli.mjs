@@ -16,6 +16,8 @@ export function relayConfig(env = process.env) {
     database: resolve(env.HUB_PUSH_DATABASE || 'data/push.sqlite'),
     vapidDetails: { subject: env.HUB_PUSH_SUBJECT, publicKey: env.HUB_PUSH_PUBLIC_KEY, privateKey: env.HUB_PUSH_PRIVATE_KEY },
   } : null;
+  const pushDiagnostics = flag('HUB_PUSH_DIAGNOSTICS', false);
+  if (notifications && pushDiagnostics) notifications.onDelivery = result => console.log(JSON.stringify(result));
   if (notifications && Object.values(notifications.vapidDetails).some(value => typeof value !== 'string' || !value)) throw new Error('Push VAPID configuration is required.');
   return { port, origin: env.HUB_ORIGIN, database: resolve(env.HUB_DATABASE || 'data/relay.sqlite'),
     ...(notifications ? { notifications } : {}),

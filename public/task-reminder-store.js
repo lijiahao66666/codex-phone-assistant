@@ -107,18 +107,44 @@
         get('seen:' + key, value => {
           const seen = rows(value);
           get('watermarks:' + key, value => {
-            const result = change(existing, seen, rows(value));
-            if (result.rows) {
-              store.put(result.rows, 'scope:' + key);
-              store.put({ key, revision: current.revision + 1 }, 'active');
-            }
-            if (result.seen) store.put(result.seen, 'seen:' + key);
-            if (result.watermarks) store.put(result.watermarks, 'watermarks:' + key);
-            done(result.value);
+            const watermarks = rows(value);
+            get('shown:' + key, value => {
+              const result = change(existing, seen, watermarks, rows(value));
+              if (result.rows) {
+                store.put(result.rows, 'scope:' + key);
+                store.put({ key, revision: current.revision + 1 }, 'active');
+              }
+              if (result.seen) store.put(result.seen, 'seen:' + key);
+              if (result.watermarks) store.put(result.watermarks, 'watermarks:' + key);
+              if (result.shown) store.put(result.shown, 'shown:' + key);
+              done(result.value);
+            });
           });
         });
       });
     })));
+  }
+  function saveReminder(pair, event, displayed = false) {
+    if (!event || !uuid.test(event.threadId || '') || !kinds.has(event.kind) || typeof event.eventId !== 'string'
+        || !event.eventId || event.eventId.length > 512) return Promise.reject(new TypeError('Invalid reminder event'));
+    return mutate(pair, (existing, seen, watermarks, shown) => {
+      const identity = JSON.stringify([event.threadId, event.eventId]);
+      const stored = existing.some(item => item.threadId === event.threadId && item.eventId === event.eventId);
+      if (seen.includes(identity) || stored || shown.includes(identity)) {
+        if (!displayed) return { watermarks: rememberTime(existing, watermarks, event), value: { duplicate: true } };
+        if (!stored) return { watermarks: rememberTime(existing, watermarks, event), value: { read: true } };
+      }
+      if (stale(existing, watermarks, event)) return { seen: seen.includes(identity) ? seen : [...seen, identity].slice(-512), value: { stale: true } };
+      const next = existing.filter(item => item.threadId !== event.threadId);
+      next.push({ threadId: event.threadId, kind: event.kind, eventId: event.eventId, ...(validTime(event.createdAt) ? { createdAt: event.createdAt } : {}) });
+      // Foreground persistence is not proof that the system displayed a push:
+      // the page can close before acknowledging its SSE event. Only the worker
+      // writes this separate receipt after showNotification succeeds.
+      return { rows: next.slice(-256), seen: seen.includes(identity) ? seen : [...seen, identity].slice(-512),
+        watermarks: rememberTime(existing, watermarks, event),
+        ...(displayed ? { shown: shown.includes(identity) ? shown : [...shown, identity].slice(-512) } : {}),
+        value: { stored: true, duplicate: false } };
+    });
   }
 
   root.taskReminderStore = {
@@ -141,8 +167,11 @@
           get('scope:' + key, value => {
             const existing = rows(value);
             const stored = existing.some(item => item.threadId === event.threadId && item.eventId === event.eventId);
-            if (seen || stored) return done({ status: 'seen', stored });
-            get('watermarks:' + key, value => done({ status: stale(existing, rows(value), event) ? 'stale' : 'new' }));
+            get('shown:' + key, value => {
+              const shown = rows(value).includes(identity);
+              if (seen || stored || shown) return done({ status: 'seen', stored, ...(shown ? { shown: true } : {}) });
+              get('watermarks:' + key, value => done({ status: stale(existing, rows(value), event) ? 'stale' : 'new' }));
+            });
           });
         });
       }));
@@ -152,20 +181,8 @@
       const key = requireScope(pair);
       return finish(transaction('readonly', ({ get, done }) => get('scope:' + key, value => done(rows(value)))));
     },
-    async put(pair, event) {
-      if (!event || !uuid.test(event.threadId || '') || !kinds.has(event.kind) || typeof event.eventId !== 'string'
-          || !event.eventId || event.eventId.length > 512) return Promise.reject(new TypeError('Invalid reminder event'));
-      return mutate(pair, (existing, seen, watermarks) => {
-        const identity = JSON.stringify([event.threadId, event.eventId]);
-        if (seen.includes(identity) || existing.some(item => item.threadId === event.threadId && item.eventId === event.eventId)) return { watermarks: rememberTime(existing, watermarks, event), value: { duplicate: true } };
-        if (stale(existing, watermarks, event)) return { seen: [...seen, identity].slice(-512), value: { stale: true } };
-        const next = existing.filter(item => item.threadId !== event.threadId);
-        next.push({ threadId: event.threadId, kind: event.kind, eventId: event.eventId, ...(validTime(event.createdAt) ? { createdAt: event.createdAt } : {}) });
-        // Keep a bounded receipt window after a task is read. A duplicate push
-        // arriving just after removal must not restore its unread badge.
-        return { rows: next.slice(-256), seen: [...seen, identity].slice(-512), watermarks: rememberTime(existing, watermarks, event), value: { stored: true, duplicate: false } };
-      });
-    },
+    async put(pair, event) { return saveReminder(pair, event); },
+    async recordShown(pair, event) { return saveReminder(pair, event, true); },
     async remove(pair, threadId) {
       if (!uuid.test(threadId || '')) return Promise.reject(new TypeError('Invalid reminder thread'));
       return mutate(pair, (existing, _seen, watermarks) => {

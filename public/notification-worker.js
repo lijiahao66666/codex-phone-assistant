@@ -29,7 +29,8 @@ self.addEventListener('push', event => {
     const inspection = await (self.taskReminderStore.inspectEvent
       ? self.taskReminderStore.inspectEvent(data, reminder)
       : self.taskReminderStore.hasEvent(data, reminder).then(seen => ({ status: seen ? 'seen' : 'new' }))).catch(() => ({ status: 'new' }));
-    if (inspection.status !== 'new') {
+    const foregroundOnly = inspection.status === 'seen' && inspection.stored === true && inspection.shown !== true;
+    if (inspection.status !== 'new' && !foregroundOnly) {
       // An old receipt may predate timestamp support. Learn its verified time
       // without restoring its row, then reject later out-of-order events too.
       if (inspection.status !== 'inactive') await self.taskReminderStore.put(data, reminder).catch(() => {});
@@ -43,10 +44,14 @@ self.addEventListener('push', event => {
       tag,
       data: { hostId: data.hostId, deviceId: data.deviceId, threadId: data.threadId, eventId: reminder.eventId },
     });
-    const saved = await self.taskReminderStore.put(data, reminder).catch(() => null);
+    const recordShown = typeof self.taskReminderStore.recordShown === 'function';
+    const saved = await (recordShown ? self.taskReminderStore.recordShown(data, reminder) : self.taskReminderStore.put(data, reminder)).catch(() => null);
+    const settled = recordShown && self.taskReminderStore.inspectEvent
+      ? await self.taskReminderStore.inspectEvent(data, reminder).catch(() => null) : null;
     // Viewing the task or revoking its pairing may race the OS display call.
-    // The transactional receipt decides whether that delayed display survives.
-    if (saved?.duplicate || saved?.ignored || saved?.stale || !await self.taskReminderStore.isActive(data).catch(() => false)) await closeDisplayedNotification(data, reminder.eventId, tag);
+    // Recheck after the badge update too: a read can commit while its promise
+    // is pending, after recordShown has already committed the display receipt.
+    if ((!recordShown && saved?.duplicate) || saved?.read || saved?.ignored || saved?.stale || settled?.status === 'inactive' || settled?.status === 'stale' || (settled?.status === 'seen' && settled.stored === false) || !await self.taskReminderStore.isActive(data).catch(() => false)) await closeDisplayedNotification(data, reminder.eventId, tag);
   });
   notificationWork = work.catch(() => {});
   event.waitUntil(work);
