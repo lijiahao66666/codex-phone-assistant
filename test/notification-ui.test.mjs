@@ -13,7 +13,7 @@ const json = value => ({ ok: true, json: async () => value });
 const makeSubscription = endpoint => ({ endpoint, toJSON() { return { endpoint, keys: { auth: 'auth', p256dh: 'key' } }; }, unsubscribe() { throw new Error('must not remove other computer subscriptions'); } });
 
 async function fixture(options = {}) {
-  const nodes = new Map(['prompt', 'message', 'enable', 'disable'].map(name => [name, { hidden: true, disabled: false, textContent: '', listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } }]));
+  const nodes = new Map(['prompt', 'message', 'enable', 'disable', 'onboarding', 'onboarding-message', 'onboarding-open', 'onboarding-dismiss'].map(name => [name, { hidden: true, disabled: false, textContent: '', listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } }]));
   const requests = [], actions = [], serviceWorkerListeners = {}, documentListeners = {}, historyCalls = [], timers = new Map(); let nextTimer = 0;
   let local = options.local ?? null, subscribed = options.subscribed ?? false;
   const notification = { permission: options.permission ?? 'default', requestPermission() { actions.push('permission'); return options.requestPermission?.() ?? Promise.resolve('granted'); } };
@@ -72,6 +72,65 @@ test('notification permission is requested only in the enable gesture and before
   assert.equal(save.headers['x-codex-expected-device'], pairA.deviceId);
   assert.equal(save.credentials, 'same-origin'); assert.equal(save.cache, 'no-store');
   assert.match(f.nodes.get('message').textContent, /已开启/);
+});
+
+test('a confirmed unsubscribed pairing gets a home-only notification introduction that opens settings without requesting permission', async () => {
+  const f = await fixture(); let opens = 0;
+  f.window.openNotificationSettings = () => { opens++; f.window.setNotificationSettingsOpen(true); };
+  f.window.setNotificationSettingsOpen(false); f.window.setNotificationHomeEligible(true);
+  assert.equal(f.nodes.get('onboarding').hidden, true, 'no paired status has been confirmed');
+  await f.select();
+  assert.equal(f.nodes.get('onboarding').hidden, false);
+  assert.match(f.nodes.get('onboarding-message').textContent, /后台.*任务完成.*待回答.*待审批/);
+  assert.deepEqual(f.actions, []);
+  f.window.setNotificationHomeEligible(false); assert.equal(f.nodes.get('onboarding').hidden, true);
+  f.window.setNotificationHomeEligible(true); assert.equal(f.nodes.get('onboarding').hidden, false);
+  f.click('onboarding-open');
+  assert.equal(opens, 1); assert.equal(f.nodes.get('onboarding').hidden, true);
+  assert.deepEqual(f.actions, [], 'opening the settings must not request notification permission');
+});
+
+test('home onboarding dismissal lasts for the current pairing and page but resets for another pairing', async () => {
+  const f = await fixture(); f.window.setNotificationSettingsOpen(false); f.window.setNotificationHomeEligible(true);
+  await f.select(); f.click('onboarding-dismiss');
+  assert.equal(f.nodes.get('onboarding').hidden, true);
+  f.window.setNotificationHomeEligible(false); f.window.setNotificationHomeEligible(true); await f.select();
+  assert.equal(f.nodes.get('onboarding').hidden, true);
+  f.window.setNotificationSettingsOpen(true); await flush(); f.window.setNotificationSettingsOpen(false);
+  assert.equal(f.nodes.get('onboarding').hidden, true);
+  await f.select(pairB); assert.equal(f.nodes.get('onboarding').hidden, false);
+  await f.select(null); assert.equal(f.nodes.get('onboarding').hidden, true);
+});
+
+test('onboarding distinguishes iPhone installation and denied permissions and disappears after a successful enable', async () => {
+  for (const options of [{ iphone: true }, { permission: 'denied' }]) {
+    const f = await fixture(options); f.window.setNotificationSettingsOpen(false); f.window.setNotificationHomeEligible(true); await f.select();
+    assert.equal(f.nodes.get('onboarding').hidden, false);
+    assert.match(f.nodes.get('onboarding-message').textContent, options.iphone ? /添加到主屏幕/ : /系统设置.*允许通知/);
+    assert.deepEqual(f.actions, []);
+  }
+  const enabled = await fixture({ local: makeSubscription('https://push.example/already-enabled'), permission: 'granted', subscribed: true });
+  enabled.window.setNotificationSettingsOpen(false); enabled.window.setNotificationHomeEligible(true); await enabled.select();
+  assert.equal(enabled.nodes.get('onboarding').hidden, true);
+  const fresh = await fixture({ requestPermission() { fresh.notification.permission = 'granted'; return Promise.resolve('granted'); } });
+  fresh.window.setNotificationSettingsOpen(false); fresh.window.setNotificationHomeEligible(true); await fresh.select();
+  assert.equal(fresh.nodes.get('onboarding').hidden, false);
+  await fresh.click('enable');
+  assert.equal(fresh.nodes.get('onboarding').hidden, true);
+});
+
+test('onboarding does not infer unsubscribed status when its server query fails or an old pairing response arrives late', async () => {
+  const unknown = deferred();
+  const f = await fixture({ local: makeSubscription('https://push.example/unknown'), permission: 'granted', fetch: url => url.endsWith('/status') ? unknown.promise : undefined });
+  f.window.setNotificationSettingsOpen(false); f.window.setNotificationHomeEligible(true); await f.select();
+  assert.equal(f.nodes.get('onboarding').hidden, true);
+  unknown.resolve({ ok: false }); await flush(); assert.equal(f.nodes.get('onboarding').hidden, true);
+  const stale = deferred(); let requests = 0;
+  const switched = await fixture({ fetch: url => url === '/api/notifications' && ++requests === 1 ? stale.promise : undefined });
+  switched.window.setNotificationSettingsOpen(false); switched.window.setNotificationHomeEligible(true);
+  await switched.select(); await switched.select(pairB); switched.click('onboarding-dismiss');
+  stale.resolve(json({ enabled: true, desktopReady: true, monitorStatus: 'healthy' })); await flush();
+  assert.equal(switched.nodes.get('onboarding').hidden, true, 'late response cannot reset current-pair dismissal');
 });
 
 test('iPhone browser explains home screen installation without prompting; standalone can opt in', async () => {

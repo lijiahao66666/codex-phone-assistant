@@ -51,7 +51,7 @@ async function fixture() {
   run(source);
   const settingsPanel = nodes.get('#settings-panel'), settingsOverlay = nodes.get('#settings-overlay');
   const enable = new Element('button'); enable.hidden = true; nodes.set('#notification-enable', enable);
-  settingsPanel.append(nodes.get('#close-settings'), enable); settingsOverlay.append(settingsPanel); settingsOverlay.hidden = true;
+  settingsPanel.append(enable); settingsOverlay.append(settingsPanel); settingsOverlay.hidden = true;
   run(`historyScope={hostId:'${hostId}',deviceId:'${deviceId}'};currentDeviceId='${deviceId}';selectedId='${a}';scheduleVisibleStatusRefresh=()=>{};scheduleThreadConnect=()=>{};clearConversation=()=>{};beginStatusHandover=()=>{};`);
   const data = { projects: [{ id: 'fixture-project', name: 'Fixture', expanded: false, threads: [{ id: a, title: 'Task A', status: 'idle' }, { id: b, title: 'Task B', status: 'idle' }] }], recent: [{ id: c, title: 'Task C', status: 'idle' }] };
   const render = value => { context.testData = value; run('renderThreadList(testData)'); };
@@ -333,20 +333,20 @@ test('pending questions and approvals use text instead of a simultaneous spinner
   f.row(b).click(); assert.equal(text.hidden, true); assert.equal(spinner.hidden, false, 'viewing clears the local reminder and reveals the real running state');
 });
 
-test('settings open from a fixed entry, close by button or Escape, and return keyboard focus', async () => {
-  const f = await fixture(); const open = f.nodes.get('#open-settings'), close = f.nodes.get('#close-settings'), overlay = f.nodes.get('#settings-overlay');
+test('settings open from either entry, dismiss by scrim or Escape, and retain keyboard focus', async () => {
+  const f = await fixture(); const open = f.nodes.get('#open-settings'), panel = f.nodes.get('#settings-panel'), overlay = f.nodes.get('#settings-overlay');
   f.window.innerWidth = 1024;
   overlay.hidden = true;
   f.nodes.get('#summary-panel').hidden = false; f.nodes.get('#devices').open = true;
   open.focus(); open.click();
   assert.equal(f.nodes.get('#summary-panel').hidden, true); assert.equal(f.nodes.get('#devices').open, false); assert.equal(f.nodes.get('#scrim').hidden, true);
-  assert.equal(overlay.hidden, false); assert.equal(open.getAttribute('aria-expanded'), 'true'); assert.equal(f.document.activeElement, close); assert.equal(f.settingsCalls.at(-1), true);
+  assert.equal(overlay.hidden, false); assert.equal(open.getAttribute('aria-expanded'), 'true'); assert.equal(f.document.activeElement, panel); assert.equal(f.settingsCalls.at(-1), true);
   assert.equal(f.key('Escape').prevented, true);
   assert.equal(overlay.hidden, true); assert.equal(f.document.activeElement, open); assert.equal(f.settingsCalls.at(-1), false);
-  open.click(); close.click(); assert.equal(overlay.hidden, true); assert.equal(f.document.activeElement, open);
+  f.window.openNotificationSettings(); f.key('Escape'); assert.equal(overlay.hidden, true);
   open.click(); f.nodes.get('#settings-scrim').click(); assert.equal(overlay.hidden, true);
   open.click(); const enable = f.nodes.get('#notification-enable'); enable.hidden = false;
-  enable.focus(); assert.equal(f.key('Tab').prevented, true); assert.equal(f.document.activeElement, close);
+  enable.focus(); assert.equal(f.key('Tab').prevented, true); assert.equal(f.document.activeElement, enable);
   assert.equal(f.key('Tab', { shiftKey: true }).prevented, true); assert.equal(f.document.activeElement, enable);
   f.key('Escape');
   const mobile = await fixture(); const mobileOpen = mobile.nodes.get('#open-settings');
@@ -354,12 +354,13 @@ test('settings open from a fixed entry, close by button or Escape, and return ke
   assert.equal(mobile.document.activeElement, mobile.nodes.get('#open-sidebar'), 'closing settings on mobile must not focus its offscreen sidebar entry');
 });
 
-test('settings use a right-side drawer constrained to the mobile viewport and a fixed sidebar footer entry', async () => {
+test('settings use a left-side drawer constrained to the mobile viewport and a fixed sidebar footer entry', async () => {
   const css = await readFile(new URL('../public/desktop.css', import.meta.url), 'utf8');
   const html = await readFile(new URL('../public/desktop.html', import.meta.url), 'utf8');
   const panel = css.match(/\.settings-panel\{([^}]+)\}/)?.[1];
-  assert.match(panel, /position:absolute/); assert.match(panel, /inset:0 0 0 auto/); assert.match(panel, /width:min\(300px,85vw\)/); assert.match(panel, /height:100%/);
+  assert.match(panel, /position:absolute/); assert.match(panel, /inset:0 auto 0 0/); assert.match(panel, /width:min\(300px,85vw\)/); assert.match(panel, /height:100%/);
   assert.match(css, /\.sidebar-footer\{flex:none/);
+  assert.equal(html.includes('id="close-settings"'), false);
   assert.ok(html.indexOf('id="project-list"') < html.indexOf('class="sidebar-footer"'));
   assert.ok(html.indexOf('class="sidebar-footer"') < html.indexOf('id="open-settings"'));
   assert.ok(html.indexOf('id="open-settings"') < html.indexOf('</aside>'));

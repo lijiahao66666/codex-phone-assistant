@@ -4,14 +4,21 @@
   const message = document.querySelector('#notification-message');
   const enable = document.querySelector('#notification-enable');
   const disable = document.querySelector('#notification-disable');
+  const onboarding = document.querySelector('#notification-onboarding');
+  const onboardingMessage = document.querySelector('#notification-onboarding-message');
+  const onboardingOpen = document.querySelector('#notification-onboarding-open');
+  const onboardingDismiss = document.querySelector('#notification-onboarding-dismiss');
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let context = null, contextInitialized = false, generation = 0, refreshRevision = 0, settingsOpen = false, available = false, busy = false, subscription = null, config = null, refreshTimer = null, workerUpdateChecked = false, clearSync = null, contextActivation = Promise.resolve();
+  let homeEligible = false, onboardingDismissed = false, onboardingText = null;
   const standalone = () => navigator.standalone === true || window.matchMedia?.('(display-mode: standalone)').matches === true;
   const iphone = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const supported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   function render() {
     panel.hidden = !context || !settingsOpen || !available;
     enable.disabled = disable.disabled = busy;
+    if (onboarding) onboarding.hidden = !context || !homeEligible || settingsOpen || !available || onboardingDismissed || !onboardingText;
+    if (onboardingMessage) onboardingMessage.textContent = onboardingText || '';
   }
   const current = (pair, epoch) => context?.hostId === pair.hostId && context?.deviceId === pair.deviceId && generation === epoch;
   function queueRefresh() {
@@ -54,8 +61,11 @@
       if (!available) { window.setTaskNotificationSession?.(pair, false); return render(); }
       await syncCleared(pair, epoch);
       if (!fresh()) return;
-      if (iphone() && !standalone()) { message.textContent = '先在 Safari 中添加到主屏幕，再从主屏幕打开并开启通知。'; return render(); }
-      if (!supported()) { message.textContent = '当前浏览器不支持任务通知。'; return render(); }
+      if (iphone() && !standalone()) {
+        onboardingText = '想在后台收到任务提醒？先在 Safari 中添加到主屏幕，再打开并开启通知。';
+        message.textContent = '先在 Safari 中添加到主屏幕，再从主屏幕打开并开启通知。'; return render();
+      }
+      if (!supported()) { onboardingText = null; message.textContent = '当前浏览器不支持任务通知。'; return render(); }
       const registration = await navigator.serviceWorker.getRegistration('/');
       if (registration?.update && !workerUpdateChecked) {
         workerUpdateChecked = true;
@@ -67,6 +77,10 @@
       if (!fresh()) return;
       subscription = local;
       const registered = Boolean(local && status?.subscribed);
+      onboardingText = Notification.permission === 'denied'
+        ? '通知已被系统关闭。可在系统设置中允许通知，再回来开启任务提醒。'
+        : registered && Notification.permission === 'granted' ? null
+        : '开启任务通知，后台也能收到任务完成、待回答和待审批提醒。';
       window.setTaskNotificationSession?.(pair, registered && Notification.permission === 'granted');
       const readiness = status ?? data;
       config = { ...data, ...readiness };
@@ -80,7 +94,7 @@
         : '开启后，任务完成、待回答或待审批时会提醒你。电脑和桌面助手需保持运行。';
       enable.hidden = registered || Notification.permission === 'denied' || readiness.desktopReady !== true; disable.hidden = !registered;
       render();
-    } catch { if (fresh()) { if (available) message.textContent = '暂时无法查询通知状态，请检查网络后重新打开页面。'; render(); } }
+    } catch { if (fresh()) { onboardingText = null; if (available) message.textContent = '暂时无法查询通知状态，请检查网络后重新打开页面。'; render(); } }
     finally { if (fresh()) queueRefresh(); }
   }
   window.setNotificationContext = pair => {
@@ -88,7 +102,7 @@
     if (contextInitialized && context?.hostId === pair?.hostId && context?.deviceId === pair?.deviceId) return;
     contextInitialized = true; ++refreshRevision;
     clearTimeout(refreshTimer); refreshTimer = null;
-    context = pair; window.setTaskNotificationSession?.(pair, false); ++generation; available = false; subscription = null; config = null; busy = false; render();
+    context = pair; window.setTaskNotificationSession?.(pair, false); ++generation; available = false; subscription = null; config = null; busy = false; onboardingDismissed = false; onboardingText = null; render();
     contextActivation = Promise.resolve();
     if (typeof window.taskReminderStore?.activate === 'function') {
       const epoch = generation;
@@ -101,7 +115,9 @@
     }
     if (pair) void refresh(pair, generation);
   };
-  window.setNotificationHomeEligible = () => {};
+  window.setNotificationHomeEligible = value => { homeEligible = value === true; render(); };
+  onboardingOpen?.addEventListener('click', () => window.openNotificationSettings?.());
+  onboardingDismiss?.addEventListener('click', () => { onboardingDismissed = true; render(); });
   window.setNotificationSettingsOpen = value => {
     settingsOpen = value === true; render();
     if (settingsOpen && context && !busy) void refresh(context, generation);

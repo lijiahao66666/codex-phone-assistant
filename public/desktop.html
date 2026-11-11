@@ -51,6 +51,11 @@
           </div>
         </section>
 
+        <section id="notification-onboarding" class="notification-onboarding" aria-labelledby="notification-onboarding-title" hidden>
+          <strong id="notification-onboarding-title">开启任务通知</strong>
+          <p id="notification-onboarding-message"></p>
+          <div class="notification-onboarding-actions"><button id="notification-onboarding-open" class="install-action" type="button">设置通知</button><button id="notification-onboarding-dismiss" class="notification-later" type="button">暂不提醒</button></div>
+        </section>
         <div class="conversation-inner"><span id="history" class="history"></span><p id="error" class="error" role="alert" hidden></p><div id="turns" class="turns"></div></div>
       </section>
       <button id="scroll-bottom" class="scroll-bottom" type="button" aria-label="回到最新消息" title="回到最新消息" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6"/></svg></button>
@@ -63,7 +68,7 @@
   <div id="settings-overlay" class="settings-overlay" hidden>
     <button id="settings-scrim" class="settings-scrim" type="button" aria-label="关闭设置"></button>
     <section id="settings-panel" class="settings-panel" role="dialog" aria-modal="true" aria-label="设置" aria-labelledby="settings-title" tabindex="-1">
-      <header class="settings-header"><h2 id="settings-title">设置</h2><button id="close-settings" class="icon-button" type="button" aria-label="关闭设置" title="关闭设置">×</button></header>
+      <header class="settings-header"><h2 id="settings-title">设置</h2></header>
         <section id="notification-prompt" class="notification-prompt" aria-label="任务通知" hidden>
           <strong>任务通知</strong>
           <p id="notification-message" role="status"></p>

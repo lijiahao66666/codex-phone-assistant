@@ -386,7 +386,6 @@ const summaryToggle = document.querySelector('#toggle-summary');
 const settingsOverlay = document.querySelector('#settings-overlay');
 const settingsPanel = document.querySelector('#settings-panel');
 const settingsToggle = document.querySelector('#open-settings');
-const settingsClose = document.querySelector('#close-settings');
 const settingsScrim = document.querySelector('#settings-scrim');
 let settingsReturnFocus = null;
 function showSettings(show) {
@@ -398,7 +397,7 @@ function showSettings(show) {
   settingsOverlay.hidden = !show;
   settingsToggle.setAttribute('aria-expanded', String(show));
   window.setNotificationSettingsOpen?.(show);
-  if (show) settingsClose?.focus?.();
+  if (show) settingsPanel?.focus?.();
   else {
     let target = settingsReturnFocus;
     const sidebarClosedOnMobile = (window.innerWidth || 1024) <= 700 && !sidebar.classList.contains('open');
@@ -407,7 +406,7 @@ function showSettings(show) {
   }
 }
 settingsToggle?.addEventListener('click', () => showSettings(true));
-settingsClose?.addEventListener('click', () => showSettings(false));
+window.openNotificationSettings = () => showSettings(true);
 settingsScrim?.addEventListener('click', () => showSettings(false));
 document.addEventListener?.('keydown', event => {
   if (settingsOverlay?.hidden !== false) return;
