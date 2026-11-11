@@ -42,6 +42,22 @@
 
   const metadata = value => value && typeof value.revision === 'number' ? value : { key: null, revision: 0 };
   const rows = value => Array.isArray(value) ? value : [];
+  const validTime = value => Number.isSafeInteger(value) && value >= 0;
+  const timeOf = (existing, watermarks, threadId) => {
+    const times = [...existing, ...watermarks].filter(item => item?.threadId === threadId && validTime(item.createdAt)).map(item => item.createdAt);
+    return times.length ? Math.max(...times) : null;
+  };
+  const stale = (existing, watermarks, event) => {
+    const latest = timeOf(existing, watermarks, event.threadId);
+    // Equal milliseconds carry no ordering proof. Keep arrival order for them.
+    return latest !== null && (!validTime(event.createdAt) || event.createdAt < latest);
+  };
+  function rememberTime(existing, watermarks, event) {
+    const latest = timeOf(existing, watermarks, event.threadId);
+    if (!validTime(event.createdAt) && latest === null) return watermarks;
+    const createdAt = validTime(event.createdAt) ? Math.max(event.createdAt, latest ?? 0) : latest;
+    return [...watermarks.filter(item => item?.threadId !== event.threadId), { threadId: event.threadId, createdAt }].slice(-512);
+  }
   const active = () => transaction('readonly', ({ get, done }) => get('active', value => done(metadata(value))));
   async function badgeSnapshot() {
     return transaction('readonly', ({ get, done }) => get('active', value => {
@@ -89,13 +105,17 @@
       get('scope:' + key, value => {
         const existing = rows(value);
         get('seen:' + key, value => {
-          const result = change(existing, rows(value));
-          if (result.rows) {
-            store.put(result.rows, 'scope:' + key);
-            store.put({ key, revision: current.revision + 1 }, 'active');
-          }
-          if (result.seen) store.put(result.seen, 'seen:' + key);
-          done(result.value);
+          const seen = rows(value);
+          get('watermarks:' + key, value => {
+            const result = change(existing, seen, rows(value));
+            if (result.rows) {
+              store.put(result.rows, 'scope:' + key);
+              store.put({ key, revision: current.revision + 1 }, 'active');
+            }
+            if (result.seen) store.put(result.seen, 'seen:' + key);
+            if (result.watermarks) store.put(result.watermarks, 'watermarks:' + key);
+            done(result.value);
+          });
         });
       });
     })));
@@ -110,18 +130,24 @@
       })));
     },
     async isActive(pair) { const key = scope(pair); return Boolean(key && (await active()).key === key); },
-    async hasEvent(pair, event) {
+    async inspectEvent(pair, event) {
       const key = requireScope(pair);
       if (!event || !uuid.test(event.threadId || '') || typeof event.eventId !== 'string' || !event.eventId || event.eventId.length > 512) throw new TypeError('Invalid reminder event');
       return transaction('readonly', ({ get, done }) => get('active', value => {
-        if (metadata(value).key !== key) return done(false);
+        if (metadata(value).key !== key) return done({ status: 'inactive' });
         const identity = JSON.stringify([event.threadId, event.eventId]);
         get('seen:' + key, value => {
-          if (rows(value).includes(identity)) return done(true);
-          get('scope:' + key, value => done(rows(value).some(item => item.threadId === event.threadId && item.eventId === event.eventId)));
+          const seen = rows(value).includes(identity);
+          get('scope:' + key, value => {
+            const existing = rows(value);
+            const stored = existing.some(item => item.threadId === event.threadId && item.eventId === event.eventId);
+            if (seen || stored) return done({ status: 'seen', stored });
+            get('watermarks:' + key, value => done({ status: stale(existing, rows(value), event) ? 'stale' : 'new' }));
+          });
         });
       }));
     },
+    async hasEvent(pair, event) { return (await this.inspectEvent(pair, event)).status === 'seen'; },
     async list(pair) {
       const key = requireScope(pair);
       return finish(transaction('readonly', ({ get, done }) => get('scope:' + key, value => done(rows(value)))));
@@ -129,31 +155,35 @@
     async put(pair, event) {
       if (!event || !uuid.test(event.threadId || '') || !kinds.has(event.kind) || typeof event.eventId !== 'string'
           || !event.eventId || event.eventId.length > 512) return Promise.reject(new TypeError('Invalid reminder event'));
-      return mutate(pair, (existing, seen) => {
+      return mutate(pair, (existing, seen, watermarks) => {
         const identity = JSON.stringify([event.threadId, event.eventId]);
-        if (seen.includes(identity) || existing.some(item => item.threadId === event.threadId && item.eventId === event.eventId)) return { value: { duplicate: true } };
+        if (seen.includes(identity) || existing.some(item => item.threadId === event.threadId && item.eventId === event.eventId)) return { watermarks: rememberTime(existing, watermarks, event), value: { duplicate: true } };
+        if (stale(existing, watermarks, event)) return { seen: [...seen, identity].slice(-512), value: { stale: true } };
         const next = existing.filter(item => item.threadId !== event.threadId);
-        next.push({ threadId: event.threadId, kind: event.kind, eventId: event.eventId });
+        next.push({ threadId: event.threadId, kind: event.kind, eventId: event.eventId, ...(validTime(event.createdAt) ? { createdAt: event.createdAt } : {}) });
         // Keep a bounded receipt window after a task is read. A duplicate push
         // arriving just after removal must not restore its unread badge.
-        return { rows: next.slice(-256), seen: [...seen, identity].slice(-512), value: { stored: true, duplicate: false } };
+        return { rows: next.slice(-256), seen: [...seen, identity].slice(-512), watermarks: rememberTime(existing, watermarks, event), value: { stored: true, duplicate: false } };
       });
     },
     async remove(pair, threadId) {
       if (!uuid.test(threadId || '')) return Promise.reject(new TypeError('Invalid reminder thread'));
-      return mutate(pair, existing => {
+      return mutate(pair, (existing, _seen, watermarks) => {
         const next = existing.filter(item => item.threadId !== threadId);
-        return { rows: next, value: { removed: next.length !== existing.length } };
+        return { rows: next, watermarks: rememberTime(existing, watermarks, { threadId }), value: { removed: next.length !== existing.length } };
       });
     },
     async removeEvent(pair, event) {
       if (!event || !uuid.test(event.threadId || '') || typeof event.eventId !== 'string' || !event.eventId || event.eventId.length > 512) throw new TypeError('Invalid reminder event');
-      return mutate(pair, (existing, seen) => {
+      return mutate(pair, (existing, seen, watermarks) => {
         const identity = JSON.stringify([event.threadId, event.eventId]);
-        const next = existing.filter(item => item.threadId !== event.threadId || item.eventId !== event.eventId);
-        return { rows: next, seen: seen.includes(identity) ? seen : [...seen, identity].slice(-512), value: { removed: next.length !== existing.length } };
+        const next = existing.filter(item => item.threadId !== event.threadId || (item.eventId !== event.eventId &&
+          !(validTime(item.createdAt) && validTime(event.createdAt) && item.createdAt < event.createdAt)));
+        return { rows: next, seen: seen.includes(identity) ? seen : [...seen, identity].slice(-512), watermarks: rememberTime(existing, watermarks, event), value: { removed: next.length !== existing.length } };
       });
     },
-    async clear(pair) { return mutate(pair, () => ({ rows: [], value: { cleared: true } })); },
+    async clear(pair) { return mutate(pair, (existing, _seen, watermarks) => ({ rows: [],
+      watermarks: existing.filter(item => uuid.test(item?.threadId || '') && validTime(item.createdAt)).reduce((saved, item) => rememberTime([], saved, item), watermarks),
+      value: { cleared: true } })); },
   };
 })();

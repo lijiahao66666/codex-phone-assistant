@@ -13,6 +13,7 @@ async function fixture(fixtureOptions = {}) {
   let selected = threadA, nextTimer = 0;
   const document = { visibilityState: 'visible', addEventListener(type, fn) { docListeners[type] = fn; } };
   const window = { getNotificationThreadId: () => selected, acceptTaskNotification: event => reminders.push(event), async clearTaskNotificationEvent(event) { clears.push(event); if (fixtureOptions.clear) await fixtureOptions.clear(event); }, addEventListener(type, fn) { pageListeners[type] = fn; } };
+  if (fixtureOptions.receipt) window.taskNotificationReceipt = async event => { reminders.push(event); return fixtureOptions.receipt(event); };
   const context = vm.createContext({ document, window, crypto: { randomUUID }, AbortController, URLSearchParams, TextDecoder,
     setTimeout(fn, ms) { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); },
     fetch: async (url, options) => {
@@ -131,4 +132,55 @@ test('a timed out foreground request aborts before a bounded stream reconnection
   assert.equal(request.signal.aborted, true); assert.equal(f.timers.size, 1);
   assert.equal([...f.timers.values()][0].ms, 2000);
   await f.close(); assert.equal(f.timers.size, 0);
+});
+
+
+test('foreground ACK waits for the exact durable receipt and preserves the source event time', async () => {
+  let release;
+  const receipt = new Promise(resolve => release = resolve), f = await fixture({ receipt: () => receipt });
+  try {
+    await f.enable(); await f.event('connected');
+    const ackId = randomUUID(), createdAt = 1794382000000;
+    await f.event('task-notification', { threadId: threadB, eventId: 'durable-event', kind: 'question', createdAt, ackId });
+    assert.equal(f.reminders.length, 1); assert.equal(f.reminders[0].createdAt, createdAt);
+    assert.equal(f.calls.filter(call => call.url.endsWith('/ack')).length, 0, 'UI acceptance alone cannot suppress system push');
+    release(true); await flush();
+    const ack = f.calls.find(call => call.url.endsWith('/ack'));
+    assert.ok(ack); assert.equal(ack.headers['x-codex-expected-device'], pairA.deviceId);
+    assert.deepEqual(JSON.parse(ack.body), { sessionId: f.presences()[0].data.sessionId, ackId, threadId: threadB, eventId: 'durable-event' });
+    assert.equal(f.reminders.length, 1, 'receipt helper owns acceptance; no duplicate UI callback');
+  } finally { release?.(false); await f.close(); }
+});
+
+for (const result of [false, 'reject']) test(`a ${result} receipt does not ACK and permits server fallback`, async () => {
+  const f = await fixture({ receipt: async () => { if (result === 'reject') throw new Error('Storage unavailable'); return result; } });
+  try {
+    await f.enable(); await f.event('connected');
+    await f.event('task-notification', { threadId: threadB, eventId: 'not-durable', kind: 'approval', createdAt: 1794382000000, ackId: randomUUID() });
+    assert.equal(f.reminders.length, 1); assert.equal(f.calls.filter(call => call.url.endsWith('/ack')).length, 0);
+  } finally { await f.close(); }
+});
+
+for (const change of ['pair', 'hidden']) test(`a receipt completing after ${change} changes cannot ACK its old session`, async () => {
+  let release;
+  const receipt = new Promise(resolve => release = resolve), f = await fixture({ receipt: () => receipt });
+  try {
+    await f.enable(); await f.event('connected');
+    await f.event('task-notification', { threadId: threadB, eventId: 'old-session', kind: 'completed', ackId: randomUUID() });
+    if (change === 'pair') await f.enable(pairB); else await f.visibility('hidden');
+    release(true); await flush();
+    assert.equal(f.calls.filter(call => call.url.endsWith('/ack')).length, 0);
+  } finally { release?.(false); await f.close(); }
+});
+
+test('a slow task receipt does not block later exact clear frames on the foreground stream', async () => {
+  let release;
+  const receipt = new Promise(resolve => release = resolve), f = await fixture({ receipt: () => receipt });
+  try {
+    await f.enable(); await f.event('connected');
+    await f.event('task-notification', { threadId: threadB, eventId: 'slow-event', kind: 'question', ackId: randomUUID() });
+    await f.event('task-notification-clear', { threadId: threadB, eventId: 'slow-event' });
+    assert.equal(f.clears.length, 1); assert.equal(f.calls.filter(call => call.url.endsWith('/ack')).length, 0);
+    release(true); await flush();
+  } finally { release?.(false); await f.close(); }
 });

@@ -17,6 +17,26 @@
       clearTimeout(timeout); session.controller.signal.removeEventListener('abort', abort);
     });
   }
+  async function acknowledge(session, event, scoped, isCurrent) {
+    try {
+      if (!uuid.test(event.ackId || '') || typeof window.taskNotificationReceipt !== 'function') {
+        window.acceptTaskNotification?.(scoped); return;
+      }
+      // A UI callback alone does not prove the worker can suppress a fallback.
+      // Wait for this exact event's durable receipt (or current-reading receipt).
+      if (await window.taskNotificationReceipt(scoped) !== true || !isCurrent()) return;
+      const controller = new AbortController(), abort = () => controller.abort();
+      session.controller.signal.addEventListener('abort', abort, { once: true });
+      const timeout = setTimeout(abort, 4000);
+      try {
+        await fetch('/api/notifications/ack', {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+          headers: { 'content-type': 'application/json', 'x-codex-expected-device': session.pair.deviceId },
+          body: JSON.stringify({ sessionId: session.id, ackId: event.ackId, threadId: event.threadId, eventId: event.eventId }),
+        });
+      } finally { clearTimeout(timeout); session.controller.signal.removeEventListener('abort', abort); }
+    } catch { /* No ACK makes the server fall back to system push. */ }
+  }
   function stop() {
     clearTimeout(retry); retry = null;
     const session = current; current = null;
@@ -78,7 +98,7 @@
             if (type === 'task-notification-clear') {
               await window.clearTaskNotificationEvent?.(scoped);
               if (!isCurrent()) return;
-            } else if (['completed', 'question', 'approval'].includes(event.kind)) window.acceptTaskNotification?.(scoped);
+            } else if (['completed', 'question', 'approval'].includes(event.kind)) void acknowledge(session, event, scoped, isCurrent);
           }
         }
       } catch { if (isCurrent()) reconnect(session); }

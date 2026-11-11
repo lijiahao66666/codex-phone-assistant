@@ -14,7 +14,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const decompressUploadChunk = promisify(gunzip);
 
 // Experimental relay. TLS must terminate at a trusted loopback-only proxy.
-export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, notifications = null, maxNotificationStreams = 1024, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, recoveryResponseTimeoutMs = 60000, uploadResponseTimeoutMs = 30000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
+export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, notifications = null, maxNotificationStreams = 1024, foregroundAckMs = 1500, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, recoveryResponseTimeoutMs = 60000, uploadResponseTimeoutMs = 30000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
   const base = new URL(origin);
   if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash || base.username || base.password) throw new TypeError('HTTPS origin required');
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1) throw new TypeError('Invalid timeout');
@@ -25,13 +25,18 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1) throw new TypeError('Invalid heartbeat');
   if (!Number.isSafeInteger(bodyTimeoutMs) || bodyTimeoutMs < 1) throw new TypeError('Invalid body timeout');
   if (!Number.isSafeInteger(maxNotificationStreams) || maxNotificationStreams < 1 || maxNotificationStreams > 10000) throw new TypeError('Invalid notification stream limit');
+  if (!Number.isSafeInteger(foregroundAckMs) || foregroundAckMs < 1 || foregroundAckMs > 10000) throw new TypeError('Invalid foreground acknowledgement timeout');
   const registry = new PairingRegistry(database, { now, pairTtlMs, maxHosts, unpairedTtlMs });
-  const notificationStreams = new Map();
+  const notificationStreams = new Map(), notificationAcks = new Map();
   const foregroundTtlMs = 15000;
   const notificationStreamKey = (hostId, deviceId, sessionId) => `${hostId}:${deviceId}:${sessionId}`;
   function closeNotificationStream(key, entry) {
     if (notificationStreams.get(key) !== entry) return;
     notificationStreams.delete(key); clearTimeout(entry.timer);
+    for (const pending of entry.pendingAcks ?? []) {
+      pending.streamKeys.delete(key);
+      if (!pending.streamKeys.size) pending.finish(false);
+    }
     if (!entry.res.destroyed && !entry.res.writableEnded) entry.res.end();
   }
   function closeNotificationStreams(hostId, deviceId = null) {
@@ -50,14 +55,26 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   }
   function deliverForeground(hostId, deviceId, event) {
     if (!registry.isActiveDevice(hostId, deviceId)) return false;
-    let delivered = false;
+    const targets = [];
     for (const [key, entry] of notificationStreams) {
       if (entry.hostId !== hostId || entry.deviceId !== deviceId) continue;
       if (entry.expiresAt <= now()) { closeNotificationStream(key, entry); continue; }
-      if (!entry.visible) continue;
-      if (writeNotificationFrame(key, entry, `event: task-notification\ndata: ${JSON.stringify(event)}\n\n`)) delivered = true;
+      if (entry.visible) targets.push([key, entry]);
     }
-    return delivered;
+    if (!targets.length) return false;
+    return new Promise(resolve => {
+      const ackId = randomUUID(), streamKeys = new Set(targets.map(([key]) => key));
+      const pending = { hostId, deviceId, event, streamKeys, finish(accepted) {
+        if (notificationAcks.get(ackId) !== pending) return;
+        notificationAcks.delete(ackId); clearTimeout(pending.timer);
+        for (const [, entry] of targets) entry.pendingAcks?.delete(pending);
+        resolve(accepted);
+      } };
+      notificationAcks.set(ackId, pending);
+      pending.timer = setTimeout(() => pending.finish(false), foregroundAckMs); pending.timer.unref?.();
+      for (const [, entry] of targets) { entry.pendingAcks ??= new Set(); entry.pendingAcks.add(pending); }
+      for (const [key, entry] of targets) writeNotificationFrame(key, entry, `event: task-notification\ndata: ${JSON.stringify({ ...event, ackId })}\n\n`);
+    });
   }
   function deliverReminderClear(hostId, event) {
     for (const [key, entry] of notificationStreams) {
@@ -403,6 +420,23 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         writeNotificationFrame(key, entry, 'event: connected\ndata: {}\n\n');
         return;
       }
+      if (requested === '/api/notifications/ack' && req.method === 'POST') {
+        if (!push) return send(res, 200, { enabled: false });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 2048);
+        if (res.writableEnded || res.destroyed) return;
+        if (reserved?.reservation) bodyReads.delete(reserved.reservation);
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const data = reserved?.data;
+        if (!data || Object.keys(data).length !== 4 || Object.keys(data).some(key => !['sessionId', 'ackId', 'threadId', 'eventId'].includes(key))
+            || !['sessionId', 'ackId', 'threadId'].every(key => uuid.test(data[key] || '')) || typeof data.eventId !== 'string' || !data.eventId || data.eventId.length > 512) return send(res, 400, { error: 'invalid' });
+        const key = notificationStreamKey(phone.hostId, phone.deviceId, data.sessionId), entry = notificationStreams.get(key), pending = notificationAcks.get(data.ackId);
+        const accepted = Boolean(entry?.visible && entry.expiresAt > now() && pending?.hostId === phone.hostId && pending.deviceId === phone.deviceId
+          && pending.event.threadId === data.threadId && pending.event.eventId === data.eventId && pending.streamKeys.has(key));
+        if (accepted) pending.finish(true);
+        return send(res, 200, { accepted });
+      }
       if (requested === '/api/notifications/presence' && req.method === 'POST') {
         if (!push) return send(res, 200, { enabled: false });
         if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
@@ -443,6 +477,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
           const result = req.method === 'POST' && value.subscription ? push.subscribe(phone.hostId, phone.deviceId, value.subscription)
             : req.method === 'DELETE' && typeof value.endpoint === 'string' ? push.unsubscribe(phone.hostId, phone.deviceId, value.endpoint) : null;
           if (!result) return send(res, 400, { error: 'invalid' });
+          if (req.method === 'DELETE' && !push.status(phone.hostId, phone.deviceId).subscribed) closeNotificationStreams(phone.hostId, phone.deviceId);
           updateNotificationSettings(phone.hostId);
           return send(res, 200, result);
         } catch (error) { return send(res, error.code === 'capacity' ? 429 : 400, { error: error.code === 'capacity' ? 'capacity' : 'invalid' }); }
@@ -800,7 +835,10 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (push && peers.get(hostId) === ws && ws.taskNotifications === 1) {
           try {
             const cleared = push.clearReminder(hostId, msg.event);
-            if (cleared) deliverReminderClear(hostId, cleared);
+            if (cleared) {
+              for (const pending of notificationAcks.values()) if (pending.hostId === hostId && pending.event.threadId === cleared.threadId && pending.event.eventId === cleared.eventId) pending.finish(false);
+              deliverReminderClear(hostId, cleared);
+            }
           } catch { /* Invalid desktop metadata must not modify reminder state. */ }
         }
         return;

@@ -2714,10 +2714,43 @@ const taskNotifications = new Map();
 const taskNotificationEvents = new Set();
 const clearedTaskNotificationEvents = new Set();
 const pendingTaskNotifications = new Map();
+const taskNotificationWatermarks = new Map();
+const taskNotificationReceipts = new Map();
+const validNotificationTime = value => Number.isSafeInteger(value) && value >= 0;
+function rememberTaskNotificationTime(notification) {
+  if (!validNotificationTime(notification.createdAt)) return;
+  const id = notification.threadId;
+  taskNotificationWatermarks.set(id, Math.max(taskNotificationWatermarks.get(id) ?? 0, notification.createdAt));
+  if (taskNotificationWatermarks.size > 512) taskNotificationWatermarks.delete(taskNotificationWatermarks.keys().next().value);
+}
+function trackTaskNotificationReceipt(notification, operation) {
+  const generation = historyScopeGeneration, pair = { ...historyScope };
+  const key = JSON.stringify([notification.threadId, notification.eventId]);
+  const receipt = Promise.resolve(operation).then(result => result !== false && result?.ignored !== true && generation === historyScopeGeneration && historyScope?.hostId === pair.hostId && historyScope?.deviceId === pair.deviceId, () => false);
+  taskNotificationReceipts.set(key, receipt);
+  if (taskNotificationReceipts.size > 2048) taskNotificationReceipts.delete(taskNotificationReceipts.keys().next().value);
+  return receipt;
+}
 const taskNotificationVersions = new Map();
 let lastTaskNotificationListComplete = false;
 let taskNotificationListGeneration = 0;
 function touchTaskNotification(id) { taskNotificationVersions.set(id, (taskNotificationVersions.get(id) || 0) + 1); }
+function persistTaskNotification(notification) {
+  const pair = { ...historyScope }, generation = historyScopeGeneration;
+  return trackTaskNotificationReceipt(notification, (async () => {
+    const result = await window.taskReminderStore.put(pair, notification);
+    let suppressed = result?.stale === true || result?.ignored === true;
+    if (result?.duplicate === true && window.taskReminderStore.inspectEvent) {
+      const inspected = await window.taskReminderStore.inspectEvent(pair, notification);
+      suppressed ||= inspected.status === 'inactive' || inspected.status === 'stale' || (inspected.status === 'seen' && inspected.stored === false);
+    }
+    if (suppressed && generation === historyScopeGeneration && historyScope?.hostId === pair.hostId && historyScope?.deviceId === pair.deviceId && taskNotifications.get(notification.threadId)?.eventId === notification.eventId) {
+      taskNotifications.delete(notification.threadId); touchTaskNotification(notification.threadId); refreshTaskNotificationIndicators();
+      void window.restoreTaskReminders?.();
+    }
+    return result;
+  })());
+}
 const taskNotificationLabels = { completed: '任务已完成', question: '任务需要回答', approval: '任务等待审批' };
 const taskNotificationSymbols = { completed: '', question: '待回答', approval: '待审批' };
 function renderTaskNotification(marker, notification, state = 'idle') {
@@ -2773,7 +2806,7 @@ function clearTaskNotification(id, force = false) {
   if ((changed || force) && historyScope) void window.taskReminderStore?.remove(historyScope, id)?.catch(() => {});
   if (changed) refreshTaskNotificationIndicators();
 }
-function clearTaskNotifications() { taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
+function clearTaskNotifications() { taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationWatermarks.clear(); taskNotificationReceipts.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
 window.clearTaskNotificationEvent = async notification => {
   if (!notification || !historyScope || historyScope.hostId !== notification.hostId || historyScope.deviceId !== notification.deviceId || !uuid.test(notification.threadId || '') || typeof notification.eventId !== 'string' || !notification.eventId || notification.eventId.length > 512) return false;
   const pair = { ...historyScope }, generation = historyScopeGeneration;
@@ -2782,8 +2815,10 @@ window.clearTaskNotificationEvent = async notification => {
   if (clearedTaskNotificationEvents.size > 2048) clearedTaskNotificationEvents.delete(clearedTaskNotificationEvents.values().next().value);
   taskNotificationEvents.add(notification.eventId);
   if (taskNotificationEvents.size > 2048) taskNotificationEvents.delete(taskNotificationEvents.values().next().value);
+  rememberTaskNotificationTime(notification);
   touchTaskNotification(notification.threadId);
-  const changed = taskNotifications.get(notification.threadId)?.eventId === notification.eventId;
+  const current = taskNotifications.get(notification.threadId);
+  const changed = current?.eventId === notification.eventId || (validNotificationTime(current?.createdAt) && validNotificationTime(notification.createdAt) && current.createdAt < notification.createdAt);
   if (changed) taskNotifications.delete(notification.threadId);
   if (pendingTaskNotifications.get(notification.threadId)?.notification.eventId === notification.eventId) pendingTaskNotifications.delete(notification.threadId);
   else {
@@ -2791,33 +2826,62 @@ window.clearTaskNotificationEvent = async notification => {
     if (pending) pending.version = taskNotificationVersions.get(notification.threadId);
   }
   if (changed) refreshTaskNotificationIndicators();
-  try { await window.taskReminderStore?.removeEvent(pair, { threadId: notification.threadId, eventId: notification.eventId }); } catch { return false; }
+  if (!window.taskReminderStore?.removeEvent) return false;
+  try { const result = await window.taskReminderStore.removeEvent(pair, { threadId: notification.threadId, eventId: notification.eventId, ...(validNotificationTime(notification.createdAt) ? { createdAt: notification.createdAt } : {}) }); if (result === false || result?.ignored === true) return false; } catch { return false; }
   return generation === historyScopeGeneration && historyScope?.hostId === pair.hostId && historyScope?.deviceId === pair.deviceId;
 };
 window.getNotificationThreadId = () => newDraft ? null : selectedId;
 function applyTaskNotification(notification, restored = false) {
-  if (!notification || !historyScope || historyScope.hostId !== notification.hostId || historyScope.deviceId !== notification.deviceId || !uuid.test(notification.threadId || '') || !Object.hasOwn(taskNotificationLabels, notification.kind) || typeof notification.eventId !== 'string' || !notification.eventId || notification.eventId.length > 4096) return false;
+  if (!notification || !historyScope || historyScope.hostId !== notification.hostId || historyScope.deviceId !== notification.deviceId || !uuid.test(notification.threadId || '') || !Object.hasOwn(taskNotificationLabels, notification.kind) || typeof notification.eventId !== 'string' || !notification.eventId || notification.eventId.length > 512) return false;
+  const latest = taskNotificationWatermarks.get(notification.threadId);
+  if (latest !== undefined && (!validNotificationTime(notification.createdAt) || notification.createdAt < latest)) return true;
+  rememberTaskNotificationTime(notification);
   if (clearedTaskNotificationEvents.has(JSON.stringify([notification.threadId, notification.eventId]))) return true;
   if (![...projectStatusGroups.values()].some(group => group.tasks.some(task => task.id === notification.threadId))) {
     if (pendingTaskNotifications.get(notification.threadId)?.notification.eventId === notification.eventId) return true;
     if (!restored) touchTaskNotification(notification.threadId);
     pendingTaskNotifications.delete(notification.threadId);
-    pendingTaskNotifications.set(notification.threadId, { generation: historyScopeGeneration, version: taskNotificationVersions.get(notification.threadId) || 0, restored, notification: { hostId: notification.hostId, deviceId: notification.deviceId, threadId: notification.threadId, eventId: notification.eventId, kind: notification.kind } });
+    pendingTaskNotifications.set(notification.threadId, { generation: historyScopeGeneration, version: taskNotificationVersions.get(notification.threadId) || 0, restored, notification: { hostId: notification.hostId, deviceId: notification.deviceId, threadId: notification.threadId, eventId: notification.eventId, kind: notification.kind, ...(validNotificationTime(notification.createdAt) ? { createdAt: notification.createdAt } : {}) } });
     if (pendingTaskNotifications.size > 32) pendingTaskNotifications.delete(pendingTaskNotifications.keys().next().value);
     refreshChangedThreadList();
     return true;
   }
   const seen = taskNotificationEvents.has(notification.eventId);
   if (!seen) { taskNotificationEvents.add(notification.eventId); if (taskNotificationEvents.size > 2048) taskNotificationEvents.delete(taskNotificationEvents.values().next().value); }
-  if (document.hidden !== true && !pageSuspended && !newDraft && selectedId === notification.threadId) { clearTaskNotification(notification.threadId, true); return true; }
+  if (document.hidden !== true && !pageSuspended && !newDraft && selectedId === notification.threadId) {
+    // A push for this exact event may already be in flight before the page's
+    // foreground presence reaches the server. Remember the receipt even when
+    // there was no stored reminder yet, so it cannot reappear after we read it.
+    trackTaskNotificationReceipt(notification, window.clearTaskNotificationEvent(notification));
+    clearTaskNotification(notification.threadId, true);
+    return true;
+  }
   if (seen) return true;
   if (!restored) touchTaskNotification(notification.threadId);
-  taskNotifications.set(notification.threadId, { kind: notification.kind, eventId: notification.eventId });
-  void window.taskReminderStore?.put(historyScope, notification)?.catch(() => {});
+  taskNotifications.set(notification.threadId, { kind: notification.kind, eventId: notification.eventId, ...(validNotificationTime(notification.createdAt) ? { createdAt: notification.createdAt } : {}) });
+  if (window.taskReminderStore?.put) persistTaskNotification(notification);
   refreshTaskNotificationIndicators();
   return true;
 }
 window.acceptTaskNotification = notification => applyTaskNotification(notification);
+// An SSE write is only delivery after this exact event has a durable receipt.
+window.taskNotificationReceipt = async notification => {
+  const pair = historyScope && { ...historyScope }, generation = historyScopeGeneration;
+  if (!notification || !pair || notification.hostId !== pair.hostId || notification.deviceId !== pair.deviceId) return false;
+  if (window.taskReminderStore?.inspectEvent) {
+    let inspected;
+    try { inspected = await window.taskReminderStore.inspectEvent(pair, notification); } catch { return false; }
+    if (generation !== historyScopeGeneration || historyScope?.hostId !== pair.hostId || historyScope?.deviceId !== pair.deviceId || inspected.status === 'inactive') return false;
+    if (inspected.status === 'stale' || (inspected.status === 'seen' && inspected.stored === false)) return trackTaskNotificationReceipt(notification, window.clearTaskNotificationEvent(notification));
+  }
+  if (!applyTaskNotification(notification)) return false;
+  if (pendingTaskNotifications.get(notification.threadId)?.notification.eventId === notification.eventId) return false;
+  const key = JSON.stringify([notification.threadId, notification.eventId]);
+  if (taskNotificationReceipts.has(key)) return taskNotificationReceipts.get(key);
+  if (taskNotifications.get(notification.threadId)?.eventId === notification.eventId && window.taskReminderStore?.put) return persistTaskNotification(notification);
+  if (!window.taskReminderStore?.removeEvent) return false;
+  return trackTaskNotificationReceipt(notification, window.clearTaskNotificationEvent(notification));
+};
 function drainPendingTaskNotifications() {
   const known = new Set([...projectStatusGroups.values()].flatMap(group => group.tasks.map(task => task.id)));
   for (const [id, entry] of pendingTaskNotifications) {

@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
 const source = await readFile(new URL('../public/task-reminder-store.js', import.meta.url), 'utf8');
+const workerSource = await readFile(new URL('../public/notification-worker.js', import.meta.url), 'utf8');
 const pairA = { hostId: randomUUID(), deviceId: randomUUID() };
 const pairB = { hostId: randomUUID(), deviceId: randomUUID() };
 const event = (threadId = randomUUID(), eventId = randomUUID(), kind = 'completed') => ({ threadId, eventId, kind });
@@ -54,6 +55,25 @@ function context(db, navigator = {}, worker = false) {
   vm.runInNewContext(source, worker ? { self: root } : { window: root });
   return root.taskReminderStore;
 }
+
+test('inspection distinguishes a stored reminder from an exact read receipt across context restarts', async () => {
+  const db = indexedDbFixture(), page = context(db), first = { ...event(), createdAt: 200 };
+  await page.activate(pairA);
+  await page.put(pairA, first);
+  assert.deepEqual(plain(await context(db).inspectEvent(pairA, first)), { status: 'seen', stored: true });
+  await page.removeEvent(pairA, first);
+  const reloaded = context(db);
+  assert.deepEqual(plain(await reloaded.inspectEvent(pairA, first)), { status: 'seen', stored: false });
+  assert.equal(await reloaded.hasEvent(pairA, first), true, 'worker duplicate suppression still accepts a read receipt');
+  await reloaded.put(pairA, first);
+  assert.deepEqual(plain(await reloaded.list(pairA)), [], 'an exact replay must not restore the read reminder');
+  const next = { ...event(first.threadId), createdAt: 200 };
+  await reloaded.put(pairA, next);
+  assert.deepEqual(plain(await context(db).inspectEvent(pairA, first)), { status: 'seen', stored: false });
+  assert.deepEqual(plain(await context(db).inspectEvent(pairA, next)), { status: 'seen', stored: true });
+  await reloaded.remove(pairA, first.threadId);
+  assert.deepEqual(plain(await context(db).inspectEvent(pairA, next)), { status: 'seen', stored: false });
+});
 
 test('reminders persist across page/worker contexts and only retain generic task event identities', async () => {
   const db = indexedDbFixture(), badges = [];
@@ -169,4 +189,182 @@ test('hasEvent detects read receipts and stored duplicates only in the active pa
   await store.activate(pairB);
   assert.equal(await worker.hasEvent(pairA, newer), false, 'inactive scope does not reveal receipts');
   assert.equal(await worker.hasEvent(pairB, newer), false);
+});
+
+function pushWorkerContext(db, navigator = {}, beforeDisplay = async () => {}) {
+  const listeners = {}, displayed = [], root = {
+    indexedDB: db.indexedDB, navigator, location: { origin: 'https://assistant.example' },
+    addEventListener(type, callback) { listeners[type] = callback; },
+    registration: {
+      async showNotification(title, options) {
+        const notification = { title, ...options, closed: false, close() { this.closed = true; } };
+        displayed.push(notification); await beforeDisplay(notification);
+      },
+      async getNotifications({ tag } = {}) { return displayed.filter(notification => !notification.closed && (!tag || notification.tag === tag)); },
+    },
+    clients: { async matchAll() { return []; } },
+  };
+  const sandbox = vm.createContext({ self: root, URL, URLSearchParams,
+    importScripts(path) { assert.equal(path, '/task-reminder-store.js'); vm.runInContext(source, sandbox); },
+  });
+  vm.runInContext(workerSource, sandbox);
+  assert.equal(vm.runInContext('typeof window', sandbox), 'undefined'); assert.equal(vm.runInContext('typeof document', sandbox), 'undefined');
+  return { root, displayed, async push(pair, notification) {
+    let completion;
+    listeners.push({ data: { json: () => ({ ...pair, ...notification }) }, waitUntil(promise) { completion = promise; } });
+    await completion;
+  } };
+}
+
+test('with no H5 windows, push waits for IndexedDB persistence and the worker badge call, then survives a worker restart', async () => {
+  const db = indexedDbFixture(), page = context(db), badges = [];
+  await page.activate(pairA);
+  let releaseBadge;
+  const worker = pushWorkerContext(db, { async setAppBadge(count) {
+    await new Promise(resolve => { releaseBadge = resolve; }); badges.push(count);
+  }, async clearAppBadge() { badges.push(0); } });
+  const first = event(); let finished = false;
+  const pushed = worker.push(pairA, first).then(() => { finished = true; });
+  while (!releaseBadge) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, false, 'push event waitUntil must include the asynchronous Badging API call');
+  assert.equal(worker.displayed.length, 1); assert.deepEqual(plain(await page.list(pairA)), [first]);
+  releaseBadge(); await pushed;
+  assert.deepEqual(badges, [1]);
+  const restarted = pushWorkerContext(db, { async setAppBadge(count) { badges.push(count); }, async clearAppBadge() { badges.push(0); } });
+  await restarted.push(pairA, first); assert.equal(restarted.displayed.length, 0, 'a new worker reads the persisted receipt before notifying');
+  const second = event(); await restarted.push(pairA, second);
+  assert.equal(restarted.displayed.length, 1); assert.equal(badges.at(-1), 2);
+  assert.deepEqual(plain(await context(db).list(pairA)), [first, second]);
+});
+
+test('a pairing revoked while the OS display is pending cannot restore its badge and its late notification is closed', async () => {
+  const db = indexedDbFixture(), badges = [], page = context(db, { async clearAppBadge() { badges.push(0); } });
+  await page.activate(pairA);
+  let releaseDisplay;
+  const worker = pushWorkerContext(db, { async setAppBadge(count) { badges.push(count); }, async clearAppBadge() { badges.push(0); } },
+    () => new Promise(resolve => { releaseDisplay = resolve; }));
+  const pushed = worker.push(pairA, event());
+  while (!releaseDisplay) await new Promise(resolve => setImmediate(resolve));
+  await page.activate(null); releaseDisplay(); await pushed;
+  assert.equal(worker.displayed[0].closed, true);
+  assert.deepEqual(plain(await page.list(pairA)), []); assert.equal(badges.at(-1), 0);
+});
+
+test('an exact read receipt arriving while the OS display is pending prevents a late badge or system notification', async () => {
+  const db = indexedDbFixture(), badges = [], page = context(db);
+  await page.activate(pairA);
+  let releaseDisplay;
+  const worker = pushWorkerContext(db, { async setAppBadge(count) { badges.push(count); }, async clearAppBadge() { badges.push(0); } },
+    () => new Promise(resolve => { releaseDisplay = resolve; }));
+  const notification = event(), pushed = worker.push(pairA, notification);
+  while (!releaseDisplay) await new Promise(resolve => setImmediate(resolve));
+  await page.removeEvent(pairA, notification); releaseDisplay(); await pushed;
+  assert.equal(worker.displayed[0].closed, true); assert.deepEqual(plain(await page.list(pairA)), []); assert.equal(badges.at(-1), 0);
+});
+
+test('verified event timestamps reject older and unknown-time updates but equal timestamps retain arrival order', async () => {
+  const db = indexedDbFixture(), store = context(db); await store.activate(pairA);
+  const latest = { ...event(), kind: 'question', createdAt: 200 }, older = { ...event(latest.threadId, 'older'), createdAt: 100 };
+  await store.put(pairA, latest);
+  assert.equal((await store.inspectEvent(pairA, older)).status, 'stale');
+  assert.deepEqual(plain(await store.put(pairA, older)), { stale: true });
+  for (const createdAt of [undefined, -1, 1.5, '300', Infinity]) {
+    const unknown = { ...event(latest.threadId), createdAt };
+    assert.equal((await store.inspectEvent(pairA, unknown)).status, 'stale');
+    assert.deepEqual(plain(await store.put(pairA, unknown)), { stale: true });
+  }
+  assert.deepEqual(plain(await store.list(pairA)), [latest]);
+  const equal = { ...event(latest.threadId, 'same-ms', 'approval'), createdAt: 200 };
+  assert.equal((await store.inspectEvent(pairA, equal)).status, 'new'); await store.put(pairA, equal);
+  assert.deepEqual(plain(await store.list(pairA)), [equal], 'different IDs in the same millisecond have no provable ordering');
+  const newer = { ...event(latest.threadId, 'newest'), createdAt: 201 }; await store.put(pairA, newer);
+  assert.deepEqual(plain(await store.list(pairA)), [newer]);
+});
+
+test('read-before-push writes a per-task watermark, removes strictly older rows and never removes a newer event', async () => {
+  const store = context(indexedDbFixture()); await store.activate(pairA);
+  const previous = { ...event(), createdAt: 100 }, receipt = { ...event(previous.threadId, 'already-read'), createdAt: 200 };
+  await store.put(pairA, previous);
+  assert.deepEqual(plain(await store.removeEvent(pairA, receipt)), { removed: true });
+  assert.deepEqual(plain(await store.list(pairA)), []);
+  const delayed = { ...event(previous.threadId, 'late-different-id'), createdAt: 150 };
+  assert.equal((await store.inspectEvent(pairA, delayed)).status, 'stale'); await store.put(pairA, delayed);
+  assert.deepEqual(plain(await store.list(pairA)), []);
+  const equal = { ...event(previous.threadId, 'same-ms-other-event'), createdAt: 200 }; await store.put(pairA, equal);
+  await store.removeEvent(pairA, receipt); assert.deepEqual(plain(await store.list(pairA)), [equal], 'same timestamp alone cannot identify which different event is newer');
+  const newer = { ...event(previous.threadId, 'newer-unread'), createdAt: 300 }; await store.put(pairA, newer);
+  await store.removeEvent(pairA, receipt); assert.deepEqual(plain(await store.list(pairA)), [newer]);
+});
+
+test('task watermarks survive remove, clear and worker restart without changing the database schema', async () => {
+  const db = indexedDbFixture(), store = context(db); await store.activate(pairA);
+  const first = { ...event(), createdAt: 100 }, second = { ...event(), createdAt: 200 };
+  await store.put(pairA, first); await store.put(pairA, second);
+  await store.remove(pairA, first.threadId); await store.clear(pairA);
+  const worker = context(db, {}, true);
+  for (const saved of [first, second]) {
+    const late = { ...event(saved.threadId), createdAt: saved.createdAt - 1 };
+    assert.equal((await worker.inspectEvent(pairA, late)).status, 'stale'); await worker.put(pairA, late);
+  }
+  assert.deepEqual(plain(await worker.list(pairA)), []);
+  assert.equal(db.opens, 2, 'a new execution context reopens the same version-1 state store');
+  await store.activate(pairB);
+  assert.equal((await worker.inspectEvent(pairA, first)).status, 'inactive');
+  assert.deepEqual(plain(await worker.put(pairA, { ...event(), createdAt: 999 })), { ignored: true });
+  const otherPair = { ...event(first.threadId), createdAt: 1 }; await store.put(pairB, otherPair);
+  assert.deepEqual(plain(await store.list(pairB)), [otherPair], 'one paired computer never inherits another scope watermark');
+});
+
+test('removing or clearing existing timestamped rows preserves their proof even when the watermark key did not exist yet', async () => {
+  for (const operation of ['remove', 'clear']) {
+    const db = indexedDbFixture(), store = context(db); await store.activate(pairA);
+    const saved = { ...event(), createdAt: 200 };
+    db.committed.set('scope:' + JSON.stringify([pairA.hostId, pairA.deviceId]), [saved]);
+    if (operation === 'remove') await store.remove(pairA, saved.threadId); else await store.clear(pairA);
+    assert.equal((await store.inspectEvent(pairA, { ...event(saved.threadId), createdAt: 100 })).status, 'stale');
+    assert.deepEqual(plain(await store.list(pairA)), []);
+  }
+});
+
+test('per-task watermarks remain bounded to the most recent 512 tasks independently of the visible reminder rows', async () => {
+  const db = indexedDbFixture(), store = context(db); await store.activate(pairA);
+  const events = Array.from({ length: 515 }, (_, index) => ({ ...event(), createdAt: index }));
+  for (const notification of events) await store.removeEvent(pairA, notification);
+  const entries = [...db.committed].filter(([key]) => key.startsWith('watermarks:'));
+  assert.equal(entries.length, 1); assert.equal(entries[0][1].length, 512);
+  assert.deepEqual(plain(entries[0][1][0]), { threadId: events[3].threadId, createdAt: 3 });
+  assert.deepEqual(plain(await store.list(pairA)), []);
+});
+
+test('a restarted worker rejects a delayed older notification before display or badge changes', async () => {
+  const db = indexedDbFixture(), store = context(db), badges = []; await store.activate(pairA);
+  const newest = { ...event(), kind: 'question', createdAt: 200 }; await store.put(pairA, newest);
+  const worker = pushWorkerContext(db, { async setAppBadge(count) { badges.push(count); }, async clearAppBadge() { badges.push(0); } });
+  await worker.push(pairA, { ...event(newest.threadId, 'old-completed'), createdAt: 100 });
+  assert.equal(worker.displayed.length, 0); assert.deepEqual(plain(await store.list(pairA)), [newest]); assert.equal(badges.at(-1), 1);
+  await store.remove(pairA, newest.threadId);
+  await worker.push(pairA, event(newest.threadId, 'legacy-without-time'));
+  assert.equal(worker.displayed.length, 0); assert.deepEqual(plain(await store.list(pairA)), []); assert.equal(badges.at(-1), 0);
+});
+
+test('a duplicate push can enrich an older exact read receipt with its timestamp without restoring its reminder', async () => {
+  const db = indexedDbFixture(), store = context(db); await store.activate(pairA);
+  const read = event(); await store.removeEvent(pairA, read);
+  const worker = pushWorkerContext(db);
+  await worker.push(pairA, { ...read, createdAt: 300 });
+  await worker.push(pairA, { ...event(read.threadId, 'older-other-id'), createdAt: 200 });
+  assert.equal(worker.displayed.length, 0); assert.deepEqual(plain(await store.list(pairA)), []);
+  assert.equal((await store.inspectEvent(pairA, { ...event(read.threadId), createdAt: 299 })).status, 'stale');
+});
+
+test('a newer timestamped receipt arriving during OS display closes a stale different event and keeps its badge empty', async () => {
+  const db = indexedDbFixture(), store = context(db), badges = []; await store.activate(pairA);
+  let releaseDisplay;
+  const worker = pushWorkerContext(db, { async setAppBadge(count) { badges.push(count); }, async clearAppBadge() { badges.push(0); } },
+    () => new Promise(resolve => { releaseDisplay = resolve; }));
+  const old = { ...event(), createdAt: 100 }, pushing = worker.push(pairA, old);
+  while (!releaseDisplay) await new Promise(resolve => setImmediate(resolve));
+  await store.removeEvent(pairA, { ...event(old.threadId, 'newer-viewed'), createdAt: 200 });
+  releaseDisplay(); await pushing;
+  assert.equal(worker.displayed[0].closed, true); assert.deepEqual(plain(await store.list(pairA)), []); assert.equal(badges.at(-1), 0);
 });

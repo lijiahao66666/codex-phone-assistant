@@ -151,6 +151,38 @@ test('an in-flight delivery does not prevent revocation from suppressing later e
   } finally { release?.(); service.close(); }
 });
 
+for (const change of ['unsubscribe', 'refresh']) test(`a queued endpoint ${change} during another delivery cannot send its stale snapshot`, async () => {
+  let release, started;
+  const began = new Promise(resolve => started = resolve), blocked = new Promise(resolve => release = resolve), attempts = [];
+  const service = new PushService(options({ sendNotification: async sub => {
+    attempts.push(sub);
+    if (attempts.length === 1) { started(); await blocked; }
+  } }));
+  try {
+    const subscriptions = [subscription('https://web.push.apple.com/one'), subscription('https://web.push.apple.com/two')];
+    for (const sub of subscriptions) service.subscribe(host, device, sub);
+    const live = event(), pending = service.notify(host, live); await began;
+    // SQL scan order is unspecified: change the endpoint not yet dispatched.
+    const queued = subscriptions.find(sub => sub.endpoint !== attempts[0].endpoint);
+    const replacement = subscription(queued.endpoint);
+    if (change === 'unsubscribe') service.unsubscribe(host, device, queued.endpoint);
+    else service.subscribe(host, device, replacement);
+    assert.equal(service.status(host, device, queued.endpoint).subscribed, change === 'refresh');
+    release();
+    assert.deepEqual(await pending, { sent: 1, failed: 0 });
+    assert.equal(attempts.some(sub => sub.endpoint === queued.endpoint), false, 'the old endpoint revision was withdrawn before dispatch');
+    assert.deepEqual(await service.notify(host, live), { sent: 0, skipped: 'duplicate' });
+    const later = await service.notify(host, event());
+    assert.equal(later.sent, change === 'refresh' ? 2 : 1);
+    const targetAttempts = attempts.filter(sub => sub.endpoint === queued.endpoint);
+    assert.equal(targetAttempts.length, change === 'refresh' ? 1 : 0);
+    if (change === 'refresh') {
+      assert.deepEqual(targetAttempts[0].keys, replacement.keys);
+      assert.equal(service.status(host, device, queued.endpoint).subscribed, true, 'skipping the old snapshot must retain its replacement');
+    }
+  } finally { release?.(); service.close(); }
+});
+
 test('concurrent copies of one live event send exactly once; stale events never send', async () => {
   let count = 0;
   const service = new PushService(options({ sendNotification: async () => { count++; } }));
@@ -275,7 +307,7 @@ test('foreground delivery is scoped, deduplicated per device and bypasses all sy
     const live = event();
     assert.deepEqual(await service.notify(host, live), { sent: 0, failed: 0, foreground: 1 });
     assert.equal(foreground.length, 1); assert.equal(system.length, 0);
-    assert.deepEqual(foreground[0], { hostId: host, deviceId: device, event: { eventId: live.eventId, threadId: live.threadId, kind: live.kind } });
+    assert.deepEqual(foreground[0], { hostId: host, deviceId: device, event: { eventId: live.eventId, threadId: live.threadId, kind: live.kind, createdAt: live.createdAt } });
     await service.notify(host, live); assert.equal(foreground.length, 1);
     await service.notify(otherHost, event()); assert.equal(system.length, 1);
   } finally { service.close(); }
@@ -294,4 +326,35 @@ test('failed foreground transport falls back to system push while revoked device
     active = false; await service.notify(host, event());
     assert.equal(attempts, 1); assert.equal(foreground, 1);
   } finally { service.close(); }
+});
+
+
+test('asynchronous foreground acknowledgement waits for handling and false or rejection falls back', async () => {
+  for (const result of [true, false, 'reject']) {
+    let release, started, sends = 0;
+    const began = new Promise(resolve => started = resolve), gate = new Promise(resolve => release = resolve);
+    const service = new PushService(options({ deliverForeground: async () => { started(); await gate; if (result === 'reject') throw new Error('No ACK'); return result; }, sendNotification: async () => { sends++; } }));
+    try {
+      service.subscribe(host, device, subscription()); const pending = service.notify(host, event()); await began;
+      assert.equal(sends, 0); release(); const delivered = await pending;
+      assert.equal(sends, result === true ? 0 : 1); assert.equal(delivered.foreground ?? 0, result === true ? 1 : 0);
+    } finally { release?.(); service.close(); }
+  }
+});
+
+for (const change of ['unsubscribe', 'refresh', 'revoke', 'clear', 'close']) test(`foreground fallback rechecks ${change} after waiting for an ACK`, async () => {
+  let release, started, sends = 0, active = true;
+  const began = new Promise(resolve => started = resolve), gate = new Promise(resolve => release = resolve);
+  const service = new PushService(options({ isActiveDevice: () => active, deliverForeground: async () => { started(); await gate; return false; }, sendNotification: async () => { sends++; } }));
+  try {
+    const sub = subscription(), live = event(); service.subscribe(host, device, sub);
+    const pending = service.notify(host, live); await began;
+    if (change === 'unsubscribe') service.unsubscribe(host, device, sub.endpoint);
+    if (change === 'refresh') service.subscribe(host, device, subscription(sub.endpoint));
+    if (change === 'revoke') { active = false; service.revokeDevice(host, device); }
+    if (change === 'clear') service.clearReminder(host, { ...live, reason: 'resolved' });
+    if (change === 'close') service.close();
+    release(); await pending; assert.equal(sends, 0);
+    if (change === 'refresh') assert.equal(service.status(host, device, sub.endpoint).subscribed, true);
+  } finally { release?.(); service.close(); }
 });

@@ -69,12 +69,39 @@ test('only exact-pair known tasks accept valid foreground reminder events; the v
   const f = await fixture();
   assert.equal(f.notify(notification(a)), true);
   assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
-  for (const invalid of [notification(b, 'unknown'), notification(b, 'question', { hostId: deviceId }), notification(b, 'question', { deviceId: hostId }), notification(b, 'question', { eventId: '' }), null]) assert.equal(f.notify(invalid), false);
+  for (const invalid of [notification(b, 'unknown'), notification(b, 'question', { hostId: deviceId }), notification(b, 'question', { deviceId: hostId }), notification(b, 'question', { eventId: '' }), notification(b, 'question', { eventId: 'x'.repeat(513) }), null]) assert.equal(f.notify(invalid), false);
   assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
   assert.equal(f.notify(notification(b, 'question')), true);
   const marker = f.row(b).querySelector('.task-notification');
   assert.equal(marker.hidden, false); assert.equal(marker.textContent, '待回答'); assert.equal(marker.getAttribute('aria-label'), '待回答');
   assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1');
+});
+
+test('a visible task records the exact receipt before a late push can restore it, without clearing a newer event', async () => {
+  const f = await fixture(), receipts = [], puts = [];
+  f.window.taskReminderStore = {
+    async removeEvent(pair, event) { receipts.push({ ...pair, ...event }); },
+    async remove() {},
+    async put(pair, event) { puts.push(event); },
+  };
+  const viewed = notification(a);
+  assert.equal(f.notify(viewed), true);
+  await Promise.resolve();
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].hostId, hostId); assert.equal(receipts[0].deviceId, deviceId);
+  assert.equal(receipts[0].threadId, a); assert.equal(receipts[0].eventId, viewed.eventId);
+  assert.equal(puts.length, 0);
+
+  f.visibility(true);
+  f.notify(viewed);
+  assert.equal(puts.length, 0, 'a delayed copy stays acknowledged after the page becomes hidden');
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
+  const next = notification(a, 'approval');
+  f.notify(next);
+  assert.equal(puts.length, 1); assert.equal(puts[0].eventId, next.eventId);
+  await f.window.clearTaskNotificationEvent(viewed);
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, false);
+  assert.equal(f.row(a).querySelector('.task-notification').textContent, '待审批');
 });
 
 test('a task event arriving before the authoritative list waits invisibly, refreshes the list and drains after its row arrives', async () => {
@@ -336,4 +363,82 @@ test('settings use a right-side drawer constrained to the mobile viewport and a 
   assert.ok(html.indexOf('id="project-list"') < html.indexOf('class="sidebar-footer"'));
   assert.ok(html.indexOf('class="sidebar-footer"') < html.indexOf('id="open-settings"'));
   assert.ok(html.indexOf('id="open-settings"') < html.indexOf('</aside>'));
+});
+
+test('foreground acknowledgement waits for durable storage and rejects failure, missing storage, unknown tasks and revoked scopes', async () => {
+  const f = await fixture(); let release;
+  f.window.taskReminderStore = { put: () => new Promise(resolve => { release = resolve; }), async removeEvent() {} };
+  const event = notification(b, 'question', { createdAt: 200 });
+  let acknowledged = false;
+  const receipt = f.window.taskNotificationReceipt(event).then(value => { acknowledged = value; return value; });
+  await Promise.resolve(); assert.equal(acknowledged, false);
+  release({ stored: true }); assert.equal(await receipt, true);
+  assert.equal(await f.window.taskNotificationReceipt(notification(hostId)), false, 'unknown task is not acknowledged before list acceptance');
+  f.window.taskReminderStore.put = async () => { throw Error('IDB unavailable'); };
+  assert.equal(await f.window.taskNotificationReceipt(notification(c)), false);
+  f.window.taskReminderStore.put = () => new Promise(resolve => { release = resolve; });
+  const revoked = f.window.taskNotificationReceipt(notification(c));
+  f.run('invalidateDeviceState()'); release({ stored: true }); assert.equal(await revoked, false);
+  const absent = await fixture(); assert.equal(await absent.window.taskNotificationReceipt(notification(b)), false);
+});
+
+test('visible-task acknowledgement waits for the exact read receipt, so an in-flight push cannot restore its badge', async () => {
+  const f = await fixture(); let release;
+  f.window.taskReminderStore = { removeEvent: () => new Promise(resolve => { release = resolve; }), async remove() {} };
+  const event = notification(a, 'approval', { createdAt: 200 });
+  let done = false;
+  const work = f.window.taskNotificationReceipt(event).then(result => { done = true; return result; });
+  await Promise.resolve(); assert.equal(done, false); release({ removed: false });
+  assert.equal(await work, true); assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
+});
+
+test('late older or untimed events cannot overwrite or resurrect a newer reminder, including after it was read', async () => {
+  const f = await fixture(), puts = [];
+  f.window.taskReminderStore = { async put(pair, event) { puts.push(event); }, async remove() {}, async removeEvent() {} };
+  f.notify(notification(b, 'question', { createdAt: 200 }));
+  f.notify(notification(b, 'completed', { createdAt: 100 }));
+  f.notify(notification(b, 'completed'));
+  assert.equal(f.row(b).querySelector('.task-notification').textContent, '待回答'); assert.equal(puts.length, 1);
+  f.row(b).click(); f.run(`selectedId='${a}'`);
+  f.notify(notification(b, 'completed', { createdAt: 199 }));
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  f.notify(notification(b, 'approval', { createdAt: 200 }));
+  assert.equal(f.row(b).querySelector('.task-notification').textContent, '待审批', 'equal millisecond events retain arrival semantics');
+  assert.equal(puts.at(-1).createdAt, 200);
+});
+
+test('persisted newer watermarks reject stale SSE before displaying it and never acknowledge an inactive pairing', async () => {
+  const f = await fixture(), receipts = [];
+  f.window.taskReminderStore = { async inspectEvent() { return { status: 'stale' }; }, async removeEvent(pair, event) { receipts.push(event); } };
+  assert.equal(await f.window.taskNotificationReceipt(notification(b, 'completed', { createdAt: 100 })), true);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true); assert.equal(receipts.length, 1);
+  f.window.taskReminderStore.inspectEvent = async () => ({ status: 'inactive' });
+  assert.equal(await f.window.taskNotificationReceipt(notification(b)), false);
+});
+
+test('an ignored read receipt cannot acknowledge foreground delivery', async () => {
+  const f = await fixture();
+  f.window.taskReminderStore = { async removeEvent() { return { ignored: true }; }, async remove() {} };
+  assert.equal(await f.window.taskNotificationReceipt(notification(a)), false);
+});
+
+test('a durable read tombstone after page reload does not resurrect a foreground marker', async () => {
+  const f = await fixture(); let puts = 0;
+  f.window.taskReminderStore = { async inspectEvent() { return { status: 'seen', stored: false }; }, async removeEvent() {}, async put() { puts++; return { duplicate: true }; } };
+  assert.equal(await f.window.taskNotificationReceipt(notification(b)), true);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true); assert.equal(puts, 0);
+});
+
+test('a competing worker watermark or read receipt during put removes only the suppressed exact local event', async () => {
+  const f = await fixture(); let release;
+  f.window.taskReminderStore = { put: () => new Promise(resolve => { release = resolve; }) };
+  const event = notification(b, 'completed', { createdAt: 100 });
+  const work = f.window.taskNotificationReceipt(event);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  release({ stale: true }); assert.equal(await work, true);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  const old = f.window.taskNotificationReceipt(notification(b, 'completed', { createdAt: 101 })); const releaseOld = release;
+  f.notify(notification(b, 'question', { createdAt: 200 }));
+  releaseOld({ stale: true }); await old;
+  assert.equal(f.row(b).querySelector('.task-notification').textContent, '待回答');
 });

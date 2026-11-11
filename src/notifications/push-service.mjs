@@ -169,17 +169,24 @@ export class PushService {
         if (this.closed) break;
         if (this.#isCleared(hostId, event)) break;
         if (!this.isActiveDevice(hostId, row.device_id)) { this.revokeDevice(hostId, row.device_id); continue; }
+        // Earlier endpoints may await network I/O. An unsubscribe or key
+        // refresh during that wait withdraws this exact queued revision.
+        if (!this.#currentRevision(row)) continue;
         const subscription = JSON.parse(row.subscription);
         if (subscription.expirationTime != null && subscription.expirationTime <= now) { this.#removeRevision(row); continue; }
         if (!checkedDevices.has(row.device_id)) {
           checkedDevices.add(row.device_id);
           try {
-            if (this.deliverForeground(hostId, row.device_id, { eventId: event.eventId, threadId: event.threadId, kind: event.kind }) === true) {
+            if (await this.deliverForeground(hostId, row.device_id, { eventId: event.eventId, threadId: event.threadId, kind: event.kind, createdAt: event.createdAt }) === true) {
               foregroundDevices.add(row.device_id); foreground++;
             }
           } catch { /* A failed foreground transport falls back to system push. */ }
         }
         if (foregroundDevices.has(row.device_id)) continue;
+        // Waiting for a page ACK yields to clear, unsubscribe and revocation.
+        if (this.closed || this.#isCleared(hostId, event)) break;
+        if (!this.isActiveDevice(hostId, row.device_id)) { this.revokeDevice(hostId, row.device_id); continue; }
+        if (!this.#currentRevision(row)) continue;
         const payload = JSON.stringify({ title: titles[event.kind], body: '打开手机助手查看任务。', eventId: event.eventId, createdAt: event.createdAt, kind: event.kind, hostId, deviceId: row.device_id, threadId: event.threadId, tag: 'codex-' + hash(hostId + ':' + event.eventId).slice(0, 32) });
         try {
           await this.sendNotification(subscription, payload, { TTL: 120, urgency: 'normal', timeout: 10000 });
@@ -191,6 +198,10 @@ export class PushService {
       }
       return { sent, failed, ...(foreground ? { foreground } : {}) };
     } finally { this.inFlight--; }
+  }
+
+  #currentRevision(row) {
+    return Boolean(this.db.prepare('SELECT 1 FROM push_subscriptions WHERE host_id = ? AND device_id = ? AND endpoint_hash = ? AND revision = ?').get(row.host_id, row.device_id, row.endpoint_hash, row.revision));
   }
 
   #removeRevision(row) {

@@ -324,7 +324,7 @@ async function workerFixture(pages = []) {
   const self = { location: { origin: 'https://assistant.example' }, async skipWaiting() {}, registration: { async showNotification(...args) { shown.push(args); } },
     taskReminderStore: { async isActive() { return true; }, async hasEvent(pair, event) {
       return reminders.some(item => item.pair.hostId === pair.hostId && item.pair.deviceId === pair.deviceId && item.event.threadId === event.threadId && item.event.eventId === event.eventId);
-    }, async put(pair, event) { reminders.push({ pair, event }); } },
+    }, async put(pair, event) { if (await this.hasEvent(pair, event)) return { duplicate: true }; reminders.push({ pair, event }); return { stored: true }; } },
     clients: { async claim() {}, async matchAll() { return pages; }, async openWindow(url) { opened.push(url); } },
     addEventListener(type, fn) { listeners[type] = fn; },
   };
@@ -346,7 +346,8 @@ test('push worker accepts only scoped known events, emits generic content, and n
   for (const [title, settings] of f.shown) {
     assert.doesNotMatch(JSON.stringify([title, settings]), /PRIVATE/);
     assert.equal(settings.tag.length, 100);
-    assert.deepEqual(JSON.parse(JSON.stringify(settings.data)), { ...pairA, threadId });
+    assert.deepEqual(JSON.parse(JSON.stringify(settings.data)), { ...pairA, threadId, eventId: settings.data.eventId });
+    assert.ok(['completed', 'question', 'approval'].includes(settings.data.eventId));
   }
 });
 
@@ -391,4 +392,28 @@ test('worker suppresses already-cleared and duplicate push events but displays a
   await push('first-event'); assert.equal(f.shown.length, 1);
   await push('new-event'); assert.equal(f.shown.length, 2);
   assert.equal(f.reminders.length, 2);
+});
+
+test('worker rejects missing or oversized event identities before displaying or persisting a reminder', async () => {
+  const f = await workerFixture();
+  for (const eventId of [undefined, '', 'x'.repeat(513)]) await f.dispatch('push', { ...pairA, threadId, kind: 'completed', eventId });
+  assert.equal(f.shown.length, 0); assert.equal(f.reminders.length, 0);
+});
+
+test('worker rechecks the pairing after a delayed receipt read rather than displaying an old pairing', async () => {
+  const f = await workerFixture(), read = deferred(); let active = true;
+  f.store.isActive = async () => active; f.store.hasEvent = () => read.promise;
+  const push = f.dispatch('push', { ...pairA, threadId, kind: 'completed', eventId: 'in-flight' });
+  await flush(); active = false; read.resolve(false); await push;
+  assert.equal(f.shown.length, 0); assert.equal(f.reminders.length, 0);
+});
+
+test('concurrent duplicate push events share one successful display and receipt sequence', async () => {
+  const f = await workerFixture(), display = deferred(); let displays = 0;
+  f.registration.showNotification = async () => { displays++; await display.promise; };
+  const data = { ...pairA, threadId, kind: 'completed', eventId: 'same-in-flight-event' };
+  const first = f.dispatch('push', data), repeated = f.dispatch('push', data);
+  await flush(); assert.equal(displays, 1); assert.equal(f.reminders.length, 0);
+  display.resolve(); await Promise.all([first, repeated]);
+  assert.equal(displays, 1); assert.equal(f.reminders.length, 1);
 });

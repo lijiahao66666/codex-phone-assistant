@@ -14,7 +14,7 @@ function subscription(endpoint = 'https://web.push.apple.com/' + randomUUID()) {
   return { endpoint, keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: randomBytes(16).toString('base64url') } };
 }
 
-async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStreams, now } = {}) {
+async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStreams, foregroundAckMs = 500, now } = {}) {
   const reserve = createServer();
   await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
   const port = reserve.address().port;
@@ -23,7 +23,7 @@ async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStr
   const publicKeys = await generateVapidKeys();
   const deliveries = [], peers = [];
   const headers = { origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };
-  const relay = createPairRelay({ origin, ...(now ? { now } : {}), ...(maxNotificationStreams === undefined ? {} : { maxNotificationStreams }), ...(enabled ? { notifications: {
+  const relay = createPairRelay({ origin, foregroundAckMs, ...(now ? { now } : {}), ...(maxNotificationStreams === undefined ? {} : { maxNotificationStreams }), ...(enabled ? { notifications: {
     database: ':memory:', vapidDetails: { subject: 'mailto:push@example.test', ...publicKeys },
     ...(maxInFlight === undefined ? {} : { maxInFlight }),
     sendNotification: sender ?? (async (sub, data) => { deliveries.push({ subscription: sub, data: JSON.parse(data) }); }),
@@ -75,7 +75,7 @@ async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStr
     };
   };
   const streams = [];
-  const foreground = async (phone, { sessionId = randomUUID(), threadId = null } = {}) => {
+  const foreground = async (phone, { sessionId = randomUUID(), threadId = null, autoAck = true } = {}) => {
     const frames = [], changed = new EventEmitter(); let buffer = '', resolveEnd;
     const ended = new Promise(resolve => resolveEnd = resolve);
     const stream = http.get(base + '/api/notifications/events?sessionId=' + sessionId + '&threadId=' + (threadId ?? ''), { headers: { ...headers, cookie: phone.cookie, 'x-codex-expected-device': phone.deviceId } });
@@ -88,7 +88,10 @@ async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStr
         while ((split = buffer.indexOf('\n\n')) >= 0) {
           const block = buffer.slice(0, split); buffer = buffer.slice(split + 2);
           const name = /^event: (.+)$/m.exec(block)?.[1], data = /^data: (.+)$/m.exec(block)?.[1];
-          if (name && data) { frames.push({ event: name, data: JSON.parse(data) }); changed.emit('change'); }
+          if (name && data) {
+            const value = JSON.parse(data); frames.push({ event: name, data: value }); changed.emit('change');
+            if (autoAck && name === 'task-notification') void request('/api/notifications/ack', { method: 'POST', data: { sessionId, ackId: value.ackId, threadId: value.threadId, eventId: value.eventId }, cookie: phone.cookie, extra: { 'x-codex-expected-device': phone.deviceId } }).catch(() => {});
+          }
         }
       });
       response.once('end', resolveEnd); response.once('close', resolveEnd);
@@ -104,6 +107,7 @@ async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStr
     };
     await wait(frame => frame.event === 'connected');
     return { sessionId, frames, wait, ended, close: () => stream.destroy(),
+      ack: (frame, overrides = {}) => request('/api/notifications/ack', { method: 'POST', data: { sessionId, ackId: frame.data.ackId, threadId: frame.data.threadId, eventId: frame.data.eventId, ...overrides }, cookie: phone.cookie, extra: { 'x-codex-expected-device': phone.deviceId } }),
       presence: (visible = true, selected = threadId) => request('/api/notifications/presence', { method: 'POST', data: { sessionId, threadId: selected, visible }, cookie: phone.cookie, extra: { 'x-codex-expected-device': phone.deviceId } }),
     };
   };
@@ -401,7 +405,8 @@ test('a live visible foreground stream receives task events instead of system pu
     const live = event({ threadId: currentThread });
     await peer.event(live);
     const frame = await stream.wait(value => value.event === 'task-notification' && value.data.eventId === live.eventId);
-    assert.deepEqual(frame.data, { eventId: live.eventId, threadId: currentThread, kind: 'completed' });
+    assert.deepEqual(frame.data, { eventId: live.eventId, threadId: currentThread, kind: 'completed', createdAt: live.createdAt, ackId: frame.data.ackId });
+    assert.match(frame.data.ackId, /^[0-9a-f-]{36}$/);
     assert.equal(f.deliveries.length, 1, 'current task is routed to UI for suppression without a system notification');
     await peer.event(live); assert.equal(stream.frames.filter(value => value.event === 'task-notification').length, 1);
     assert.equal((await stream.presence(false)).status, 200);
@@ -537,5 +542,60 @@ test('backpressure only closes the affected foreground stream while another visi
     assert.equal((await slow.presence(true)).status, 409);
     assert.equal((await fast.presence(false)).status, 200);
     await peer.event(event()); assert.equal(f.deliveries.length, 1);
+  } finally { await f.close(); }
+});
+
+
+test('a writable live foreground TCP stream without page processing falls back to one system push before its lease expires', { timeout: 10000 }, async () => {
+  const f = await fixture({ foregroundAckMs: 30 });
+  try {
+    const host = await f.enroll(), peer = await f.connector(host);
+    await f.request('/api/notifications', { method: 'POST', data: { subscription: subscription() }, cookie: host.phone.cookie });
+    const stream = await f.foreground(host.phone, { autoAck: false }); await stream.presence(true);
+    const live = event(), pending = peer.event(live);
+    const frame = await stream.wait(frame => frame.event === 'task-notification' && frame.data.eventId === live.eventId);
+    assert.equal(frame.data.createdAt, live.createdAt); assert.equal(f.deliveries.length, 0);
+    await pending;
+    assert.equal(f.deliveries.length, 1); assert.equal(f.deliveries[0].data.eventId, live.eventId);
+    assert.equal((await stream.presence(true)).status, 200, 'TCP and 15s foreground lease remain live; missing processing ACK is enough to restore push');
+    assert.deepEqual(await (await stream.ack(frame)).json(), { accepted: false }, 'late ACK cannot revive a settled delivery');
+    await peer.event(live); assert.equal(f.deliveries.length, 1);
+  } finally { await f.close(); }
+});
+
+test('only an ACK from a targeted current session and exact pairing/event suppresses fallback', { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const a = await f.enroll(), b = await f.enroll(), peer = await f.connector(a);
+    await f.request('/api/notifications', { method: 'POST', data: { subscription: subscription() }, cookie: a.phone.cookie });
+    const stream = await f.foreground(a.phone, { autoAck: false }), idle = await f.foreground(a.phone, { autoAck: false }); await stream.presence(true);
+    const live = event(), pending = peer.event(live), frame = await stream.wait(frame => frame.event === 'task-notification');
+    const data = { sessionId: stream.sessionId, ackId: frame.data.ackId, threadId: live.threadId, eventId: live.eventId };
+    assert.equal((await f.request('/api/notifications/ack', { method: 'POST', data })).status, 401);
+    assert.equal((await f.request('/api/notifications/ack', { method: 'POST', data, cookie: a.phone.cookie })).status, 409);
+    assert.equal((await f.request('/api/notifications/ack', { method: 'POST', data, cookie: a.phone.cookie, extra: { 'x-codex-expected-device': a.phone.deviceId, origin: 'https://other.test', 'sec-fetch-site': 'cross-site' } })).status, 403);
+    assert.equal((await f.request('/api/notifications/ack', { method: 'POST', data: { ...data, ackId: 'bad' }, cookie: a.phone.cookie, extra: { 'x-codex-expected-device': a.phone.deviceId } })).status, 400);
+    const foreign = await f.request('/api/notifications/ack', { method: 'POST', data, cookie: b.phone.cookie, extra: { 'x-codex-expected-device': b.phone.deviceId } });
+    assert.deepEqual(await foreign.json(), { accepted: false });
+    for (const overrides of [{ eventId: 'other-event' }, { threadId: randomUUID() }, { sessionId: idle.sessionId }]) assert.deepEqual(await (await stream.ack(frame, overrides)).json(), { accepted: false });
+    assert.deepEqual(await (await stream.ack(frame)).json(), { accepted: true }); await pending;
+    assert.equal(f.deliveries.length, 0);
+    assert.deepEqual(await (await stream.ack(frame)).json(), { accepted: false }, 'duplicate ACK is harmless');
+  } finally { await f.close(); }
+});
+
+for (const change of ['close', 'unsubscribe', 'revoke', 'clear']) test(`pending foreground ACK settles safely on ${change}`, { timeout: 10000 }, async () => {
+  const f = await fixture({ foregroundAckMs: 10000 });
+  try {
+    const host = await f.enroll(), peer = await f.connector(host), sub = subscription();
+    await f.request('/api/notifications', { method: 'POST', data: { subscription: sub }, cookie: host.phone.cookie });
+    const stream = await f.foreground(host.phone, { autoAck: false }); await stream.presence(true);
+    const live = event(), pending = peer.event(live); await stream.wait(frame => frame.event === 'task-notification');
+    if (change === 'close') { stream.close(); await stream.ended; }
+    if (change === 'unsubscribe') await f.request('/api/notifications', { method: 'DELETE', data: { endpoint: sub.endpoint }, cookie: host.phone.cookie });
+    if (change === 'revoke') await f.request(`/api/host/devices/${host.phone.deviceId}/revoke`, { method: 'POST', data: {}, extra: { authorization: 'Bearer ' + host.secret } });
+    if (change === 'clear') await peer.clear({ ...live, reason: 'resolved' });
+    await pending;
+    assert.equal(f.deliveries.length, change === 'close' ? 1 : 0, 'close falls back; withdrawn pair/subscription/event cannot send after the await');
   } finally { await f.close(); }
 });
