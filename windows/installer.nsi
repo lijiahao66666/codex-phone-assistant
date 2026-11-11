@@ -1,9 +1,9 @@
 Unicode true
 !ifndef VERSION
-  !define VERSION "1.0.0"
+  !define VERSION "1.0.1"
 !endif
 !ifndef FILEVERSION
-  !define FILEVERSION "1.0.0.0"
+  !define FILEVERSION "1.0.1.0"
 !endif
 !ifndef APP_ICON
   !define APP_ICON "app.ico"
