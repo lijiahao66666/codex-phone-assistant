@@ -77,7 +77,7 @@ run(['swiftc','-target','arm64-apple-macosx12.0',str(WORK/'CodexHub.swift'),str(
 results=[]
 processes=[]
 try:
-    for case in ['information-only','information-tampered','wrong-signature','blocked-then-retry','success','slow-exit']:
+    for case in ['information-only','information-tampered','wrong-signature','success','slow-exit']:
         base=WORK/case; base.mkdir(); app=base/'Test.app'
         bid='local.codex-hub.updater-integration.'+uuid.uuid4().hex
         serve=SERVER/case; serve.mkdir()
@@ -90,10 +90,10 @@ try:
             shutil.copytree(DIST/'Sparkle.framework',dst/'Contents/Frameworks/Sparkle.framework',symlinks=True)
             delay = 'sleep 18; ' if case == 'slow-exit' and version == 1 else ''
             stub='''#!/bin/sh
-trap 'if [ -e "'''+str(base/'allow-exit')+'''" ]; then '''+delay+'''exit 0; else printf "STOP_BLOCKED\\n"; fi' TERM
+trap '__QUIT_DELAY__exit 0' TERM
 printf 'PANEL_URL=http://127.0.0.1:1\\n'
 while :; do sleep 0.2; done
-'''
+'''.replace('__QUIT_DELAY__', delay)
             (dst/'Contents/Resources/node').write_text(stub); (dst/'Contents/Resources/node').chmod(0o755)
             info={'CFBundleIdentifier':bid,'CFBundleName':'Isolated Sparkle Test','CFBundleVersion':str(version),'CFBundleShortVersionString':'0.0.'+str(version),'CFBundleExecutable':'CodexHub','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0','LSUIElement':True,'SUFeedURL':feed,'SUPublicEDKey':public,'SUEnableAutomaticChecks':False,'SUAutomaticallyUpdate':False,'SUAllowsAutomaticUpdates':False,'SUVerifyUpdateBeforeExtraction':True,'SURequireSignedFeed':True,'SUSignedFeedFailureExpirationInterval':0,'NSAppTransportSecurity':{'NSAllowsArbitraryLoads':True}}
             with (dst/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
@@ -145,14 +145,6 @@ while :; do sleep 0.2; done
                 assert 'quit-blocked' not in events(base), 'Waiting was misreported as cancelled termination'
                 assert 'unexpected-runtime-exit' not in events(base)
                 results.append({'case':'slow-exit-still-waiting','result':'PASS','events':events(base)})
-            if case=='blocked-then-retry':
-                waitfor(lambda:'quit-blocked' in events(base))
-                time.sleep(2)
-                assert proc.poll() is None
-                assert plistlib.load((app/'Contents/Info.plist').open('rb'))['CFBundleVersion']=='1'
-                assert 'launched-version-2' not in events(base)
-                results.append({'case':'blocked-before-retry','result':'PASS','events':events(base)})
-                (base/'allow-exit').touch(); (base/'retry').touch()
             waitfor(lambda:'launched-version-2' in events(base))
             assert plistlib.load((app/'Contents/Info.plist').open('rb'))['CFBundleVersion']=='2'
             if case=='slow-exit':

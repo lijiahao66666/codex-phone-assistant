@@ -915,6 +915,19 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         if (action !== 'resume' || !flowPaused || generation !== flowGeneration) return;
         pendingReset = generation; schedule();
       };
+      const loadInitialHistory = () => {
+        if (historyLoading || latest?.status === 'ready') return;
+        const generation = historyGeneration;
+        const current = () => connection === ws && streams.get(msg.id) === session && generation === historyGeneration && !revoked.has(msg.deviceId) && session.status !== 'ready';
+        const reading = Promise.resolve().then(() => current() ? readInitialHistory(m[1], msg.deviceId) : null).then(conversation => {
+          if (conversation && conversation.id === m[1] && current()) {
+            if (lastHistory && JSON.stringify(lastHistory) === JSON.stringify(conversation)) return;
+            changedSinceReset = true;
+            lastHistory = conversation; pendingHistory = conversation; schedule();
+          }
+        }).catch(() => {}).finally(() => { if (historyLoading === reading) historyLoading = null; });
+        historyLoading = reading;
+      };
       session.on('state', event => {
         if (!streams.has(msg.id)) return;
         if (event.status === 'ready') connectionDiagnostic.mark('first-ready');
@@ -927,14 +940,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           latest = { status: 'unavailable' };
           if (!wasUnavailable) { changedSinceReset = true; pendingStatus = true; pendingHistory = null; lastHistory = null; schedule(); }
           lastIssued = [];
-          const reading = Promise.resolve().then(() => readInitialHistory(m[1], msg.deviceId)).then(conversation => {
-            if (conversation && conversation.id === m[1] && streams.get(msg.id) === session && generation === historyGeneration && session.status !== 'ready') {
-              if (lastHistory && JSON.stringify(lastHistory) === JSON.stringify(conversation)) return;
-              changedSinceReset = true;
-              lastHistory = conversation; pendingHistory = conversation; schedule();
-            }
-          }).catch(() => {}).finally(() => { if (historyLoading === reading) historyLoading = null; });
-          historyLoading = reading;
+          loadInitialHistory();
           return;
         }
         historyLoading = null;
@@ -961,7 +967,12 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         };
         void refreshImages();
       });
-      try { session.start(); } catch { streams.delete(msg.id); void closeSession(session); send({ type: 'end', id: msg.id }, connection); }
+      try {
+        session.start();
+        // Read-only history does not depend on owner discovery. A live snapshot
+        // still wins, and recovery/write authorization remains a separate step.
+        if (latest?.status !== 'ready') { latest ??= { status: 'unavailable' }; loadInitialHistory(); }
+      } catch { streams.delete(msg.id); void closeSession(session); send({ type: 'end', id: msg.id }, connection); }
       } finally { if (mutation) activeMutations--; }
     });
     ws.on('close', () => { trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });

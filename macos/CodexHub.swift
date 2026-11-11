@@ -133,8 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         automatic.state = controller.updater.automaticallyChecksForUpdates ? .on : .off
         menu.addItem(automatic)
         // Sparkle requests normal NSApplication termination and waits for this
-        // application's actual exit before replacing its bundle. Do not bypass
-        // applicationShouldTerminate or the runtime's STOP_BLOCKED handshake.
+        // application's actual exit before replacing its bundle. Runtime cleanup
+        // completes before applicationShouldTerminate approves termination.
         // Silent automatic installation is disabled in the sealed Info.plist.
     }
 
@@ -262,9 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         while let newline = output.firstIndex(of: 10) {
             let line = String(data: output[..<newline], encoding: .utf8) ?? ""
             output.removeSubrange(...newline)
-            if line == "STOP_BLOCKED", terminationRequested {
-                cancelTermination(message: "任务仍在运行或等待确认，请处理完成后再退出。")
-            } else if panelPort == nil, line.hasPrefix("PANEL_URL="),
+            if panelPort == nil, line.hasPrefix("PANEL_URL="),
                       let url = URL(string: String(line.dropFirst("PANEL_URL=".count))),
                       url.scheme == "http", url.host == "127.0.0.1", let port = url.port {
                 panelPort = port
@@ -272,21 +270,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             }
         }
         if output.count > 65536 { output.removeAll(keepingCapacity: true) }
-    }
-
-    private func cancelTermination(message: String) {
-        guard terminationRequested else { return }
-        terminationRequested = false
-        terminationTimeout?.cancel()
-        terminationTimeout = nil
-        dismissTerminationWaitAlert()
-        NSApp.reply(toApplicationShouldTerminate: false)
-        showWindow()
-        let alert = NSAlert()
-        alert.messageText = "暂时无法退出"
-        alert.informativeText = message
-        alert.addButton(withTitle: "知道了")
-        alert.beginSheetModal(for: window)
     }
 
     private func dismissTerminationWaitAlert() {
@@ -308,8 +291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         guard let child = process, child.isRunning else { return .terminateNow }
         if terminationRequested { return .terminateLater }
         terminationRequested = true
-        // A sent SIGTERM cannot be revoked while runtime shutdown is in flight.
-        // Wait for STOP_BLOCKED or actual exit instead of falsely cancelling.
+        // An explicit quit stops this assistant's runtime even while it is busy.
+        // Wait for cleanup and actual exit before allowing bundle replacement.
         let timeout = DispatchWorkItem { [weak self] in
             guard let self = self, self.terminationRequested else { return }
             let alert = NSAlert()

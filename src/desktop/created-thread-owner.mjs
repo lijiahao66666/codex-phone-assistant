@@ -1,16 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
-// A new phone thread belongs to native Desktop before its first turn starts.
-// Never retry a dispatched turn or fall back to executing it on the bridge.
+// Native Desktop owns new phone threads before their first turn and restored
+// history threads before the phone follows. Never retry a dispatched turn or
+// fall back to executing it on the bridge.
 export function createCreatedThreadOwner({ localOwner, openThread, createClient, timeoutMs = 20000, pollMs = 150, discoveryProbeMs = 750 }) {
   const pending = new Map(), desktopReceived = new Set(), persistedNames = new Set();
-  async function prepare(threadId, { title } = {}) {
-    if (pending.has(threadId)) return pending.get(threadId);
+  async function prepare(threadId, { title, existing = false, isCancelled = () => false, canHandoff = true } = {}) {
+    const active = pending.get(threadId);
+    // A historical restore must never join a creation operation that persists
+    // an initial title, or let a creation join an active-writer restore shortcut.
+    if (active) {
+      if (active.existing !== existing) throw Object.assign(new Error('Another thread operation is in progress'), { code: 'unavailable' });
+      return active.operation;
+    }
     const operation = (async () => {
       const deadline = Date.now() + timeoutMs;
       const requireBudget = () => {
-        if (Date.now() >= deadline) throw Object.assign(new Error('Desktop conversation handoff timed out'), { code: 'unavailable' });
+        if (isCancelled() || Date.now() >= deadline) throw Object.assign(new Error('Desktop conversation handoff cancelled or timed out'), { code: 'unavailable' });
       };
       const discoverOwner = async client => {
         requireBudget();
@@ -23,10 +30,28 @@ export function createCreatedThreadOwner({ localOwner, openThread, createClient,
         try { return await client.discover(threadId, 'local', { signal: controller.signal }); }
         finally { clearTimeout(timer); }
       };
+      const nativeOwnerResponds = async (client, { ownerId, result }) => {
+        if (!ownerId || ownerId === localOwner.ownerId() || result?.supportsUntrustedAppInput !== true) return false;
+        if (!existing) return true;
+        requireBudget();
+        // Discovery can answer from Desktop's ownership cache after a peer has
+        // exited. The production pooled client probes a current snapshot,
+        // including empty conversations, without loading complete history.
+        const probe = await client.probeOwner(threadId, ownerId, { timeout: Math.min(2000, deadline - Date.now()) });
+        requireBudget();
+        return Number.isSafeInteger(probe?.revision) && probe.revision >= 0;
+      };
+      requireBudget();
       if (localOwner.owner.isThreadOwned(threadId)) {
+        // Existing active work stays with its known writer. It can be followed
+        // immediately; releasing it would interrupt a turn, approval or queue.
+        if (existing) {
+          if (localOwner.owner.isThreadReleasing?.(threadId)) throw Object.assign(new Error('Thread owner release is uncertain'), { code: 'unavailable' });
+          if (!canHandoff || localOwner.owner.canPerformThreadAction?.(threadId) !== true) return { ownerId: localOwner.ownerId() };
+        }
         // This is a freshly created journal thread. Persist its initial name
         // once; a retry must preserve any title the user selected afterward.
-        if (!persistedNames.has(threadId)) {
+        if (!existing && !persistedNames.has(threadId)) {
           await localOwner.write('thread/name/set', { threadId, name: title || '新会话' });
           persistedNames.add(threadId);
         }
@@ -38,6 +63,7 @@ export function createCreatedThreadOwner({ localOwner, openThread, createClient,
             // A dispatched or uncertain unsubscribe must never be retried.
             if (error?.code !== 'unavailable' || localOwner.uncertainWrites || localOwner.owner.isThreadReleasing?.(threadId)
                 || Date.now() >= deadline) throw error;
+            if (existing && localOwner.owner.isThreadOwned(threadId) && localOwner.owner.canPerformThreadAction?.(threadId) !== true) return { ownerId: localOwner.ownerId() };
             await delay(pollMs);
           }
         }
@@ -47,35 +73,38 @@ export function createCreatedThreadOwner({ localOwner, openThread, createClient,
         requireBudget();
         await client.connect();
         requireBudget();
-        if (!localOwner.releasedThreads.has(threadId) || desktopReceived.has(threadId)) {
+        if (existing || !localOwner.releasedThreads.has(threadId) || desktopReceived.has(threadId)) {
           try {
-            const { ownerId, result } = await discoverOwner(client);
+            const candidate = await discoverOwner(client);
             requireBudget();
-            if (ownerId && ownerId !== localOwner.ownerId() && result?.supportsUntrustedAppInput === true) return { ownerId };
+            if (await nativeOwnerResponds(client, candidate)) return { ownerId: candidate.ownerId };
           } catch { /* A persisted prepared thread may still need opening. */ }
         }
         requireBudget();
+        if (!canHandoff) throw Object.assign(new Error('An earlier recovery is unresolved'), { code: 'resume-unknown' });
         await openThread(threadId);
         requireBudget();
         do {
           requireBudget();
           try {
-            const { ownerId, result } = await discoverOwner(client);
+            const candidate = await discoverOwner(client);
             requireBudget();
             // Native Desktop advertises this capability; our bridge explicitly
-            // does not. A complete-history probe fails for a valid empty thread.
-            if (ownerId && ownerId !== localOwner.ownerId() && result?.supportsUntrustedAppInput === true) {
+            // does not. Creation keeps its empty-thread-safe capability check;
+            // historical recovery also confirms that the current owner answers.
+            if (await nativeOwnerResponds(client, candidate)) {
               desktopReceived.add(threadId);
-              return { ownerId };
+              return { ownerId: candidate.ownerId };
             }
           } catch { /* Desktop may still be mounting and resuming this page. */ }
           await delay(pollMs);
         } while (Date.now() < deadline);
-        throw Object.assign(new Error('Desktop has not received the new conversation'), { code: 'unavailable' });
+        throw Object.assign(new Error('Desktop has not received the conversation'), { code: 'unavailable' });
       } finally { await client.close(); }
     })();
-    pending.set(threadId, operation);
-    try { return await operation; } finally { if (pending.get(threadId) === operation) pending.delete(threadId); }
+    const entry = { operation, existing };
+    pending.set(threadId, entry);
+    try { return await operation; } finally { if (pending.get(threadId) === entry) pending.delete(threadId); }
   }
   async function startTurn(threadId, text, { model, effort, attachments = [], isCancelled = () => false } = {}) {
     const title = text.replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, 80);
@@ -98,5 +127,5 @@ export function createCreatedThreadOwner({ localOwner, openThread, createClient,
       });
     } finally { await client.close(); }
   }
-  return { prepare, startTurn };
+  return { prepare, startTurn, recover: (threadId, options) => prepare(threadId, { ...options, existing: true }) };
 }

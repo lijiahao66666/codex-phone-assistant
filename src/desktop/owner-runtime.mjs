@@ -83,7 +83,24 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
     ? desktopIpcPool.acquire() : new DesktopIpc({ socketPath, timeout: 1500 });
   const pidFile = join(dataDir, 'app-server.pid');
   await releaseStaleAppServer(pidFile);
-  const owner = await new LocalOwner({ binary: process.env.CODEX_BIN || (existsSync(bundled) ? bundled : 'codex'), cwd: homedir(), ...ownerOptions, socketPath }).start();
+  const owner = new LocalOwner({ binary: process.env.CODEX_BIN || (existsSync(bundled) ? bundled : 'codex'), cwd: homedir(), ...ownerOptions, socketPath });
+  // start() creates its exact child synchronously before awaiting initialize.
+  // A helper exiting while startup is stalled must not leave that child behind.
+  const starting = owner.start();
+  const child = owner.client?.child;
+  const killChildOnExit = () => {
+    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+    try { child.kill('SIGKILL'); } catch { /* The exact assistant child already exited. */ }
+  };
+  if (child) {
+    process.once('exit', killChildOnExit);
+    child.once('exit', () => process.off('exit', killChildOnExit));
+  }
+  try { await starting; }
+  catch (error) {
+    if (!child || child.exitCode !== null || child.signalCode !== null) process.off('exit', killChildOnExit);
+    throw error;
+  }
   const childPid = owner.client?.child?.pid;
   const recoveryExecution = Number.isInteger(childPid) ? {
     instanceId: owner.client.instanceId, pid: childPid,
@@ -91,10 +108,6 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
   } : null;
   if (Number.isInteger(childPid)) {
     await writeFile(pidFile, JSON.stringify({ pid: childPid, bridge: process.pid, instanceId: recoveryExecution.instanceId, startedAt: recoveryExecution.startedAt }), { mode: 0o600 }).catch(() => {});
-    process.once('exit', () => {
-      if (owner.client.child.exitCode !== null || owner.client.child.signalCode !== null) return;
-      try { owner.client.child.kill('SIGTERM'); } catch { /* already gone */ }
-    });
   }
   let journal, modelJournal;
   try {
@@ -114,21 +127,60 @@ export async function createOwnerRuntime({ hostId, codexHome = join(homedir(), '
     // uses the installed protocol handler; tests can supply an isolated opener.
     const opener = openCreatedThread ?? (socketPath === defaultSocketPath ? openDesktopThread : null);
     const createdThreadOwner = opener ? createCreatedThreadOwner({ localOwner: owner, openThread: opener, createClient: sharedClient }) : null;
-    const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, createdThreadOwner, projects, journal, hostId, recoveryExecution, competeUnknown: true,
+    const router = new OwnerRouter({ discover, verifyOwner, localOwner: owner, createdThreadOwner, historicalThreadOwner: createdThreadOwner, projects, journal, hostId, recoveryExecution, competeUnknown: true,
       confirmRecovery: (threadId, ownerId) => confirmRecoverySnapshot(threadId, ownerId, { createClient: sharedClient }) });
+    let childExited = false, resolveChildExit;
+    const childExit = new Promise(resolve => { resolveChildExit = resolve; });
     const onChildExit = () => {
+      childExited = true;
       if (recoveryExecution) {
-        try { router.recoveryExecutionExited(recoveryExecution); } catch { /* Preserve reservations if journal settlement fails. */ }
+        try {
+          if (router.closed) journal.retireRecoveryExecution(hostId, recoveryExecution);
+          else router.recoveryExecutionExited(recoveryExecution);
+        } catch { /* Preserve reservations if journal settlement fails. */ }
       }
+      resolveChildExit();
     };
     owner.client.child.once('exit', onChildExit);
     if (owner.client.child.exitCode !== null || owner.client.child.signalCode !== null) onChildExit();
-    return { router, owner, modelJournal, async close() {
+    let cleanupPromise, forceClosePromise;
+    const cleanup = () => cleanupPromise ??= (async () => {
+      // Cancelled operations may still finish a journal transition after their
+      // awaited child request rejects. Keep SQLite alive until they settle.
+      await router.whenIdle();
+      await childExit;
+      await new Promise(resolve => setImmediate(resolve));
+      owner.client.child.off('exit', onChildExit);
+      journal.close(); modelJournal.close();
+      await unlink(pidFile).catch(() => {});
+    })();
+    const confirmChildExit = async () => {
+      if (childExited) return;
+      let timer;
+      try {
+        await Promise.race([childExit, new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('Assistant app-server exit was not confirmed')), 1000);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    return { router, owner, modelJournal, async close({ force = false } = {}) {
+      if (forceClosePromise) return forceClosePromise;
+      if (force) {
+        forceClosePromise = (async () => {
+          router.close();
+          await owner.close({ force: true });
+          await confirmChildExit();
+          const cleaning = cleanup();
+          if (!router.inFlight) await cleaning;
+          else void cleaning.catch(() => {});
+        })();
+        return forceClosePromise;
+      }
       router.beginShutdown();
       try { await owner.close(); } catch (error) { router.cancelShutdown(); throw error; }
-      owner.client.child.off('exit', onChildExit);
-      router.close(); journal.close(); modelJournal.close();
-      await unlink(pidFile).catch(() => {});
+      router.close();
+      await confirmChildExit();
+      await cleanup();
     } };
   } catch (error) { modelJournal?.close(); journal?.close(); await owner.close({ force: true }); throw error; }
 }

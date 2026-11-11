@@ -21,6 +21,7 @@ let ownerRuntime;
 let stopping = false;
 let stopChecking = false;
 let startPromise;
+let stopPromise;
 let imagePreview = null;
 if (process.env.HUB_IMAGE_PREVIEW === '1') {
   try {
@@ -42,7 +43,7 @@ async function startConnectorOnce() {
     },
     modelRequest: (method, params) => { if (!ownerRuntime) throw new Error('Model catalog unavailable'); return ownerRuntime.owner.request(method, params); },
     modelJournal: { get: (...args) => ownerRuntime ? ownerRuntime.modelJournal.get(...args) : {}, begin: (...args) => ownerRuntime ? ownerRuntime.modelJournal.begin(...args) : false, dispatch: (...args) => ownerRuntime ? ownerRuntime.modelJournal.dispatch(...args) : false, cancelPrepared: (...args) => ownerRuntime ? ownerRuntime.modelJournal.cancelPrepared(...args) : false, complete: (...args) => ownerRuntime ? ownerRuntime.modelJournal.complete(...args) : false } });
-  if (stopping) return;
+  if (stopping) { await next.close(); return; }
   connector = next;
   connector.start();
 }
@@ -63,18 +64,30 @@ try {
 }
 console.log(`PANEL_URL=${await panel.listen()}`);
 async function stop() {
-  if (stopping || stopChecking) return;
-  stopChecking = true;
-  try { await startPromise; }
-  catch (error) { stopChecking = false; throw error; }
-  try { await connector?.beginShutdown(); }
-  catch (error) { stopChecking = false; if (error.code === 'tasks-active') { console.log('STOP_BLOCKED'); return; } throw error; }
-  if (ownerRuntime) {
-    try { await ownerRuntime.close(); }
-    catch (error) { connector?.cancelShutdown(); stopChecking = false; if (error.code === 'tasks-active') { console.log('STOP_BLOCKED'); return; } throw error; }
-  }
+  if (stopPromise) return stopPromise;
   stopping = true;
-  await panel.close();
-  if (connector) await connector.close();
+  stopChecking = true;
+  stopPromise = (async () => {
+    try { await startPromise; } catch { /* Shutdown still closes anything already started. */ }
+    // close() immediately stops connector input and its model observers. Give
+    // pending replies a bounded drain before terminating this helper's writer.
+    const closingConnector = Promise.resolve().then(() => connector?.close());
+    let connectorDeadline, connectorFailed = false;
+    try {
+      await Promise.race([closingConnector, new Promise(resolve => { connectorDeadline = setTimeout(resolve, 1000); })]);
+    } catch { connectorFailed = true; }
+    finally { clearTimeout(connectorDeadline); }
+    void closingConnector.catch(() => {});
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => panel.close()),
+      Promise.resolve().then(() => ownerRuntime?.close({ force: true })),
+    ]);
+    if (connectorFailed || results.some(result => result.status === 'rejected')) console.error('助手退出时部分清理未完成。');
+  })();
+  return stopPromise;
 }
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void stop().then(() => { if (stopping) process.exit(0); }); });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+  const deadline = setTimeout(() => process.exit(0), 5000);
+  deadline.unref();
+  void stop().finally(() => { clearTimeout(deadline); process.exit(0); });
+});

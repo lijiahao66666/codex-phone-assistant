@@ -2,16 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCreatedThreadOwner } from '../src/desktop/created-thread-owner.mjs';
 import { CreationJournal } from '../src/desktop/creation-journal.mjs';
+import { ModelJournal } from '../src/desktop/model-journal.mjs';
+import { createModelService } from '../src/desktop/model-service.mjs';
 import { OwnerRouter } from '../src/desktop/owner-router.mjs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fixture as ownerFixture, threadId as fixtureThreadId, turn, until } from './helpers/owner-history-fixture.mjs';
 
 const threadId = '11111111-1111-4111-8111-111111111111';
 function fixture(options = {}) {
-  let owned = true, ownerId = 'bridge', opens = 0, sends = 0, closed = 0, discovery = 0, releaseAttempts = 0;
+  let owned = options.owned ?? true, ownerId = options.ownerId ?? 'bridge', opens = 0, sends = 0, closed = 0, discovery = 0, releaseAttempts = 0, probes = 0;
   const writes = [], controls = [];
-  const releasedThreads = new Set();
+  const releasedThreads = new Set(options.released ? [threadId] : []);
   const localOwner = { ownerId: () => 'bridge', releasedThreads,
-    owner: { isThreadOwned: () => owned, isThreadReleasing: () => options.releasing === true,
+    owner: { isThreadOwned: () => owned, isThreadReleasing: () => options.releasing === true, canPerformThreadAction: () => options.idle !== false,
       async releaseThreadForHandoff(id) {
         releaseAttempts++;
         await options.release?.(releaseAttempts, localOwner);
@@ -30,6 +35,11 @@ function fixture(options = {}) {
         if (options.discover) return options.discover({ id, hostId, ...requestOptions, attempt: discovery });
         return { ownerId, result: { supportsUntrustedAppInput: options.capability ?? ownerId === 'desktop' } };
       },
+      async probeOwner(id, expectedOwnerId, { timeout }) {
+        probes++;
+        assert.equal(id, threadId); assert.ok(timeout > 0 && timeout <= 2000);
+        return options.probe ? options.probe({ id, ownerId: expectedOwnerId, timeout, attempt: probes }) : { revision: 0 };
+      },
       async startTurn(id, params, { expectedOwnerId, beforeWrite }) {
         options.beforeControl?.();
         if (options.controlOwner && options.controlOwner !== expectedOwnerId) throw Object.assign(new Error('Owner changed'), { code: 'unavailable' });
@@ -41,7 +51,7 @@ function fixture(options = {}) {
       },
     }),
   });
-  return { adapter, localOwner, writes, controls, counts: () => ({ opens, sends, closed, discovery, releaseAttempts }), owned: () => owned };
+  return { adapter, localOwner, writes, controls, counts: () => ({ opens, sends, closed, discovery, releaseAttempts, probes }), owned: () => owned };
 }
 
 test('prepare releases an empty phone owner once and the first send reuses the received desktop without opening again', async () => {
@@ -57,6 +67,7 @@ test('prepare releases an empty phone owner once and the first send reuses the r
   ] });
   assert.equal(f.counts().opens, 1, 'sending after preparation must not reopen or refocus the desktop');
   assert.equal(f.counts().sends, 1);
+  assert.equal(f.counts().probes, 0, 'creation never invokes complete-history liveness probes on a valid empty thread');
   const { request, context } = f.controls[0].params;
   assert.equal(f.controls[0].expectedOwnerId, 'desktop');
   assert.equal(request.model, 'selected-model'); assert.equal(request.effort, 'high');
@@ -66,6 +77,304 @@ test('prepare releases an empty phone owner once and the first send reuses the r
   assert.deepEqual(request.input[1], { type: 'localImage', path: '/isolated/photo.png' });
   assert.deepEqual(context, { inheritThreadSettings: false });
   assert.equal(f.counts().closed, 3, 'all preparation and sending clients close');
+});
+
+test('history recovery hands an idle bridge writer to native Desktop without renaming or sending', async () => {
+  const f = fixture();
+  assert.deepEqual(await f.adapter.recover(threadId), { ownerId: 'desktop' });
+  assert.equal(f.owned(), false);
+  assert.equal(f.counts().releaseAttempts, 1); assert.equal(f.counts().opens, 1);
+  assert.deepEqual(f.writes, []); assert.equal(f.counts().sends, 0);
+  assert.deepEqual(await f.adapter.recover(threadId), { ownerId: 'desktop' });
+  assert.equal(f.counts().releaseAttempts, 1); assert.equal(f.counts().opens, 1, 'returning to a native-owned history thread does not restore it again');
+});
+
+test('history recovery activates an unloaded native thread after one short unanswered probe without bridge resume', async () => {
+  const signals = [];
+  const f = fixture({ owned: false, timeoutMs: 500, discoveryProbeMs: 15,
+    discover: async ({ signal, attempt }) => {
+      signals.push(signal);
+      if (attempt === 1) return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('absent peer')), { once: true }));
+      return { ownerId: 'desktop', result: { supportsUntrustedAppInput: true } };
+    },
+  });
+  assert.deepEqual(await f.adapter.recover(threadId), { ownerId: 'desktop' });
+  assert.equal(signals[0].aborted, true);
+  assert.equal(f.counts().opens, 1); assert.equal(f.counts().releaseAttempts, 0);
+  assert.deepEqual(f.writes, []); assert.equal(f.counts().sends, 0);
+});
+
+test('history recovery follows active bridge work without release and rejects an uncertain release', async () => {
+  const active = fixture({ idle: false });
+  assert.deepEqual(await active.adapter.recover(threadId), { ownerId: 'bridge' });
+  assert.equal(active.counts().releaseAttempts, 0); assert.equal(active.counts().opens, 0);
+  assert.deepEqual(active.writes, []);
+  const uncertain = fixture({ releasing: true });
+  await assert.rejects(uncertain.adapter.recover(threadId), { code: 'unavailable' });
+  assert.equal(uncertain.counts().releaseAttempts, 0); assert.equal(uncertain.counts().opens, 0);
+});
+
+test('history recovery never reopens after an unconfirmed unsubscribe or renames the old chat', async () => {
+  const f = fixture({ release: async () => { throw Object.assign(new Error('lost unsubscribe ACK'), { code: 'outcome-unknown' }); } });
+  await assert.rejects(f.adapter.recover(threadId), { code: 'outcome-unknown' });
+  assert.equal(f.counts().releaseAttempts, 1); assert.equal(f.counts().opens, 0);
+  assert.deepEqual(f.writes, []); assert.equal(f.counts().sends, 0);
+});
+
+test('unresolved historical recovery permits following native but never opens or releases another writer', async () => {
+  const absent = fixture({ owned: false });
+  await assert.rejects(absent.adapter.recover(threadId, { canHandoff: false }), { code: 'resume-unknown' });
+  assert.equal(absent.counts().opens, 0); assert.equal(absent.counts().releaseAttempts, 0);
+  const native = fixture({ owned: false, ownerId: 'desktop' });
+  assert.deepEqual(await native.adapter.recover(threadId, { canHandoff: false }), { ownerId: 'desktop' });
+  assert.equal(native.counts().opens, 0);
+  const bridge = fixture();
+  assert.deepEqual(await bridge.adapter.recover(threadId, { canHandoff: false }), { ownerId: 'bridge' });
+  assert.equal(bridge.counts().releaseAttempts, 0); assert.deepEqual(bridge.writes, []);
+});
+
+test('history recovery cancellation does not open or mutate a thread', async () => {
+  const f = fixture();
+  await assert.rejects(f.adapter.recover(threadId, { isCancelled: () => true }), { code: 'unavailable' });
+  assert.equal(f.counts().releaseAttempts, 0); assert.equal(f.counts().opens, 0); assert.deepEqual(f.writes, []);
+});
+
+test('a previously released history thread follows its native owner without opening the desktop again', async () => {
+  const f = fixture({ owned: false, released: true, ownerId: 'desktop' });
+  assert.deepEqual(await f.adapter.recover(threadId), { ownerId: 'desktop' });
+  assert.equal(f.counts().discovery, 1); assert.equal(f.counts().opens, 0);
+  assert.equal(f.counts().releaseAttempts, 0); assert.deepEqual(f.writes, []);
+});
+
+test('historical discovery rejects a stale cached native owner and opens the original thread before accepting a live owner', async () => {
+  const f = fixture({ owned: false, ownerId: 'dead-native-owner', capability: true,
+    probe: async ({ ownerId }) => {
+      if (ownerId === 'dead-native-owner') throw new Error('Owner stopped answering');
+      return { revision: 0 };
+    },
+  });
+  assert.deepEqual(await f.adapter.recover(threadId), { ownerId: 'desktop' });
+  assert.equal(f.counts().probes, 2); assert.equal(f.counts().opens, 1);
+  assert.deepEqual(f.writes, []); assert.equal(f.counts().sends, 0);
+});
+
+test('native capability without a current snapshot never completes historical recovery', async () => {
+  for (const probe of [async () => { throw new Error('Native owner is gone'); }, async () => null, async () => ({ revision: -1 })]) {
+    const f = fixture({ owned: false, ownerId: 'dead-native-owner', capability: true, probe });
+    await assert.rejects(f.adapter.recover(threadId), { code: 'unavailable' });
+    assert.ok(f.counts().probes >= 2); assert.equal(f.counts().opens, 1);
+    assert.deepEqual(f.writes, []); assert.equal(f.counts().releaseAttempts, 0); assert.equal(f.counts().sends, 0);
+  }
+});
+
+test('a live empty historical thread is confirmed by snapshot revision zero without reopening', async () => {
+  const f = fixture({ owned: false, ownerId: 'desktop', probe: async () => ({ revision: 0 }) });
+  assert.deepEqual(await f.adapter.recover(threadId), { ownerId: 'desktop' });
+  assert.equal(f.counts().probes, 1); assert.equal(f.counts().opens, 0);
+  assert.deepEqual(f.writes, []);
+});
+
+test('historical liveness uses only the remaining overall preparation budget', async t => {
+  let now = 1000, probeTimeout;
+  t.mock.method(Date, 'now', () => now);
+  const f = fixture({ owned: false, ownerId: 'desktop', timeoutMs: 20000,
+    discover: async () => { now += 19250; return { ownerId: 'desktop', result: { supportsUntrustedAppInput: true } }; },
+    probe: async ({ timeout }) => { probeTimeout = timeout; now += timeout; return { revision: 1 }; },
+  });
+  await assert.rejects(f.adapter.recover(threadId), { code: 'unavailable' });
+  assert.equal(probeTimeout, 750); assert.equal(f.counts().probes, 1); assert.equal(f.counts().opens, 0);
+});
+
+test('cancellation during native snapshot verification prevents reopening or accepting historical recovery', async () => {
+  let cancelled = false;
+  const f = fixture({ owned: false, ownerId: 'desktop', probe: async () => { cancelled = true; return { revision: 0 }; } });
+  await assert.rejects(f.adapter.recover(threadId, { isCancelled: () => cancelled }), { code: 'unavailable' });
+  assert.equal(f.counts().probes, 1); assert.equal(f.counts().opens, 0);
+});
+
+test('cancelling historical recovery during discovery prevents opening the native route', async () => {
+  let cancelled = false;
+  const f = fixture({ owned: false, discover: async () => {
+    cancelled = true;
+    return { ownerId: 'stale-owner', result: { supportsUntrustedAppInput: false } };
+  } });
+  await assert.rejects(f.adapter.recover(threadId, { isCancelled: () => cancelled }), { code: 'unavailable' });
+  assert.equal(f.counts().opens, 0); assert.deepEqual(f.writes, []);
+});
+
+test('creation and historical recovery of the same thread cannot join one another', async () => {
+  for (const firstKind of ['prepare', 'recover']) {
+    let entered, release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    const f = fixture({ timeoutMs: 500, release: async () => { entered(); await gate; } });
+    const first = f.adapter[firstKind](threadId);
+    await started;
+    const otherKind = firstKind === 'prepare' ? 'recover' : 'prepare';
+    await assert.rejects(f.adapter[otherKind](threadId), { code: 'unavailable' });
+    release();
+    assert.deepEqual(await first, { ownerId: 'desktop' });
+    assert.equal(f.writes.length, firstKind === 'prepare' ? 1 : 0);
+    assert.equal(f.counts().releaseAttempts, 1); assert.equal(f.counts().opens, 1);
+  }
+});
+
+test('native history routing skips legacy discovery and bridge resume on first restore and subsequent switches', async () => {
+  const f = fixture({ owned: false });
+  f.localOwner.resume = async () => assert.fail('history must not resume on the phone app-server');
+  const journal = new CreationJournal(':memory:');
+  const router = new OwnerRouter({ discover: async () => assert.fail('must use the bounded native probe'),
+    localOwner: f.localOwner, historicalThreadOwner: f.adapter, projects: async () => [], journal, hostId: 'host' });
+  try {
+    for (let i = 0; i < 3; i++) {
+      assert.deepEqual(await router.route(threadId), { kind: 'owner', ownerId: 'desktop' });
+      assert.equal(router.isRecoveryLocked(threadId), false);
+    }
+    assert.equal(f.counts().opens, 1); assert.equal(f.counts().releaseAttempts, 0);
+    assert.deepEqual(f.writes, []); assert.equal(f.counts().sends, 0);
+  } finally { router.close(); journal.close(); }
+});
+
+test('an unavailable native historical owner never falls back to bridge resume', async () => {
+  const f = fixture({ owned: false, capability: false });
+  f.localOwner.resume = async () => assert.fail('native timeout cannot dispatch another writer');
+  const journal = new CreationJournal(':memory:');
+  const router = new OwnerRouter({ discover: async () => ({ kind: 'unknown' }), localOwner: f.localOwner,
+    historicalThreadOwner: f.adapter, projects: async () => [], journal, hostId: 'host', competeUnknown: true });
+  try {
+    await assert.rejects(router.route(threadId), { code: 'unavailable' });
+    assert.equal(f.counts().opens, 1); assert.equal(f.counts().releaseAttempts, 0);
+    assert.equal(router.isRecoveryLocked(threadId), false, 'read probes and native routing do not create app-server write reservations');
+    assert.deepEqual(f.writes, []);
+  } finally { router.close(); journal.close(); }
+});
+
+test('native routing preserves an earlier unknown app-server recovery while allowing a discovered native owner', async () => {
+  let native = false;
+  const f = fixture({ owned: false, discover: async () => ({ ownerId: native ? 'desktop' : 'stale', result: { supportsUntrustedAppInput: native } }) });
+  const journal = new CreationJournal(':memory:');
+  journal.beginRecovery('host', threadId, 'older-unknown-write');
+  const router = new OwnerRouter({ discover: async () => assert.fail('no legacy discovery'), localOwner: f.localOwner,
+    historicalThreadOwner: f.adapter, projects: async () => [], journal, hostId: 'host' });
+  try {
+    await assert.rejects(router.route(threadId), { code: 'resume-unknown' });
+    assert.equal(f.counts().opens, 0);
+    native = true;
+    assert.deepEqual(await router.route(threadId), { kind: 'owner', ownerId: 'desktop' });
+    assert.equal(router.isRecoveryLocked(threadId), true, 'following cannot erase an unresolved write reservation');
+    assert.equal(f.counts().opens, 0); assert.deepEqual(f.writes, []);
+  } finally { router.close(); journal.close(); }
+});
+
+test('native history handoff preserves a real model journal until its awaiting-state snapshot is confirmed', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'history-model-admission-'));
+  const path = join(directory, 'writes.sqlite');
+  const journal = new CreationJournal(path), models = new ModelJournal(path), f = fixture();
+  const session = { status: 'ready', conversationId: threadId, revision: 1, conversation: { ownerId: 'bridge' },
+    value: { id: threadId, threadRuntimeStatus: { type: 'idle' }, latestCollaborationMode: { mode: 'default', settings: { model: 'a', reasoning_effort: 'low', developer_instructions: null } } },
+    client: { async setCollaborationMode(_id, _mode, _settings, options) { assert.equal(options.beforeWrite(), true); return { applied: true }; } },
+  };
+  const service = createModelService({ journal: models, hostId: 'host', sessionFor: () => session,
+    request: async () => ({ data: [{ model: 'b', displayName: 'B', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'high' }], defaultReasoningEffort: 'high' }], nextCursor: null }),
+  });
+  const router = new OwnerRouter({ discover: async () => assert.fail('no legacy discovery'), localOwner: f.localOwner,
+    historicalThreadOwner: f.adapter, projects: async () => [], journal, hostId: 'host' });
+  let nativeRouter;
+  try {
+    assert.equal((await service.change({ deviceId: 'device', threadId, model: 'b', effort: 'high' })).status, 'accepted');
+    assert.equal(service.status(threadId), 'awaiting-state');
+    const record = models.get('host', threadId);
+    assert.equal(record.phase, 'dispatching');
+    assert.equal(journal.threadWritePending('host', threadId), true);
+    assert.deepEqual(await router.route(threadId), { kind: 'owner', ownerId: 'bridge' });
+    assert.equal(f.counts().releaseAttempts, 0); assert.equal(f.counts().opens, 0);
+    assert.deepEqual(models.get('host', threadId), record);
+    const native = fixture({ owned: false, ownerId: 'desktop' });
+    nativeRouter = new OwnerRouter({ discover: async () => assert.fail('no legacy discovery'), localOwner: native.localOwner,
+      historicalThreadOwner: native.adapter, projects: async () => [], journal, hostId: 'host' });
+    assert.deepEqual(await nativeRouter.route(threadId), { kind: 'owner', ownerId: 'desktop' });
+    assert.equal(native.counts().opens, 0); assert.deepEqual(models.get('host', threadId), record);
+    session.revision++;
+    session.value.latestCollaborationMode.settings = { model: 'b', reasoning_effort: 'high', developer_instructions: null };
+    assert.equal(service.observe({ deviceId: 'device', threadId, session }), true);
+    assert.equal(journal.threadWritePending('host', threadId), false);
+    assert.deepEqual(await router.route(threadId), { kind: 'owner', ownerId: 'desktop' });
+    assert.equal(f.counts().releaseAttempts, 1); assert.equal(f.counts().opens, 1);
+  } finally { await service.close(); router.close(); nativeRouter?.close(); models.close(); journal.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('native history admission respects real message journals, unresolved raw wildcards, and host/thread isolation', async () => {
+  const scenarios = [
+    { table: 'message', host: 'host', thread: threadId, phase: 'prepared', blocks: true },
+    { table: 'message', host: 'host', thread: threadId, phase: 'dispatching', blocks: true },
+    { table: 'model', host: 'host', thread: threadId, phase: 'prepared', blocks: true },
+    { table: 'model', host: 'host', thread: threadId, phase: 'unknown', blocks: true },
+    { table: 'raw', host: 'host', thread: threadId, phase: 'unknown', blocks: true },
+    { table: 'raw', host: '', thread: threadId, phase: 'dispatching', blocks: true },
+    { table: 'raw', host: 'host', thread: '', phase: 'unknown', blocks: true },
+    { table: 'raw', host: '', thread: '', phase: 'unknown', blocks: true },
+    { table: 'raw', host: '', thread: '', phase: 'resolved', blocks: false },
+    ...['message', 'model', 'raw'].flatMap(table => [
+      { table, host: 'other-host', thread: threadId, phase: 'dispatching', blocks: false },
+      { table, host: 'host', thread: 'other-thread', phase: 'dispatching', blocks: false },
+    ]),
+  ];
+  for (const scenario of scenarios) {
+    const journal = new CreationJournal(':memory:'), f = fixture({ owned: false });
+    const { table, host, thread, phase, blocks } = scenario;
+    if (table === 'message') journal.db.prepare('INSERT INTO message_writes VALUES (?,?,?,?)').run(host, thread, 'message', phase);
+    else if (table === 'model') journal.db.prepare('INSERT INTO model_writes VALUES (?,?,?,?,?)').run(host, thread, 'device', 'model', phase);
+    else journal.db.prepare('INSERT INTO raw_request_experiment (instance,request_key,host_id,thread,turn,item,method,digest,phase) VALUES (?,?,?,?,?,?,?,?,?)').run('instance', 'raw', host, thread, 'turn', 'item', 'method', 'digest', phase);
+    const router = new OwnerRouter({ discover: async () => assert.fail('no legacy discovery'), localOwner: f.localOwner,
+      historicalThreadOwner: f.adapter, projects: async () => [], journal, hostId: 'host' });
+    try {
+      assert.equal(journal.threadWritePending('host', threadId), blocks, JSON.stringify(scenario));
+      if (blocks) await assert.rejects(router.route(threadId), { code: 'resume-unknown' });
+      else assert.deepEqual(await router.route(threadId), { kind: 'owner', ownerId: 'desktop' });
+      assert.equal(f.counts().opens, blocks ? 0 : 1, JSON.stringify(scenario));
+      assert.equal(journal.threadWritePending('host', threadId), blocks, 'routing never clears another write journal');
+    } finally { router.close(); journal.close(); }
+  }
+});
+
+test('a write journal read failure cannot release a known bridge owner', async () => {
+  const journal = new CreationJournal(':memory:'), f = fixture();
+  const router = new OwnerRouter({ discover: async () => assert.fail('no legacy discovery'), localOwner: f.localOwner,
+    historicalThreadOwner: f.adapter, projects: async () => [], journal, hostId: 'host' });
+  journal.db.exec('DROP TABLE model_writes');
+  try {
+    assert.equal(journal.recoveryPending('host', threadId), false);
+    assert.throws(() => journal.threadWritePending('host', threadId));
+    assert.deepEqual(await router.route(threadId), { kind: 'owner', ownerId: 'bridge' });
+    assert.equal(f.counts().releaseAttempts, 0); assert.equal(f.counts().opens, 0);
+  } finally { router.close(); journal.close(); }
+});
+
+test('real historical LocalOwner release waits for closure without naming or reading the entire history', async () => {
+  const f = await ownerFixture({ data: [turn('existing-answer')], nextCursor: null }, { disableAutoClosed: true });
+  try {
+    await f.resume();
+    let native = false, opens = 0;
+    const adapter = createCreatedThreadOwner({ localOwner: f.local, timeoutMs: 500, pollMs: 1,
+      openThread: async () => { opens++; native = true; },
+      createClient: () => ({ async connect() {}, async close() {}, async discover() {
+        return { ownerId: native ? 'desktop' : f.local.ownerId(), result: { supportsUntrustedAppInput: native } };
+      }, async probeOwner() { return { revision: 0 }; } }),
+    });
+    const recovering = adapter.recover(fixtureThreadId);
+    await until(() => f.requests.some(request => request.method === 'thread/unsubscribe'), 'history unsubscribe');
+    const unsubscribe = f.requests.find(request => request.method === 'thread/unsubscribe');
+    f.reply(unsubscribe, { status: 'unsubscribed' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(opens, 0, 'an ACK without thread/closed cannot hand the writer to native');
+    f.notify({ method: 'thread/closed', params: { threadId: fixtureThreadId } });
+    assert.deepEqual(await recovering, { ownerId: 'desktop' });
+    assert.deepEqual(await adapter.recover(fixtureThreadId), { ownerId: 'desktop' });
+    assert.equal(opens, 1);
+    assert.equal(f.requests.filter(request => request.method === 'thread/resume').length, 1, 'only the fixture setup resumed, return visits do not');
+    assert.equal(f.requests.filter(request => request.method === 'thread/unsubscribe').length, 1);
+    assert.equal(f.requests.filter(request => request.method === 'thread/name/set' || request.method === 'turn/start' || request.method === 'thread/read').length, 0);
+  } finally { await f.close(); }
 });
 
 test('a first send without an explicit model inherits native Desktop settings', async () => {

@@ -98,6 +98,12 @@ export class CreationJournal {
     // A timeout cannot prove the app-server stopped executing the resume.
     return Boolean(this.db.prepare('SELECT 1 FROM recovery_writes WHERE host_id=? AND thread_id=?').get(hostId, threadId));
   }
+  threadWritePending(hostId, threadId) {
+    if (![hostId, threadId].every(value => typeof value === 'string' && value.length > 0 && value.length <= 200)) throw new TypeError('invalid thread write identity');
+    // Model/message rows remain until their dispatched outcome is confirmed.
+    // Legacy raw rows with an empty host or thread cover every matching scope.
+    return Boolean(this.db.prepare("SELECT EXISTS (SELECT 1 FROM message_writes WHERE host_id=? AND thread_id=?) OR EXISTS (SELECT 1 FROM model_writes WHERE host_id=? AND thread_id=?) OR EXISTS (SELECT 1 FROM raw_request_experiment WHERE phase != 'resolved' AND (host_id=? OR host_id='') AND (thread=? OR thread='')) AS pending").get(hostId, threadId, hostId, threadId, hostId, threadId).pending);
+  }
   recoveryExecutions(hostId) {
     return this.db.prepare("SELECT execution_id AS instanceId, execution_pid AS pid, execution_started AS startedAt FROM recovery_writes WHERE host_id=? AND execution_id IS NOT NULL UNION SELECT execution_id AS instanceId, execution_pid AS pid, execution_started AS startedAt FROM recovery_attempts WHERE host_id=? AND execution_id IS NOT NULL AND status IN ('registered','dispatching','pending','accepted')").all(hostId, hostId);
   }

@@ -13,13 +13,14 @@ const preparedDigest = (digest, model, effort, title) => createHash('sha256')
 
 // The adapters must distinguish an explicit missing owner from an unavailable bus.
 export class OwnerRouter {
-  constructor({ discover, verifyOwner = null, localOwner, createdThreadOwner = null, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 2500, recoveryPollMs = 300, recoveryExecution = null, competeUnknown = false }) {
+  constructor({ discover, verifyOwner = null, localOwner, createdThreadOwner = null, historicalThreadOwner = null, projects, journal, hostId, confirmRecovery, recoveryTimeoutMs = 2500, recoveryPollMs = 300, recoveryExecution = null, competeUnknown = false }) {
     if (typeof discover !== 'function' || !localOwner || typeof projects !== 'function') throw new TypeError('Missing owner adapters');
     this.competeUnknown = competeUnknown;
     this.discover = discover;
     this.verifyOwner = verifyOwner;
     this.localOwner = localOwner;
     this.createdThreadOwner = createdThreadOwner;
+    this.historicalThreadOwner = historicalThreadOwner;
     this.projects = projects;
     this.journal = journal; this.hostId = hostId;
     this.confirmRecovery = confirmRecovery;
@@ -30,6 +31,7 @@ export class OwnerRouter {
     this.closed = false;
     this.stopping = false;
     this.inFlight = 0;
+    this.idleWaiters = new Set();
     this.onLateResponse = event => this.#handleLateRecovery(event);
     this.localOwner.on?.('lateResponse', this.onLateResponse);
   }
@@ -49,8 +51,13 @@ export class OwnerRouter {
   async #tracked(operation) {
     if (this.closed || this.stopping) throw unavailable('unavailable');
     this.inFlight++;
-    try { return await operation(); } finally { this.inFlight--; }
+    try { return await operation(); } finally {
+      this.inFlight--;
+      if (!this.inFlight) { for (const resolve of this.idleWaiters) resolve(); this.idleWaiters.clear(); }
+    }
   }
+
+  whenIdle() { return this.inFlight ? new Promise(resolve => this.idleWaiters.add(resolve)) : Promise.resolve(); }
 
   beginShutdown() {
     if (this.closed || this.stopping || this.inFlight) throw unavailable('tasks-active');
@@ -97,6 +104,18 @@ export class OwnerRouter {
   }
 
   async #route(threadId, isCancelled, deviceId, requestId) {
+    if (this.historicalThreadOwner) {
+      // The native route restores its own writer. A short unanswered read is
+      // never evidence that the bridge should compete with it via resume.
+      let canHandoff = false;
+      try { canHandoff = !this.isRecoveryLocked(threadId) && this.journal?.threadWritePending?.(this.hostId, threadId) === false; }
+      catch { /* An unreadable write journal cannot authorize an owner change. */ }
+      const { ownerId } = await this.historicalThreadOwner.recover(threadId, {
+        isCancelled: () => this.closed || isCancelled(), canHandoff,
+      });
+      if (this.closed || isCancelled() || !ownerId) throw unavailable('unavailable');
+      return { kind: 'owner', ownerId };
+    }
     const first = await this.discover(threadId);
     if (this.closed || isCancelled()) throw unavailable('unavailable');
     // Following never writes, so it is allowed even while an earlier takeover
