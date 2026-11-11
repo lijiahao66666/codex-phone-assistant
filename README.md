@@ -40,6 +40,6 @@ Windows 1.0.1 安装包见 [v1.0.1 发行版](https://github.com/lijiahao66666/c
 
 ## 未知问题
 
-测试不是很充分，特别是 windows 系统的，请见谅。
+测试不是很充分。
 
 功能边界和开发说明见[文档索引](docs/README.md)。
