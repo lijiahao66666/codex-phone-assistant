@@ -189,6 +189,42 @@ test('settings health polling shows genuine monitor recovery and stops when sett
   await f.select(null); assert.equal(f.timers.size, 0); assert.equal(f.nodes.get('prompt').hidden, true);
 });
 
+test('reopening settings and health polling retain confirmed buttons while subscription lookup is pending', async () => {
+  for (const subscribed of [false, true]) {
+    let lookup = null;
+    const f = await fixture({ local: subscribed ? makeSubscription('https://push.example/registered') : null,
+      permission: subscribed ? 'granted' : 'default', subscribed,
+      getSubscription: local => lookup ? lookup.promise : local });
+    await f.select();
+    const assertButtons = () => {
+      assert.equal(f.nodes.get('enable').hidden, subscribed);
+      assert.equal(f.nodes.get('disable').hidden, !subscribed);
+    };
+    assertButtons();
+    f.window.setNotificationSettingsOpen(false);
+    lookup = deferred();
+    f.window.setNotificationSettingsOpen(true); await flush();
+    assertButtons();
+    lookup.resolve(subscribed ? makeSubscription('https://push.example/registered') : null); await flush();
+    assertButtons();
+    lookup = deferred(); await f.refresh();
+    assertButtons();
+    lookup.resolve(subscribed ? makeSubscription('https://push.example/registered') : null); await flush();
+    assertButtons();
+  }
+});
+
+test('a new pairing does not inherit notification buttons before its status is known', async () => {
+  const next = deferred();
+  const f = await fixture({ fetch: (url, request) => url === '/api/notifications' && request.headers['x-codex-expected-device'] === pairB.deviceId ? next.promise : undefined });
+  await f.select(); assert.equal(f.nodes.get('enable').hidden, false);
+  await f.select(pairB);
+  assert.equal(f.nodes.get('enable').hidden, true);
+  assert.equal(f.nodes.get('disable').hidden, true);
+  next.resolve(json({ enabled: true, publicKey: 'AQ', desktopReady: true, monitorStatus: 'healthy' })); await flush();
+  assert.equal(f.nodes.get('enable').hidden, false);
+});
+
 test('failed registration save does not claim enabled, and a failed removal does not claim disabled', async () => {
   const enable = await fixture({ fetch: (url, request) => url === '/api/notifications' && request.method === 'POST' ? { ok: false } : undefined });
   await enable.select(); await enable.click('enable');
