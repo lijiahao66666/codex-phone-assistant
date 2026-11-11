@@ -1611,6 +1611,7 @@ voiceButton.addEventListener('click', () => {
   } catch { voiceSession = null; voiceStatus.textContent = '语音输入不可用'; }
 });
 function updateComposer() {
+  updateHomeInstallPrompt();
   const state = selectedId && submissions.get(selectedId);
   updateRecoveryControl();
   updateRecoveryGuardedControls();
@@ -2180,6 +2181,7 @@ function showHomeError(source, message) {
   if (selectedId || (homeErrorSource && homeErrorSource !== source && source !== 'host')) return;
   if (turns.querySelector?.('.conversation-loading, .conversation-empty')) turns.replaceChildren();
   homeErrorSource = source; error.textContent = message; error.hidden = false;
+  updateHomeInstallPrompt();
 }
 function clearHomeError(source) {
   if (homeErrorSource !== source) return;
@@ -2187,7 +2189,11 @@ function clearHomeError(source) {
   showConversationEmpty();
 }
 function element(tag, className, text) { const node = document.createElement(tag); node.className = className; node.textContent = text ?? ''; return node; }
+function updateHomeInstallPrompt() {
+  window.setInstallPromptPageEligible?.(!selectedId && !newDraft && connected && !homeErrorSource && error.hidden);
+}
 function showConversationEmpty() {
+  updateHomeInstallPrompt();
   if (selectedId || !pairingAvailable || !connected || homeErrorSource || !error.hidden) return;
   turns.replaceChildren(element('div', 'conversation-empty', newDraft ? '发送第一条消息，开始新聊天' : '打开左上角任务面板，选择一个任务'));
 }

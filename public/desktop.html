@@ -11,23 +11,17 @@
   <link rel="icon" type="image/png" href="/app-icon-20261106.png">
   <link rel="apple-touch-icon" href="/app-icon-20261106.png">
   <title>Codex 手机助手</title>
-  <link rel="stylesheet" href="/desktop.css?v=20261110-spinner">
+  <link rel="stylesheet" href="/desktop.css?v=20261111-home-install">
   <link rel="stylesheet" href="/download/home-entry.css?v=20261106-2">
   <script defer src="/markdown-parser.js"></script>
   <script defer src="/html-sanitizer.js"></script>
-  <script defer src="/install-prompt.js?v=20261107-stable1"></script>
+  <script defer src="/install-prompt.js?v=20261111-home-install"></script>
   <script defer src="/jsQR.js"></script>
   <script defer src="/pair.js?v=20261107-stable1"></script>
-  <script defer src="/desktop.js?v=20261110-spinner"></script>
+  <script defer src="/desktop.js?v=20261111-home-install"></script>
   <script defer src="/download/home-entry.js?v=20261106-2"></script>
 </head>
 <body>
-  <section id="install-prompt" class="install-prompt" aria-label="添加到主屏幕" hidden>
-    <button id="install-dismiss" class="install-dismiss" type="button" aria-label="关闭">×</button>
-    <strong>添加到主屏幕</strong>
-    <p id="install-message"></p>
-    <button id="install-action" class="install-action" type="button" hidden>添加</button>
-  </section>
   <div class="app">
     <button id="device-scrim" class="device-scrim" type="button" aria-label="关闭电脑列表" hidden></button>
     <button id="scrim" class="scrim" type="button" aria-label="关闭侧栏" hidden></button>
@@ -40,6 +34,19 @@
       <div class="device-bar"><details id="devices" class="devices" hidden><summary id="device-current">电脑</summary><div class="device-menu"><div class="device-menu-header"><strong>已配对电脑</strong></div><div id="device-list" class="device-list"></div><button id="pair-another" class="device-add" type="button">配对其他电脑</button></div></details><button id="unpaired-control" class="unpaired-control" type="button" hidden>未配对 · 去配对</button><select id="current-project" class="current-project" aria-label="当前项目" hidden disabled></select><span id="connection" class="connection" role="status">未连接</span></div>
       <div id="new-project-bar" class="new-project-bar" hidden><label for="new-project">项目</label><select id="new-project" aria-label="选择项目"></select><select id="new-model" aria-label="选择模型"><option value="">自动</option></select><select id="new-effort" aria-label="选择推理强度" disabled><option value="">自动</option></select></div>
       <section class="conversation" aria-live="polite">
+        <section id="install-prompt" class="install-home" aria-label="添加到主屏幕" data-home-only hidden>
+          <div class="install-home-content">
+            <p class="install-home-task">打开左上角任务面板，选择一个任务</p>
+            <div class="install-home-tip">
+              <button id="install-dismiss" class="install-dismiss" type="button" aria-label="暂不显示添加提示">×</button>
+              <strong>添加到主屏幕，使用更方便</strong>
+              <p id="install-message">像 App 一样从手机桌面打开，使用独立窗口。</p>
+              <p class="install-notification-note">任务通知即将支持。添加后还需开启通知权限。</p>
+              <button id="install-action" class="install-action" type="button" hidden>添加到主屏幕</button>
+              <p id="install-help" class="install-help" hidden></p>
+            </div>
+          </div>
+        </section>
         <div class="conversation-inner"><span id="history" class="history"></span><p id="error" class="error" role="alert" hidden></p><div id="turns" class="turns"></div></div>
       </section>
       <button id="scroll-bottom" class="scroll-bottom" type="button" aria-label="回到最新消息" title="回到最新消息" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6"/></svg></button>
