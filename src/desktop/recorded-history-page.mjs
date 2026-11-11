@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { statSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { desktopView } from './view.mjs';
@@ -19,7 +19,7 @@ function identity(threadId, parentThreadId, scope, projectPath) {
 }
 
 function permittedRow(db, id, phoneThreadIds) {
-  const row = db.prepare('SELECT title, name, source, thread_source, archived, cwd FROM threads WHERE id = ?').get(id.threadId);
+  const row = db.prepare('SELECT * FROM threads WHERE id = ?').get(id.threadId);
   if (!row || row.archived !== 0) return null;
   if (id.projectPath !== null && (typeof row.cwd !== 'string' || !sameOrInside(id.projectPath, row.cwd))) return null;
   if (id.parentThreadId === null) return row.source === 'vscode' && (['user', 'agent_created_thread'].includes(row.thread_source) || (row.thread_source === null && phoneThreadIds.includes(id.threadId))) ? row : null;
@@ -71,6 +71,16 @@ export function createRecordedHistoryPager({ codexHome = join(homedir(), '.codex
         history.exec('BEGIN');
         const projection = history.prepare('SELECT next_rollout_ordinal AS ordinal, next_rollout_byte_offset AS offset FROM thread_history_projection_state WHERE thread_id = ?').get(threadId);
         if (!projection || ![projection.ordinal, projection.offset].every(v => integer(v, 0, Number.MAX_SAFE_INTEGER))) throw fail('history-unavailable');
+        // Codex can move a paginated rollout while leaving its old projection
+        // behind. That index is still useful for older pages, but cannot claim
+        // to contain the latest turn until it has caught up to the current file.
+        if (cursor === null && typeof row.rollout_path === 'string' && row.rollout_path) {
+          const root = realpathSync(join(codexHome, 'sessions'));
+          const current = realpathSync(row.rollout_path);
+          if (!sameOrInside(root, current)) throw fail('history-unavailable');
+          const rollout = statSync(current);
+          if (!rollout.isFile() || rollout.size !== projection.offset) throw fail('history-unavailable');
+        }
         let page = cursor === null ? { v: 1, identity: id, database, expires: now() + ttlMs, snapshotOrdinal: projection.ordinal, snapshotOffset: projection.offset, turnBefore: projection.ordinal, current: null } : decode(cursor);
         if (JSON.stringify(page.identity) !== JSON.stringify(id) || page.database !== database) throw fail('invalid-cursor');
         if (projection.ordinal < page.snapshotOrdinal || projection.offset < page.snapshotOffset) throw fail('history-changed');
