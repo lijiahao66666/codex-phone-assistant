@@ -16,6 +16,9 @@
   <script defer src="/markdown-parser.js"></script>
   <script defer src="/html-sanitizer.js"></script>
   <script defer src="/install-prompt.js?v=20261111-home-install2"></script>
+  <script defer src="/task-reminder-store.js"></script>
+  <script defer src="/notification-presence.js"></script>
+  <script defer src="/notifications.js"></script>
   <script defer src="/jsQR.js"></script>
   <script defer src="/pair.js?v=20261107-stable1"></script>
   <script defer src="/desktop.js?v=20261111-home-install"></script>
@@ -28,6 +31,7 @@
     <aside id="sidebar" class="sidebar" aria-label="侧栏">
       <div class="brand"><strong>Codex 手机助手</strong><button id="close-sidebar" class="icon-button close-sidebar" type="button" aria-label="关闭侧栏" title="关闭侧栏">×</button></div>
       <button id="new-chat" class="new-chat" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新聊天</button><div class="side-label">项目</div><nav id="project-list" class="project-list" aria-label="项目和任务"><p class="list-status">加载中...</p></nav>
+      <footer class="sidebar-footer"><button id="open-settings" class="settings-toggle" type="button" aria-label="打开设置" aria-expanded="false" title="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.08A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.08A1.65 1.65 0 0 0 20.91 10H21a2 2 0 0 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15Z"/></svg><span>设置</span></button></footer>
     </aside>
     <main class="main">
       <header class="topbar"><button id="open-sidebar" class="icon-button open-sidebar" type="button" aria-label="打开侧栏" title="打开侧栏">☰</button><h1 id="title">尚未选择任务</h1><button id="toggle-summary" class="icon-button summary-toggle" type="button" aria-label="打开任务摘要" aria-expanded="false" title="任务摘要">☷</button></header>
@@ -46,6 +50,7 @@
             </div>
           </div>
         </section>
+
         <div class="conversation-inner"><span id="history" class="history"></span><p id="error" class="error" role="alert" hidden></p><div id="turns" class="turns"></div></div>
       </section>
       <button id="scroll-bottom" class="scroll-bottom" type="button" aria-label="回到最新消息" title="回到最新消息" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6"/></svg></button>
@@ -54,6 +59,18 @@
       <div class="composer"><div id="image-draft" class="image-draft" hidden></div><form id="composer-form" class="composer-inner"><div id="attachment-control" class="attachment-control" hidden><button id="attachment-toggle" class="voice-button" type="button" title="添加" aria-label="添加" aria-expanded="false" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><span id="plan-badge" class="plan-badge" hidden>计划</span><div id="attachment-menu" class="attachment-menu" hidden><button id="image-choose" type="button" hidden disabled>图片</button><button id="file-choose" type="button" hidden disabled>添加附件</button><button id="mode-choose" type="button" hidden disabled>计划模式</button></div></div><input id="image-file" type="file" multiple accept="image/png,image/jpeg,image/webp" hidden><input id="attachment-file" type="file" multiple hidden><textarea id="message" aria-label="输入消息" placeholder="选择任务后输入消息" rows="1" maxlength="32000" disabled></textarea><button id="voice-input" class="voice-button" type="button" title="语音输入" aria-label="语音输入" aria-pressed="false" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v4M9 22h6"></path></svg></button><button id="stop-turn" class="send-button stop-button" type="button" title="停止任务" aria-label="停止任务" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"></rect></svg></button><button id="send-message" class="send-button" type="submit" title="发送消息" aria-label="发送消息" disabled>↑</button></form><p id="mode-status" class="send-status" role="status" aria-live="polite"></p><p id="voice-status" class="voice-status" role="status" aria-live="polite"></p><p id="stop-status" class="send-status" role="status" aria-live="polite"></p><div class="send-feedback"><p id="send-status" class="send-status" role="status" aria-live="polite"></p><button id="abandon-prepared" class="unlock-send" type="button" hidden>放弃此次发送并打开聊天</button><button id="unlock-send" class="unlock-send" type="button" hidden>确认后允许重发</button></div></div>
     </main>
     <button id="summary-scrim" class="summary-scrim" type="button" aria-label="关闭任务摘要" hidden></button><aside id="summary-panel" class="summary-panel" aria-label="任务摘要" hidden><div class="summary-header"><strong>任务摘要</strong></div><div id="summary-content" class="summary-content"></div></aside>
+  </div>
+  <div id="settings-overlay" class="settings-overlay" hidden>
+    <button id="settings-scrim" class="settings-scrim" type="button" aria-label="关闭设置"></button>
+    <section id="settings-panel" class="settings-panel" role="dialog" aria-modal="true" aria-label="设置" aria-labelledby="settings-title" tabindex="-1">
+      <header class="settings-header"><h2 id="settings-title">设置</h2><button id="close-settings" class="icon-button" type="button" aria-label="关闭设置" title="关闭设置">×</button></header>
+        <section id="notification-prompt" class="notification-prompt" aria-label="任务通知" hidden>
+          <strong>任务通知</strong>
+          <p id="notification-message" role="status"></p>
+          <button id="notification-enable" class="install-action" type="button" hidden>开启通知</button>
+          <button id="notification-disable" class="install-action" type="button" hidden>关闭通知</button>
+        </section>
+    </section>
   </div>
   <div id="pair-overlay" class="pair-overlay" hidden>
     <button id="pair-scrim" class="pair-scrim" type="button" aria-label="关闭配对"></button>

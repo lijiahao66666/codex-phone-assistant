@@ -1,8 +1,7 @@
 import { inspectApproval } from './approval-guard.mjs';
 import { inspectUserInput } from './user-input-guard.mjs';
-import { inspectQuestions, parseQuestionReply } from './async-question-guard.mjs';
+import { inspectQuestions, parseQuestionReply, pendingAsyncQuestions, registerAsyncQuestionHistory } from './async-question-guard.mjs';
 import { createHash } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 import { userInputImagePath } from '../media/user-input-media.mjs';
 
 // Project the desktop's private conversation state into a display-only view.
@@ -49,15 +48,6 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     complete = false;
     reason = reason ?? 'items-paginated';
   }
-  const tailTurn = turns.at(-1);
-  const canonicalEntries = canonical?.islands?.length === 1 ? canonical.islands[0]?.entries : null;
-  const legacyIds = legacy.map(turn => turn?.turnId);
-  const mirroredLegacy = legacy.length > 0 && Array.isArray(canonicalEntries) && legacy.length === canonicalEntries.length &&
-    legacyIds.every(id => typeof id === 'string' && id) && new Set(legacyIds).size === legacyIds.length &&
-    legacy.every((turn, index) => turn.turnId === canonical.entitiesByKey?.[canonicalEntries[index]?.value]?.turnId) &&
-    (() => { const { id, ...tail } = legacy.at(-1); return isDeepStrictEqual(tail, canonical.entitiesByKey?.[canonicalEntries.at(-1)?.value]); })();
-  const completeTail = !complete && canonical && (!legacy.length || mirroredLegacy) && canonical.islands.length === 1 &&
-    canonical.islands[0]?.newerBoundary?.status === 'exhausted' && tailTurn?.itemsPagination?.hasLoadedOldest === true && tailTurn.itemsPagination.hasLoadedNewest !== false && tailTurn.itemsPagination.evicted !== true;
   const userMessageIds = new Set(turns.flatMap(turn => Array.isArray(turn.items) ? turn.items.filter(item => item?.type === 'userMessage' && typeof item.id === 'string').map(item => item.id) : []));
   const viewTurns = turns.map((turn, index) => ({
     id: typeof turn.turnId === 'string' ? turn.turnId : null,
@@ -66,6 +56,11 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     startedAt: turn.turnStartedAtMs ?? null,
     items: orderSteeringMessages(turnDisplayItems(turn, index)).filter(item => (item?.type !== 'steeringUserMessage' || !item.serverUserMessageId || !userMessageIds.has(item.serverUserMessageId)) && !emptyCompletedWait(item)).map(item => displayItem(item, imageHandles, mediaHandles, turn.remodexOptimisticPendingTurn === true)),
   }));
+  const view = { turns: viewTurns, history: { complete, reason } };
+  const questionTurns = registerAsyncQuestionHistory(view, state);
+  const unknownQuestionItemIds = [];
+  const legacyTailQuestion = !canonical && !complete ? viewTurns.at(-1)?.items.findLast(item => item.type === 'agentMessage' && item.questions?.length) : null;
+  const legacyActionableItemId = legacyTailQuestion && pendingAsyncQuestions(view, legacyTailQuestion.id) ? legacyTailQuestion.id : null;
   {
     const items = viewTurns.flatMap(turn => turn.items);
     const counts = new Map();
@@ -77,10 +72,15 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
         for (const id of item.questionReplyIds || []) answered.add(id);
         for (const id of item.questionReplyPendingIds || []) submitting.add(id);
       }
-      if (item.type === 'agentMessage' && item.questions?.length && counts.get(item.id) === 1) {
-        if (complete || (completeTail && viewTurns.at(-1)?.items.includes(item))) item.pendingQuestionIds = item.questions.filter(question => !answered.has(question.id)).map(question => question.id);
+      if (item.type === 'agentMessage' && item.questions?.length) {
+        const proven = counts.get(item.id) === 1 && [...questionTurns].some(turn => turn.items.includes(item));
+        if (proven) item.pendingQuestionIds = item.questions.filter(question => !answered.has(question.id)).map(question => question.id);
+        // A gap or a partially loaded newer turn removes our proof, not the
+        // unanswered question. Only stable IDs cross the window boundary; old
+        // question bodies/options must not inflate every live snapshot.
+        else if (item.questions.some(question => !answered.has(question.id)) && typeof item.id === 'string' && item.id !== legacyActionableItemId) unknownQuestionItemIds.push(item.id);
         const pending = item.questions.filter(question => submitting.has(question.id) && !answered.has(question.id)).map(question => question.id);
-        if (pending.length) item.submittingQuestionIds = pending;
+        if (counts.get(item.id) === 1 && pending.length) item.submittingQuestionIds = pending;
       }
     }
   }
@@ -91,8 +91,9 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
         timeUsedSeconds: Number.isFinite(rawGoal.timeUsedSeconds) && rawGoal.timeUsedSeconds >= 0 ? rawGoal.timeUsedSeconds : null,
         updatedAt: Number.isFinite(rawGoal.updatedAt) && rawGoal.updatedAt >= 0 ? rawGoal.updatedAt : null }
     : null;
-  return {
+  return Object.assign(view, {
     id: state.id,
+    unknownQuestionItemIds: [...new Set(unknownQuestionItemIds)],
     collaborationMode: ['default', 'plan'].includes(state.latestCollaborationMode?.mode) ? state.latestCollaborationMode.mode : null,
     model: typeof state.latestCollaborationMode?.settings?.model === 'string' ? state.latestCollaborationMode.settings.model : null,
     reasoningEffort: Object.hasOwn(state.latestCollaborationMode?.settings || {}, 'reasoning_effort')
@@ -101,11 +102,9 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     title: typeof state.title === 'string' ? state.title : '',
     runtimeStatus: ['active', 'idle'].includes(state.threadRuntimeStatus?.type) ? state.threadRuntimeStatus.type : 'unknown',
     goal,
-    turns: viewTurns,
-    history: { complete, reason },
     // Keep only the request identity and method until each response contract is verified.
     requests: Array.isArray(state.requests) ? state.requests.filter(request => request?.completed !== true).map(request => inspectApproval(request, state.id) || inspectUserInput(request, state.id) || ({ id: request?.id, method: request?.method })).filter(request => request.id !== undefined) : [],
-  };
+  });
 }
 
 function inputIdentity(content) {

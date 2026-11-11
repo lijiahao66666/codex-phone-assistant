@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
+import { desktopView } from '../src/desktop/view.mjs';
+import { makeWindow } from '../src/desktop/history-pagination.mjs';
 
 const threadId = '11111111-1111-4111-8111-111111111111';
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -12,7 +14,7 @@ async function fixture(handler) {
     constructor() { this.children = []; this.dataset = {}; this.listeners = {}; this.value = ''; this.style = {}; this.attributes = {}; this.classList = { toggle() {}, contains() { return false; } }; this.focusCount = 0; }
     append(...nodes) { this.children.push(...nodes); for (const node of nodes) if (node && typeof node === 'object') node.parentElement = this; }
     replaceChildren(...nodes) { if (this.contains(document.activeElement)) document.activeElement = document.body; for (const child of this.children) child.parentElement = null; this.children = []; this.append(...nodes); }
-    remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); }
+    remove() { if (this.parentElement) { if (this.contains(document.activeElement)) document.activeElement = document.body; this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; } }
     get childNodes() { return this.children; }
     addEventListener(type, listener) { this.listeners[type] = listener; }
     setAttribute(name, value) { this.attributes[name] = value; }
@@ -552,19 +554,59 @@ test('the first live state becoming connected does not replace a just-focused qu
   assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [3, 8, 'backward']);
 });
 
-test('a preserved-view reconnect unhides the same questions on its next live state', async () => {
+for (const kind of ['async', 'request']) test(`${kind} question keeps its editor and IME input through reconnect and a history preview, with submission blocked until live confirmation`, async () => {
   let releaseEvents;
   const f = await fixture(url => url.endsWith('/events') ? new Promise(resolve => { releaseEvents = () => resolve(response()); }) : undefined);
-  const view = multipleView(); f.show(view);
-  const oldInput = inputIn(forms(f)[0]); fill(forms(f)[0], 'retained draft');
-  const reconnect = f.run('connect(selectedId,0,true)');
-  assert.equal(f.run('questionPanel.hidden'), true);
+  const view = kind === 'async' ? multipleView() : { requests: [{ id: 'request', kind: 'userInput', questions: [{ id: 'q', question: '输入回答', options: [] }] }] };
   f.show(view);
-  assert.equal(f.run('questionPanel.hidden'), false);
-  assert.equal(forms(f).length, 2);
-  assert.notEqual(inputIn(forms(f)[0]), oldInput);
-  assert.equal(inputIn(forms(f)[0]).value, 'retained draft');
-  f.run('active.abort()'); releaseEvents(); await reconnect;
+  const oldForm = forms(f)[0], oldInput = inputIn(oldForm); fill(oldForm, '拼音 composing'); oldInput.focus(); oldInput.setSelectionRange(2, 7, 'backward');
+  const reconnect = f.run('connect(selectedId,0,true)');
+  try {
+    assert.equal(f.run('questionPanel.hidden'), false);
+    assert.equal(inputIn(forms(f)[0]), oldInput); assert.equal(oldInput.isConnected, true); assert.equal(f.document.activeElement, oldInput);
+    assert.equal(descendants(oldForm).find(node => node.type === 'submit').disabled, true);
+    await oldForm.listeners.submit({ preventDefault() {} });
+    const skip = descendants(oldForm).find(node => node.className === 'question-skip');
+    if (skip) { assert.equal(skip.disabled, true); skip.listeners.click(); assert.equal(forms(f)[0], oldForm); }
+    // A cached or recorded preview is not authority that the live question was answered.
+    f.show({ requests: [], turns: [{ id: 'older-history', status: 'completed', items: [{ id: 'older-user-message', type: 'userMessage', text: '只用于历史显示' }] }], history: { complete: true } }, false);
+    assert.equal(f.run('questionPanel.hidden'), false); assert.equal(forms(f)[0], oldForm); assert.equal(f.document.activeElement, oldInput);
+    oldInput.value = '中文合成输入完成'; oldInput.listeners.input(); oldInput.setSelectionRange(3, 6, 'backward');
+    await oldForm.listeners.submit({ preventDefault() {} });
+    assert.equal(f.requests.some(request => /\/(?:async-question|user-input)$/.test(request.url)), false);
+    f.run("recoveryChecks.set(recoveryKey(currentDeviceId,selectedId),{status:'ready'});recoveries.set(recoveryKey(currentDeviceId,selectedId),{status:'clear'})");
+    await oldForm.listeners.submit({ preventDefault() {} });
+    assert.equal(f.requests.some(request => /\/(?:async-question|user-input)$/.test(request.url)), false, 'readiness alone cannot authorize a history-only question');
+    f.show(view);
+    assert.equal(inputIn(forms(f)[0]), oldInput); assert.equal(oldInput.value, '中文合成输入完成'); assert.equal(oldInput.focusCount, 1);
+    assert.equal(f.document.activeElement, oldInput); assert.deepEqual([oldInput.selectionStart, oldInput.selectionEnd, oldInput.selectionDirection], [3, 6, 'backward']);
+    assert.equal(descendants(oldForm).find(node => node.type === 'submit').disabled, false);
+    await oldForm.listeners.submit({ preventDefault() {} });
+    const request = f.requests.find(entry => entry.url.endsWith(kind === 'async' ? '/async-question' : '/user-input'));
+    assert.ok(request); assert.deepEqual(JSON.parse(request.options.body).answers, kind === 'async' ? { 'question-A': '中文合成输入完成' } : { q: '中文合成输入完成' });
+  } finally { f.run('active.abort()'); releaseEvents(); await reconnect; }
+});
+
+for (const kind of ['async', 'request']) test(`${kind} retained question is removed only by new live authority and detached callbacks cannot submit`, async () => {
+  const f = await fixture();
+  const view = kind === 'async' ? multipleView() : { requests: [{ id: 'request', kind: 'userInput', questions: [{ id: 'q', question: '输入回答', options: [] }] }] };
+  f.show(view); const oldForm = forms(f)[0], oldInput = inputIn(oldForm); fill(oldForm, '未发送'); oldInput.focus();
+  f.show({ requests: [], turns: [] }, false);
+  assert.equal(forms(f)[0], oldForm);
+  f.show({ requests: [], turns: [] });
+  assert.equal(forms(f).length, 0); assert.equal(oldInput.isConnected, false);
+  await oldForm.listeners.submit({ preventDefault() {} });
+  assert.equal(f.requests.some(request => /\/(?:async-question|user-input)$/.test(request.url)), false);
+});
+
+test('an unchanged retained question still clears immediately when switching tasks or invalidating the device', async () => {
+  const f = await fixture(), view = multipleView(); f.show(view);
+  const original = inputIn(forms(f)[0]); fill(forms(f)[0], '原设备草稿'); original.focus();
+  f.run('invalidateDeviceState()'); assert.equal(forms(f).length, 0); assert.equal(original.isConnected, false);
+  f.run(`selectedId='${threadId}';currentDeviceId='other-device';historyScope={hostId:'host',deviceId:'other-device'};connected=true`);
+  f.show(view, false); assert.equal(forms(f).length, 0);
+  f.show(view); assert.notEqual(inputIn(forms(f)[0]), original); assert.equal(inputIn(forms(f)[0]).value, '');
+  f.run('selectedId=null;clearConversation()'); assert.equal(forms(f).length, 0);
 });
 
 test('question retention signatures exclude long message, reasoning and tool bodies', async () => {
@@ -573,4 +615,177 @@ test('question retention signatures exclude long message, reasoning and tool bod
   const short = makeSignature(1), long = makeSignature(500000);
   assert.equal(long, short);
   assert.ok(long.length < 200);
+});
+
+const laterTurns = count => Array.from({ length: count }, (_, index) => ({ id: `later-${index}`, status: 'completed', items: [{ id: `later-message-${index}`, type: 'agentMessage', text: `后续回合 ${index}` }] }));
+const pendingTurn = () => ({ id: 'old-pending-turn', viewKey: 'old-pending-turn:stable', status: 'completed', items: [choiceItem('old')] });
+const lightweightPending = turn => ({ ...turn, items: turn.items.filter(item => item.questions?.length).map(item => ({ id: item.id, type: item.type, text: '', questions: item.questions, pendingQuestionIds: item.pendingQuestionIds, submittingQuestionIds: item.submittingQuestionIds })) });
+
+test('a pending question outside the last three turns remains attached without adding its empty control turn to the timeline', async () => {
+  const f = await fixture(), old = pendingTurn();
+  f.show({ turns: [old, ...laterTurns(2)], pendingQuestionTurns: [] });
+  const form = forms(f)[0], input = inputIn(form); fill(form, '跨窗口的中文输入'); input.focus(); input.setSelectionRange(2, 6, 'backward');
+  const windowed = { turns: laterTurns(3), pendingQuestionTurns: [lightweightPending(old)] };
+  f.show(windowed);
+  assert.equal(forms(f).length, 1); assert.equal(forms(f)[0], form); assert.equal(inputIn(forms(f)[0]), input);
+  assert.equal(f.document.activeElement, input); assert.equal(input.isConnected, true); assert.equal(input.value, '跨窗口的中文输入'); assert.equal(input.focusCount, 1);
+  assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [2, 6, 'backward']);
+  const timeline = descendants(f.nodes.get('#turns'));
+  assert.equal(timeline.filter(node => node.className === 'turn').length, 3);
+  assert.equal(timeline.filter(node => node.className === 'item assistant-message').length, 3, 'supplemental controls must not create empty assistant bubbles');
+  await form.listeners.submit({ preventDefault() {} });
+  const sent = f.requests.find(request => request.url.endsWith('/async-question')); assert.ok(sent); assert.equal(JSON.parse(sent.options.body).requestId, 'item-old');
+});
+
+test('live pending-control removal clears an old windowed question and a changed schema replaces only the old editor', async () => {
+  const f = await fixture(), old = pendingTurn();
+  const windowed = { turns: laterTurns(3), pendingQuestionTurns: [lightweightPending(old)] };
+  f.show(windowed); const input = inputIn(forms(f)[0]); fill(forms(f)[0], '原答案'); input.focus();
+  const changed = structuredClone(windowed); changed.pendingQuestionTurns[0].items[0].questions[0].question = '更新后的旧问题';
+  f.show(changed); assert.notEqual(inputIn(forms(f)[0]), input); assert.equal(inputIn(forms(f)[0]).value, '');
+  const answered = structuredClone(changed); answered.pendingQuestionTurns[0].items[0].pendingQuestionIds = [];
+  f.show(answered); assert.equal(forms(f).length, 0);
+  f.show(windowed); assert.equal(forms(f).length, 1);
+  f.show({ turns: laterTurns(3), pendingQuestionTurns: [] }); assert.equal(forms(f).length, 0);
+});
+
+test('loaded full history remains intact when the same turn supplies lightweight pending controls without duplicate forms', async () => {
+  const f = await fixture(), old = pendingTurn();
+  old.items.unshift({ id: 'old-large-tool', type: 'commandExecution', command: 'fixture', output: '保留已加载的完整工具输出' });
+  old.items[1].text = '原始问题说明\n选择old\n继续\n停止';
+  f.run(`recordedHistory={id:selectedId,turns:${JSON.stringify([old])},baseView:{},initialized:true,olderComplete:true,stale:false}`);
+  const supplemental = lightweightPending(old);
+  f.show({ turns: laterTurns(3), pendingQuestionTurns: [supplemental, supplemental] });
+  assert.equal(forms(f).length, 1);
+  const timeline = descendants(f.nodes.get('#turns'));
+  assert.equal(timeline.filter(node => node.className === 'turn').length, 4);
+  assert.ok(timeline.some(node => node.textContent?.includes('保留已加载的完整工具输出')));
+  assert.ok(timeline.some(node => node.textContent?.includes('原始问题说明')));
+  const inWindow = { turns: [old, ...laterTurns(2)], pendingQuestionTurns: [supplemental] };
+  f.show(inWindow); assert.equal(forms(f).length, 1, 'a source turn wins over a duplicate supplemental turn');
+});
+
+test('delta metadata changes to pendingQuestionTurns immediately update the old question cards', async () => {
+  const f = await fixture(), old = lightweightPending(pendingTurn());
+  const initial = { id: threadId, turns: laterTurns(3), requests: [], history: { complete: false }, pendingQuestionTurns: [old] };
+  f.run(`handleEvent(${JSON.stringify('event: state\ndata: ' + JSON.stringify({ seq: 1, conversation: initial }))})`);
+  assert.equal(forms(f).length, 1);
+  const next = { ...initial, pendingQuestionTurns: [] }; delete next.turns;
+  const delta = { baseSeq: 1, seq: 2, metadata: next, order: initial.turns.map(turn => turn.id), changed: [] };
+  f.run(`handleEvent(${JSON.stringify('event: state-delta\ndata: ' + JSON.stringify(delta))})`);
+  assert.equal(forms(f).length, 0); assert.equal(f.run('streamView.pendingQuestionTurns.length'), 0);
+});
+
+function canonicalQuestionState(laterCount = 4) {
+  const keys = ['old', ...Array.from({ length: laterCount }, (_, index) => `later-${index}`)];
+  return { id: threadId, turns: [], threadRuntimeStatus: { type: 'idle' }, turnHistory: { kind: 'canonical', history: {
+    isComplete: true, islands: [{ entries: keys.map(value => ({ value })), newerBoundary: { status: 'exhausted' } }],
+    entitiesByKey: Object.fromEntries(keys.map((key, index) => [key, { turnId: key, status: 'completed', items: index
+      ? [{ id: `message-${key}`, type: 'agentMessage', text: '后续消息' }]
+      : [{ id: 'old-question', type: 'agentMessage', text: '问题说明', questions: [{ title: '回答问题', options: ['继续', '停止'] }] }] }])),
+  } } };
+}
+
+for (const laterCount of [1, 4]) for (const mode of ['incomplete-tail', 'new-island-gap']) test(`${mode} preserves the attached question editor without writes when canonical proof temporarily disappears (${laterCount} later turns)`, async () => {
+  const f = await fixture(), state = canonicalQuestionState(laterCount);
+  f.show(makeWindow(desktopView(state)));
+  const form = forms(f)[0], input = inputIn(form); fill(form, '中文合成输入中'); input.focus(); input.setSelectionRange(1, 5, 'backward');
+  const uncertain = structuredClone(state), canonical = uncertain.turnHistory.history;
+  if (mode === 'incomplete-tail') canonical.entitiesByKey[`later-${laterCount - 1}`].itemsPagination = { hasLoadedOldest: false };
+  else { const entries = canonical.islands[0].entries.splice(1); canonical.islands.push({ entries, newerBoundary: { status: 'exhausted' }, olderBoundary: { status: 'available' } }); canonical.isComplete = false; }
+  const unknown = makeWindow(desktopView(uncertain));
+  assert.deepEqual(unknown.unknownQuestionItemIds, ['old-question']);
+  assert.equal(unknown.pendingQuestionTurns.length, 0);
+  f.show(unknown);
+  assert.equal(forms(f)[0], form); assert.equal(inputIn(form), input); assert.equal(input.isConnected, true); assert.equal(f.document.activeElement, input);
+  assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [1, 5, 'backward']); assert.equal(input.focusCount, 1);
+  const submit = descendants(form).find(node => node.type === 'submit'), skip = descendants(form).find(node => node.className === 'question-skip');
+  assert.equal(submit.disabled, true); assert.equal(skip.disabled, true);
+  input.value = '中文合成输入完成'; input.listeners.input();
+  await form.listeners.submit({ preventDefault() {} }); skip.listeners.click();
+  assert.equal(forms(f)[0], form); assert.equal(f.requests.some(request => request.url.endsWith('/async-question')), false);
+  // Fresh proof restores the exact editor, including the edit made while uncertain.
+  f.show(makeWindow(desktopView(state)));
+  assert.equal(forms(f)[0], form); assert.equal(input.value, '中文合成输入完成'); assert.equal(input.focusCount, 1); assert.equal(f.document.activeElement, input); assert.equal(submit.disabled, false);
+  await form.listeners.submit({ preventDefault() {} });
+  assert.equal(f.requests.filter(request => request.url.endsWith('/async-question')).length, 1);
+});
+
+test('unknown question metadata never creates a new old card and only the current scope can retain an existing editor', async () => {
+  const f = await fixture(), state = canonicalQuestionState();
+  const unknownState = structuredClone(state); unknownState.turnHistory.history.entitiesByKey['later-3'].itemsPagination = { hasLoadedOldest: false };
+  const unknown = makeWindow(desktopView(unknownState));
+  f.show(unknown); assert.equal(forms(f).length, 0);
+  const tailUnknown = canonicalQuestionState(0); tailUnknown.turnHistory.history.entitiesByKey.old.itemsPagination = { hasLoadedOldest: false };
+  f.show(makeWindow(desktopView(tailUnknown))); assert.equal(forms(f).length, 0, 'unknown final items cannot use the legacy actionable-tail fallback');
+  f.show(makeWindow(desktopView(state))); const old = inputIn(forms(f)[0]); old.focus();
+  f.run("resetHistoryScope();currentDeviceId='other-device';historyScope={hostId:'host',deviceId:'other-device'};connected=true");
+  f.show(unknown); assert.equal(forms(f).length, 0); assert.equal(old.isConnected, false);
+});
+
+test('an unknown focused card stays attached when another question resolves or a new card appears', async () => {
+  const f = await fixture(), view = multipleView(); f.show(view);
+  const first = forms(f)[0], input = inputIn(first); fill(first, '继续输入'); input.focus(); input.setSelectionRange(1, 3);
+  const changed = structuredClone(view); delete changed.turns[0].items[0].pendingQuestionIds;
+  changed.unknownQuestionItemIds = ['item-A']; changed.turns[1].items[0].pendingQuestionIds = [];
+  changed.turns.push({ id: 'new-turn', status: 'completed', items: [choiceItem('C')] });
+  f.show(changed);
+  assert.equal(forms(f).length, 2); assert.ok(forms(f).includes(first)); assert.equal(f.document.activeElement, input); assert.equal(input.isConnected, true); assert.equal(input.focusCount, 1);
+  assert.equal(descendants(first).find(node => node.type === 'submit').disabled, true);
+  const added = forms(f).find(form => form !== first); assert.equal(inputIn(added).dataset.inputQuestionId, 'question-C'); assert.equal(descendants(added).find(node => node.type === 'submit').disabled, false);
+  // An explicit accepted reply is conclusive even while later history is incomplete.
+  const state = canonicalQuestionState(); f.show(makeWindow(desktopView(state)));
+  const form = forms(f)[0], oldInput = inputIn(form); oldInput.focus();
+  state.turnHistory.history.entitiesByKey['later-3'].itemsPagination = { hasLoadedOldest: false };
+  state.turnHistory.history.entitiesByKey['later-3'].items.push({ type: 'userMessage', id: 'accepted-answer', content: [{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', 'old-question', 0]), question: '回答问题', answer: '继续' }]) + '\n</send_user_message_question_reply>' }] });
+  const accepted = makeWindow(desktopView(state)); assert.deepEqual(accepted.unknownQuestionItemIds, []);
+  f.show(accepted); assert.equal(forms(f).length, 0); assert.equal(oldInput.isConnected, false);
+  await form.listeners.submit({ preventDefault() {} }); assert.equal(f.requests.some(request => request.url.endsWith('/async-question')), false);
+});
+
+test('delta metadata alone immediately disables an unknown retained question without removing its editor', async () => {
+  const f = await fixture(), old = lightweightPending(pendingTurn());
+  const initial = { id: threadId, turns: laterTurns(3), requests: [], history: { complete: false }, pendingQuestionTurns: [old], unknownQuestionItemIds: [] };
+  f.run(`handleEvent(${JSON.stringify('event: state\ndata: ' + JSON.stringify({ seq: 1, conversation: initial }))})`);
+  const form = forms(f)[0], input = inputIn(form); input.focus(); fill(form, '未完成');
+  const metadata = { ...initial, pendingQuestionTurns: [], unknownQuestionItemIds: ['item-old'] }; delete metadata.turns;
+  f.run(`handleEvent(${JSON.stringify('event: state-delta\ndata: ' + JSON.stringify({ baseSeq: 1, seq: 2, metadata, order: initial.turns.map(turn => turn.id), changed: [] }))})`);
+  assert.equal(forms(f)[0], form); assert.equal(f.document.activeElement, input); assert.equal(descendants(form).find(node => node.type === 'submit').disabled, true);
+});
+
+test('an incomplete legacy latest question keeps the same actionable fallback as the backend', async () => {
+  const f = await fixture();
+  const state = { id: threadId, turns: [{ turnId: 'latest', status: 'completed', items: [
+    { id: 'old-legacy-question', type: 'agentMessage', text: 'Earlier question', questions: [{ title: '此前问题', options: ['继续', '停止'] }] },
+    { id: 'latest-legacy-question', type: 'agentMessage', text: 'Latest question', questions: [{ title: '最新问题', options: ['继续', '停止'] }] },
+  ] }] };
+  const view = makeWindow(desktopView(state));
+  assert.equal(view.history.complete, false);
+  assert.deepEqual(view.unknownQuestionItemIds, ['old-legacy-question']);
+  assert.equal(view.turns[0].items[1].pendingQuestionIds, undefined, 'legacy fallback does not invent complete-history proof');
+  f.show(view); assert.equal(forms(f).length, 1);
+  const form = forms(f)[0]; fill(form, '最新问题的回答');
+  assert.equal(descendants(form).find(node => node.type === 'submit').disabled, false);
+  await form.listeners.submit({ preventDefault() {} });
+  const request = f.requests.find(request => request.url.endsWith('/async-question'));
+  assert.equal(JSON.parse(request.options.body).requestId, 'latest-legacy-question');
+});
+
+test('an attached request editor survives async cards appearing, resolving or becoming unknown without an ID namespace collision', async () => {
+  const f = await fixture(), initial = { ...multipleView(), requests: [{ id: 'item-A', kind: 'userInput', questions: [{ id: 'request-question', question: '请求问题', options: [] }] }] };
+  f.show(initial);
+  const requestForm = forms(f).find(form => inputIn(form).dataset.inputQuestionId === 'request-question'), input = inputIn(requestForm);
+  fill(requestForm, '请求输入法合成中'); input.focus(); input.setSelectionRange(2, 6, 'backward');
+  const uncertain = structuredClone(initial); uncertain.unknownQuestionItemIds = ['item-A']; delete uncertain.turns[0].items[0].pendingQuestionIds;
+  uncertain.turns[1].items[0].pendingQuestionIds = [];
+  uncertain.turns.push({ id: 'new-turn', status: 'completed', items: [choiceItem('C')] });
+  for (const next of [uncertain, { ...uncertain, turns: [], unknownQuestionItemIds: [] }, initial]) {
+    f.show(next);
+    assert.ok(forms(f).includes(requestForm)); assert.equal(inputIn(requestForm), input); assert.equal(input.isConnected, true); assert.equal(f.document.activeElement, input); assert.equal(input.focusCount, 1);
+    assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [2, 6, 'backward']);
+    assert.equal(descendants(requestForm).find(node => node.type === 'submit').disabled, false, 'async unknown IDs do not disable a request with the same ID');
+  }
+  input.value = '请求输入完成'; input.listeners.input(); await requestForm.listeners.submit({ preventDefault() {} });
+  const request = f.requests.find(entry => entry.url.endsWith('/user-input'));
+  assert.deepEqual(JSON.parse(request.options.body), { requestId: 'item-A', answers: { 'request-question': '请求输入完成' } });
 });

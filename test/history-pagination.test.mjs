@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWindow, makePage } from '../src/desktop/history-pagination.mjs';
+import { desktopView } from '../src/desktop/view.mjs';
 const conversation = () => ({ id: 't', runtimeStatus: 'active', requests: [{ id: 'q' }], history: { complete: true }, turns: Array.from({ length: 8 }, (_, i) => ({ id: String(i), items: [{ id: `i${i}`, text: 'x'.repeat(100) }] })) });
 test('live window supports strictly cursor-based retrieval without duplicates', () => {
   const full = conversation(), window = makeWindow(full, { recentCount: 3 });
@@ -14,6 +15,47 @@ test('recent updates keep older cursor stable; edits or reorder of history inval
   const full = conversation(), window = makeWindow(full), hash = window.history.historicalHash;
   full.turns[7].items[0].text = 'new'; assert.doesNotThrow(() => makePage(full, { historicalHash: hash, before: window.history.cursor }));
   full.turns[1].items[0].text = 'edited'; assert.throws(() => makePage(full, { historicalHash: hash, before: window.history.cursor }), /history-changed/);
+});
+test('an unanswered question stays live after more than three turns and pagination still has no duplicates', () => {
+  const full = conversation();
+  full.turns[2].items.push({ id: 'question', type: 'agentMessage', questions: [{ id: 'q', question: 'Keep this answer' }], pendingQuestionIds: ['q'] });
+  full.turns[2].items[0].text = 'x'.repeat(1200000);
+  const window = makeWindow(full);
+  assert.deepEqual(window.turns.map(turn => turn.id), ['5', '6', '7']);
+  assert.deepEqual(window.pendingQuestionTurns.map(turn => turn.id), ['2']);
+  assert.equal(window.pendingQuestionTurns[0].items[0].id, 'question');
+  assert.equal(window.pendingQuestionTurns[0].items[0].text, '');
+  assert.ok(JSON.stringify(window.pendingQuestionTurns).length < 500);
+  const page = makePage(full, { historicalHash: window.history.historicalHash, before: window.history.cursor, maxBytes: 2000000 });
+  assert.deepEqual([...page.turns, ...window.turns], full.turns);
+  full.turns[2].items.at(-1).pendingQuestionIds = [];
+  assert.deepEqual(makeWindow(full).turns.map(turn => turn.id), ['5', '6', '7']);
+  assert.deepEqual(makeWindow(full).pendingQuestionTurns, []);
+});
+test('unknown historical questions do not pull a long transcript into the live window', () => {
+  const full = conversation();
+  full.turns[0].items.push({ id: 'old-question', type: 'agentMessage', questions: [{ id: 'old', question: 'Not confirmed pending' }] });
+  full.turns[0].items[0].text = 'x'.repeat(500000);
+  assert.deepEqual(makeWindow(full).turns.map(turn => turn.id), ['5', '6', '7']);
+});
+test('unknown question continuity sends only IDs rather than old question schemas or large transcript bodies', () => {
+  const keys = ['old', 'later-0', 'later-1', 'later-2', 'latest'];
+  const state = { id: 'thread', turns: [], turnHistory: { kind: 'canonical', history: {
+    isComplete: false, islands: [{ entries: keys.map(value => ({ value })), newerBoundary: { status: 'exhausted' } }],
+    entitiesByKey: Object.fromEntries(keys.map((key, index) => [key, { turnId: key, status: 'completed',
+      ...(key === 'latest' ? { itemsPagination: { hasLoadedOldest: false } } : {}),
+      items: index ? [{ type: 'agentMessage', id: `message-${key}`, text: 'latest' }]
+        : Array.from({ length: 200 }, (_, item) => ({ type: 'agentMessage', id: `old-question-${item}`, text: 'private-old-body'.repeat(1000), questions: [{ title: 'private-old-question'.repeat(400), options: ['private-old-option'.repeat(400)] }] })),
+    }])),
+  } } };
+  const projected = desktopView(state), window = makeWindow(projected), serialized = JSON.stringify(window);
+  assert.equal(window.unknownQuestionItemIds.length, 200);
+  assert.deepEqual(window.pendingQuestionTurns, []);
+  assert.equal(window.turns.length, 3);
+  assert.doesNotMatch(serialized, /private-old-(?:body|question|option)/);
+  assert.ok(Buffer.byteLength(JSON.stringify(projected)) > 5 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(serialized) < 6000, `unknown metadata payload: ${Buffer.byteLength(serialized)} bytes`);
+  assert.equal(window.unknownQuestionItemIds, projected.unknownQuestionItemIds, 'window forwards the ID-only continuity metadata');
 });
 test('unbounded or invalid pages are rejected', () => {
   const full = conversation(), window = makeWindow(full);

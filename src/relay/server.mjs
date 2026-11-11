@@ -8,12 +8,13 @@ import { promisify } from 'node:util';
 import { PairingRegistry } from '../pairing/registry.mjs';
 import { serveAttachmentPreviewAsset } from '../transport/attachment-preview-assets.mjs';
 import { createStreamDiagnostics } from '../common/stream-diagnostics.mjs';
+import { PushService } from '../notifications/push-service.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const decompressUploadChunk = promisify(gunzip);
 
 // Experimental relay. TLS must terminate at a trusted loopback-only proxy.
-export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, recoveryResponseTimeoutMs = 60000, uploadResponseTimeoutMs = 30000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
+export function createPairRelay({ origin, database = ':memory:', production = false, trustedProxy = false, imageUpload = false, imagePreview = false, notifications = null, maxNotificationStreams = 1024, now = Date.now, pairTtlMs = 120000, requestTimeoutMs = 10000, recoveryResponseTimeoutMs = 60000, uploadResponseTimeoutMs = 30000, historyMaxDurationMs = 120000, heartbeatMs = 15000, bodyTimeoutMs = 10000, maxHosts = 10000, unpairedTtlMs = 604800000, onChunkForTests } = {}) {
   const base = new URL(origin);
   if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash || base.username || base.password) throw new TypeError('HTTPS origin required');
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1) throw new TypeError('Invalid timeout');
@@ -23,9 +24,72 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   if (production && database === ':memory:') throw new TypeError('Persistent database required in production');
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1) throw new TypeError('Invalid heartbeat');
   if (!Number.isSafeInteger(bodyTimeoutMs) || bodyTimeoutMs < 1) throw new TypeError('Invalid body timeout');
+  if (!Number.isSafeInteger(maxNotificationStreams) || maxNotificationStreams < 1 || maxNotificationStreams > 10000) throw new TypeError('Invalid notification stream limit');
   const registry = new PairingRegistry(database, { now, pairTtlMs, maxHosts, unpairedTtlMs });
+  const notificationStreams = new Map();
+  const foregroundTtlMs = 15000;
+  const notificationStreamKey = (hostId, deviceId, sessionId) => `${hostId}:${deviceId}:${sessionId}`;
+  function closeNotificationStream(key, entry) {
+    if (notificationStreams.get(key) !== entry) return;
+    notificationStreams.delete(key); clearTimeout(entry.timer);
+    if (!entry.res.destroyed && !entry.res.writableEnded) entry.res.end();
+  }
+  function closeNotificationStreams(hostId, deviceId = null) {
+    for (const [key, entry] of notificationStreams) if (entry.hostId === hostId && (deviceId === null || entry.deviceId === deviceId)) closeNotificationStream(key, entry);
+  }
+  function renewNotificationStream(key, entry) {
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => closeNotificationStream(key, entry), foregroundTtlMs); entry.timer.unref?.();
+  }
+  function writeNotificationFrame(key, entry, frame) {
+    if (entry.res.destroyed || entry.res.writableEnded || entry.res.writableNeedDrain) { closeNotificationStream(key, entry); return false; }
+    try {
+      if (!entry.res.write(frame)) { closeNotificationStream(key, entry); return false; }
+      return true;
+    } catch { closeNotificationStream(key, entry); return false; }
+  }
+  function deliverForeground(hostId, deviceId, event) {
+    if (!registry.isActiveDevice(hostId, deviceId)) return false;
+    let delivered = false;
+    for (const [key, entry] of notificationStreams) {
+      if (entry.hostId !== hostId || entry.deviceId !== deviceId) continue;
+      if (entry.expiresAt <= now()) { closeNotificationStream(key, entry); continue; }
+      if (!entry.visible) continue;
+      if (writeNotificationFrame(key, entry, `event: task-notification\ndata: ${JSON.stringify(event)}\n\n`)) delivered = true;
+    }
+    return delivered;
+  }
+  function deliverReminderClear(hostId, event) {
+    for (const [key, entry] of notificationStreams) {
+      if (entry.hostId !== hostId) continue;
+      if (entry.expiresAt <= now()) { closeNotificationStream(key, entry); continue; }
+      if (entry.visible && registry.isActiveDevice(hostId, entry.deviceId)) writeNotificationFrame(key, entry, `event: task-notification-clear\ndata: ${JSON.stringify(event)}\n\n`);
+    }
+  }
+  const push = notifications ? new PushService({ ...notifications, now, isActiveDevice: (hostId, deviceId) => registry.isActiveDevice(hostId, deviceId), deliverForeground }) : null;
   const peers = new Map(), pending = new Map(), bodyReads = new Set(), phonePresence = new Map();
   const maxPairPending = 5;
+  const monitorReasons = new Set(['ready', 'list-unavailable', 'list-truncated', 'list-page-capacity', 'record-capacity', 'active-capacity', 'queue-capacity', 'delivery-unavailable', 'observe-unavailable', 'state-invalid']);
+  function notificationReadiness(hostId) {
+    const peer = peers.get(hostId), connected = peer?.readyState === WebSocket.OPEN;
+    const desktopReady = Boolean(connected && peer.taskNotifications === 1);
+    const monitorReason = peer?.notificationHealth?.reason !== 'ready' ? peer?.notificationHealth?.reason : null;
+    const failureReason = monitorReason || peer?.notificationDeliveryHealth;
+    const monitorStatus = !connected ? 'offline' : !desktopReady ? 'unsupported' : !push?.hasActiveSubscriptions(hostId) ? 'idle' : failureReason ? 'degraded' : peer.notificationHealth?.reason === 'ready' ? 'healthy' : 'starting';
+    return { desktopReady, monitorStatus, ...(monitorStatus === 'degraded' ? { monitorReason: failureReason } : {}) };
+  }
+  function updateNotificationSettings(hostId, eventId) {
+    const peer = peers.get(hostId);
+    if (push && peer?.readyState === WebSocket.OPEN && peer.taskNotifications === 1) {
+      const enabled = push.hasActiveSubscriptions(hostId);
+      if (enabled !== peer.notificationEnabled) {
+        peer.notificationHealth = null; peer.notificationDeliveryHealth = null;
+        peer.notificationGeneration = (peer.notificationGeneration || 0) + 1;
+      }
+      peer.notificationEnabled = enabled;
+      peer.send(JSON.stringify({ type: 'notification-settings', enabled, ...(typeof eventId === 'string' && eventId.length <= 4096 ? { eventId } : {}) }));
+    }
+  }
   const pairPendingCount = (entries, phone) => [...entries, ...bodyReads].filter(entry => entry.hostId === phone.hostId && entry.deviceId === phone.deviceId).length;
   function rejectBodyRead(entry, error) {
     entry.res.once('finish', () => { if (!entry.req.complete) entry.req.destroy(); });
@@ -33,6 +97,8 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   }
   function activatePair(paired) {
     if (paired.previousDeviceId) {
+      closeNotificationStreams(paired.hostId, paired.previousDeviceId);
+      push?.revokeDevice(paired.hostId, paired.previousDeviceId);
       phonePresence.delete(paired.previousDeviceId);
       const peer = peers.get(paired.hostId);
       if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify({ type: 'device-revoked', deviceId: paired.previousDeviceId }));
@@ -41,6 +107,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     for (const entry of bodyReads) if (entry.hostId === paired.hostId && entry.deviceId !== paired.deviceId) rejectBodyRead(entry, 'device-replaced');
     const peer = peers.get(paired.hostId);
     if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify({ type: 'device-restored', deviceId: paired.deviceId }));
+    updateNotificationSettings(paired.hostId);
   }
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024, perMessageDeflate: { threshold: 1024 } });
   let closed = false, pairRequests = 0, enrollmentRequests = 0;
@@ -68,6 +135,10 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     '/app-icon-20261106.png': ['app-icon.png', 'image/png'],
     '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json; charset=utf-8'],
     '/install-prompt.js': ['install-prompt.js', 'text/javascript; charset=utf-8'],
+    '/notifications.js': ['notifications.js', 'text/javascript; charset=utf-8'],
+    '/notification-presence.js': ['notification-presence.js', 'text/javascript; charset=utf-8'],
+    '/task-reminder-store.js': ['task-reminder-store.js', 'text/javascript; charset=utf-8'],
+    '/notification-worker.js': ['notification-worker.js', 'text/javascript; charset=utf-8'],
     '/pair.js': ['pair.js', 'text/javascript; charset=utf-8'],
     '/history-projection.mjs': ['history-projection.mjs', 'text/javascript; charset=utf-8'],
     '/state-chunks.mjs': ['state-chunks.mjs', 'text/javascript; charset=utf-8'],
@@ -142,8 +213,10 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     else send(entry.res, unknown || entry.writing ? 504 : 503, { error: unknown || entry.writing ? 'outcome-unknown' : 'unavailable' });
   }
   function revokeDevice(hostCredential, deviceId) {
+    const owner = registry.authenticateHost(hostCredential);
     const ok = registry.revokeDevice(hostCredential, deviceId);
-    if (ok) { for (const [id, entry] of pending) if (entry.deviceId === deviceId) cancel(id, { unknown: entry.writing }); for (const entry of bodyReads) if (entry.deviceId === deviceId) rejectBodyRead(entry, 'unauthorized'); for (const peer of peers.values()) if (peer.readyState === WebSocket.OPEN) peer.send(JSON.stringify({ type: 'device-revoked', deviceId })); }
+    if (ok && owner) { push?.revokeDevice(owner.id, deviceId); updateNotificationSettings(owner.id); }
+    if (ok) { for (const [key, entry] of notificationStreams) if (entry.deviceId === deviceId) closeNotificationStream(key, entry); for (const [id, entry] of pending) if (entry.deviceId === deviceId) cancel(id, { unknown: entry.writing }); for (const entry of bodyReads) if (entry.deviceId === deviceId) rejectBodyRead(entry, 'unauthorized'); for (const peer of peers.values()) if (peer.readyState === WebSocket.OPEN) peer.send(JSON.stringify({ type: 'device-revoked', deviceId })); }
     return ok;
   }
   const server = http.createServer(async (req, res) => {
@@ -236,6 +309,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       if (req.method === 'POST' && req.url === '/api/host/revoke') {
         if (!host) return send(res, 401, { error: 'unauthorized' });
         registry.revokeHost(secret);
+        closeNotificationStreams(host.id);
         for (const [id, entry] of pending) if (entry.hostId === host.id) cancel(id, { unknown: entry.writing });
         for (const entry of bodyReads) if (entry.hostId === host.id) rejectBodyRead(entry, 'unauthorized');
         peers.get(host.id)?.terminate();
@@ -256,6 +330,8 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         const data = await body(req);
         const chosen = devices(req).find(item => item.deviceId === data?.deviceId);
         if (!chosen) return send(res, 403, { error: 'forbidden' });
+        const previous = device(req);
+        if (previous && previous.deviceId !== chosen.deviceId) closeNotificationStreams(previous.hostId, previous.deviceId);
         res.setHeader('set-cookie', `__Host-codex-current=${chosen.deviceId}; ${cookieAttrs}`);
         return send(res, 200, { ok: true });
       }
@@ -267,6 +343,9 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         const legacy = cookies(req).filter(part => part.startsWith('__Host-codex-device='));
         const legacyChosen = legacy.length === 1 && registry.authenticateDevice(legacy[0].slice('__Host-codex-device='.length))?.deviceId === chosen.deviceId;
         registry.revokeDeviceId(chosen.deviceId);
+        closeNotificationStreams(chosen.hostId, chosen.deviceId);
+        push?.revokeDevice(chosen.hostId, chosen.deviceId);
+        updateNotificationSettings(chosen.hostId);
         for (const [id, entry] of pending) if (entry.deviceId === chosen.deviceId) cancel(id, { unknown: entry.writing });
         for (const entry of bodyReads) if (entry.deviceId === chosen.deviceId) rejectBodyRead(entry, 'unauthorized');
         const selectedPeer = peers.get(chosen.hostId); if (selectedPeer?.readyState === WebSocket.OPEN) selectedPeer.send(JSON.stringify({ type: 'device-revoked', deviceId: chosen.deviceId }));
@@ -301,6 +380,73 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
       if (req.headers['x-codex-expected-device'] && req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
       if (!(req.method === 'GET' ? sameOriginRead(req) : sameOrigin(req))) return send(res, 403, { error: 'forbidden' });
       const requested = req.url || '';
+      if (requested === '/api/notifications/cleared' && req.method === 'GET') {
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        return send(res, 200, { cleared: push?.clearedReminders(phone.hostId, phone.deviceId) ?? [] });
+      }
+      if (requested.startsWith('/api/notifications/events?') && req.method === 'GET') {
+        if (!push) return send(res, 200, { enabled: false });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        const params = new URLSearchParams(requested.slice(requested.indexOf('?') + 1));
+        const sessionId = params.get('sessionId'), threadId = params.get('threadId') || null;
+        if ([...params.keys()].some(key => !['sessionId', 'threadId'].includes(key)) || params.getAll('sessionId').length !== 1 || params.getAll('threadId').length > 1 || !uuid.test(sessionId || '') || threadId !== null && !uuid.test(threadId)) return send(res, 400, { error: 'invalid' });
+        const key = notificationStreamKey(phone.hostId, phone.deviceId, sessionId);
+        const old = notificationStreams.get(key);
+        if (old) closeNotificationStream(key, old);
+        if (notificationStreams.size >= maxNotificationStreams) return send(res, 429, { error: 'capacity' });
+        if ([...notificationStreams.values()].filter(entry => entry.hostId === phone.hostId && entry.deviceId === phone.deviceId).length >= 8) return send(res, 429, { error: 'capacity' });
+        const entry = { hostId: phone.hostId, deviceId: phone.deviceId, sessionId, threadId, res, visible: false, expiresAt: now() + foregroundTtlMs, timer: null };
+        notificationStreams.set(key, entry);
+        res.once('close', () => closeNotificationStream(key, entry));
+        res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-accel-buffering': 'no' });
+        renewNotificationStream(key, entry);
+        writeNotificationFrame(key, entry, 'event: connected\ndata: {}\n\n');
+        return;
+      }
+      if (requested === '/api/notifications/presence' && req.method === 'POST') {
+        if (!push) return send(res, 200, { enabled: false });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 1024);
+        if (res.writableEnded || res.destroyed) return;
+        if (reserved?.reservation) bodyReads.delete(reserved.reservation);
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const data = reserved?.data;
+        if (!data || Object.keys(data).length !== 3 || Object.keys(data).some(key => !['sessionId', 'threadId', 'visible'].includes(key)) || !uuid.test(data.sessionId || '') || data.threadId !== null && !uuid.test(data.threadId || '') || typeof data.visible !== 'boolean') return send(res, 400, { error: 'invalid' });
+        const key = notificationStreamKey(phone.hostId, phone.deviceId, data.sessionId), entry = notificationStreams.get(key);
+        if (!entry || entry.res.destroyed || entry.res.writableEnded || entry.expiresAt <= now()) { if (entry) closeNotificationStream(key, entry); return send(res, 409, { error: 'notification-stream-missing' }); }
+        if (!data.visible) {
+          closeNotificationStream(key, entry);
+          return send(res, 200, { ok: true });
+        }
+        entry.visible = data.visible; entry.threadId = data.threadId; entry.expiresAt = now() + foregroundTtlMs;
+        renewNotificationStream(key, entry);
+        if (!writeNotificationFrame(key, entry, ': keepalive\n\n')) return send(res, 409, { error: 'notification-stream-missing' });
+        return send(res, 200, { ok: true });
+      }
+      if (['/api/notifications', '/api/notifications/status'].includes(requested) && ['GET', 'POST', 'DELETE'].includes(req.method)) {
+        if (!push) return send(res, 200, { enabled: false });
+        if (req.method === 'GET') return send(res, 200, { enabled: true, ...push.status(phone.hostId, phone.deviceId), ...notificationReadiness(phone.hostId) });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 8192);
+        if (res.writableEnded || res.destroyed) return;
+        if (reserved?.reservation) bodyReads.delete(reserved.reservation);
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        try {
+          const value = reserved?.data;
+          if (!value || Object.keys(value).length !== 1) return send(res, 400, { error: 'invalid' });
+          if (requested.endsWith('/status')) {
+            if (req.method !== 'POST' || typeof value.endpoint !== 'string' || value.endpoint.length > 4096) return send(res, 400, { error: 'invalid' });
+            return send(res, 200, { enabled: true, ...push.status(phone.hostId, phone.deviceId, value.endpoint), ...notificationReadiness(phone.hostId) });
+          }
+          if (req.method === 'POST' && value.subscription && !notificationReadiness(phone.hostId).desktopReady) return send(res, 409, { error: 'desktop-not-ready', ...notificationReadiness(phone.hostId) });
+          const result = req.method === 'POST' && value.subscription ? push.subscribe(phone.hostId, phone.deviceId, value.subscription)
+            : req.method === 'DELETE' && typeof value.endpoint === 'string' ? push.unsubscribe(phone.hostId, phone.deviceId, value.endpoint) : null;
+          if (!result) return send(res, 400, { error: 'invalid' });
+          updateNotificationSettings(phone.hostId);
+          return send(res, 200, result);
+        } catch (error) { return send(res, error.code === 'capacity' ? 429 : 400, { error: error.code === 'capacity' ? 'capacity' : 'invalid' }); }
+      }
       const recordedHistory = /^\/api\/threads\/([0-9a-f-]{36})\/recorded-history(?:\?(.*))?$/i.exec(requested);
       if (recordedHistory) {
         if (req.method !== 'GET' || !uuid.test(recordedHistory[1])) return send(res, 404, { error: 'not-found' });
@@ -451,7 +597,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         const peer = peers.get(phone.hostId); if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
         if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
         const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
-        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        pending.set(id, { res, timer, streaming: false, writing: true, threadAction: true, hostId: phone.hostId, deviceId: phone.deviceId });
         if (reserved.reservation) bodyReads.delete(reserved.reservation);
         res.once('close', () => cancel(id));
         peer.send(JSON.stringify({ type: 'thread-action', id, deviceId: phone.deviceId, conversationId: threadAction[1], action: threadAction[2].toLowerCase() }));
@@ -643,13 +789,40 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   wss.on('connection', (ws, hostId) => {
     peers.set(hostId, ws); let alive = true, streamFlow = false;
     ws.send(JSON.stringify({ type: 'flow-probe' }));
+    updateNotificationSettings(hostId);
     ws.on('pong', () => { alive = true; });
     const heartbeat = setInterval(() => { if (!alive) { console.warn('connector heartbeat timeout'); return ws.terminate(); } alive = false; ws.ping(); }, 20000);
     ws.on('error', () => {});
     ws.on('message', raw => {
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return ws.close(1007); }
       if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return ws.close(1007);
-      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; return; }
+      if (msg.type === 'task-notification-clear') {
+        if (push && peers.get(hostId) === ws && ws.taskNotifications === 1) {
+          try {
+            const cleared = push.clearReminder(hostId, msg.event);
+            if (cleared) deliverReminderClear(hostId, cleared);
+          } catch { /* Invalid desktop metadata must not modify reminder state. */ }
+        }
+        return;
+      }
+      if (msg.type === 'task-notification') {
+        if (push && peers.get(hostId) === ws && ws.taskNotifications === 1) {
+          const generation = ws.notificationGeneration;
+          void push.notify(hostId, msg.event).then(result => {
+            if (closed || peers.get(hostId) !== ws || generation !== ws.notificationGeneration) return;
+            if (result.failed > 0 || result.skipped === 'busy') ws.notificationDeliveryHealth = 'delivery-unavailable';
+            else if (result.sent > 0) ws.notificationDeliveryHealth = null;
+          }).catch(() => {
+            if (!closed && peers.get(hostId) === ws && generation === ws.notificationGeneration) ws.notificationDeliveryHealth = 'delivery-unavailable';
+          }).finally(() => { if (!closed && peers.get(hostId) === ws) updateNotificationSettings(hostId, msg.event?.eventId); });
+        }
+        return;
+      }
+      if (msg.type === 'notification-health') {
+        if (push && peers.get(hostId) === ws && ws.taskNotifications === 1 && ws.notificationEnabled && monitorReasons.has(msg.health?.reason)) ws.notificationHealth = { reason: msg.health.reason };
+        return;
+      }
+      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
       const entry = pending.get(msg.id); if (!entry || entry.hostId !== hostId) return;
       if (entry.historyChunks && msg.type === 'history-chunk' && msg.frame) {
         const frame = msg.frame;
@@ -757,6 +930,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
           else send(entry.res, msg.status === 'invalid-project' ? 400 : 504, { error: msg.status === 'invalid-project' ? 'invalid-project' : 'outcome-unknown' });
         }
         else if (entry.recordedHistory && !msg.ok && ['history-changed', 'history-item-too-large'].includes(msg.error)) send(entry.res, msg.error === 'history-changed' ? 409 : 413, { error: msg.error });
+        else if (entry.threadAction && msg.status === 'not-supported-desktop-owner') send(entry.res, 409, { error: 'not-supported-desktop-owner' });
         else if (entry.writing) { const partial = entry.stop && msg.status === 'stopped-goal-pause-failed'; const status = msg.status === 'accepted' || partial ? 202 : msg.status === 'unavailable' ? 409 : 504; send(entry.res, status, status === 202 ? { status: partial ? 'stopped-goal-pause-failed' : 'accepted' } : { error: status === 409 ? 'unavailable' : 'outcome-unknown' }); }
         else { if (entry.uploadSent && !msg.ok) console.warn('upload-observation', 'desktop-rejected'); send(entry.res, msg.ok ? 200 : 503, msg.ok ? msg.data : { error: msg.error === 'busy' ? 'busy' : 'unavailable' }); }
       } else if (msg.type === 'end' && entry.streaming) { console.warn('connector ended stream'); cancel(msg.id); }
@@ -765,6 +939,6 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   });
   return {
     async listen(port = 0) { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); }); return server.address().port; },
-    async close() { closed = true; for (const id of pending.keys()) cancel(id); for (const ws of peers.values()) ws.terminate(); await new Promise(resolve => server.close(resolve)); wss.close(); registry.close(); },
+    async close() { closed = true; for (const [key, entry] of notificationStreams) closeNotificationStream(key, entry); for (const id of pending.keys()) cancel(id); for (const ws of peers.values()) ws.terminate(); await new Promise(resolve => server.close(resolve)); wss.close(); push?.close(); registry.close(); },
   };
 }

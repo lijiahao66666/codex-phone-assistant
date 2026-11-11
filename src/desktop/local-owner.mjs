@@ -141,7 +141,7 @@ export class LocalOwner extends EventEmitter {
     if (!['archive', 'delete'].includes(action) || typeof threadId !== 'string' || !threadId) throw new TypeError('Invalid thread action');
     if (this.state !== 'ready' || this.pendingWrites || this.uncertainWrites || this.client.pending.size || this.rawBridge?.hasUnresolved()
         || this.owner?.isThreadReleasing(threadId)
-        || (this.owner?.isThreadOwned(threadId) && this.owner.canPerformThreadAction(threadId) !== true)) {
+        || this.owner?.isThreadOwned(threadId) !== true || this.owner.canPerformThreadAction(threadId) !== true) {
       throw Object.assign(new Error('Thread action unavailable'), { code: 'unavailable' });
     }
     // Archiving our own idle thread closes its runtime itself. An unsubscribe

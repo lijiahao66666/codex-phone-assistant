@@ -100,6 +100,79 @@ test('a canonical complete claim requires a complete newest boundary and item ta
   }
 });
 
+function suffixState() {
+  return { id: 'thread', cwd: '/tmp', threadRuntimeStatus: { type: 'idle' }, turns: [], turnHistory: { kind: 'canonical', history: {
+    isComplete: false, islands: [
+      { entries: [{ value: 'old' }], newerBoundary: { status: 'exhausted' } },
+      { entries: ['partial', 'question', 'latest'].map(value => ({ value })), newerBoundary: { status: 'exhausted' }, olderBoundary: { status: 'available' } },
+    ], entitiesByKey: {
+      old: { turnId: 'old', status: 'completed', items: [question('old')] },
+      partial: { turnId: 'partial', status: 'completed', items: [question('partial')], itemsPagination: { hasLoadedOldest: false } },
+      question: { turnId: 'question', status: 'completed', items: [question('pending')] },
+      latest: { turnId: 'latest', status: 'completed', items: [{ type: 'agentMessage', id: 'update', text: 'A later goal turn' }] },
+    },
+  } } };
+}
+
+test('an unanswered question stays actionable across later turns in the complete canonical suffix', async () => {
+  const state = suffixState(), view = desktopView(state);
+  assert.equal(view.history.complete, false);
+  assert.deepEqual(view.turns[2].items[0].pendingQuestionIds, [questionIdFor('pending')]);
+  assert.deepEqual(pendingAsyncQuestions(view, 'pending'), view.turns[2].items[0].questions);
+  for (const id of ['old', 'partial']) {
+    assert.equal(view.turns.find(turn => turn.id === id).items[0].pendingQuestionIds, undefined);
+    assert.equal(pendingAsyncQuestions(view, id), null);
+  }
+  let dispatched = 0;
+  const session = new DesktopSession({ conversationId: 'thread' });
+  session.status = 'ready'; session.conversation = { value: state, revision: 1, ownerId: 'owner' };
+  session.client = { startTurn: async (_id, _data, options) => { assert.equal(options.beforeWrite(), true); dispatched++; } };
+  await session.replyAsyncQuestions('pending', { [questionIdFor('pending')]: 'yes' });
+  assert.equal(dispatched, 1);
+});
+
+test('canonical suffix proof stops at gaps and incomplete later items and cannot be forged with public pending IDs', () => {
+  for (const alter of [
+    s => { s.turnHistory.history.islands.at(-1).newerBoundary.status = 'available'; },
+    s => { delete s.turnHistory.history.islands.at(-1).newerBoundary; },
+    s => { s.turnHistory.history.entitiesByKey.latest.itemsPagination = { hasLoadedOldest: false }; },
+    s => { s.turnHistory.history.entitiesByKey.latest.itemsPagination = { hasLoadedOldest: true, hasLoadedNewest: false }; },
+    s => { s.turnHistory.history.entitiesByKey.latest.itemsPagination = { hasLoadedOldest: true, evicted: true }; },
+    s => { const island = s.turnHistory.history.islands.at(-1); island.entries.pop(); s.turnHistory.history.islands.push({ entries: [{ value: 'latest' }], newerBoundary: { status: 'exhausted' } }); },
+  ]) {
+    const state = suffixState(); alter(state);
+    const view = desktopView(state), item = view.turns.find(turn => turn.id === 'question').items[0];
+    assert.equal(item.pendingQuestionIds, undefined);
+    assert.ok(view.unknownQuestionItemIds.includes('pending'));
+    item.pendingQuestionIds = [questionIdFor('pending')];
+    assert.equal(pendingAsyncQuestions(view, 'pending'), null);
+    assert.equal(pendingAsyncQuestions(JSON.parse(JSON.stringify(view)), 'pending'), null);
+  }
+  const state = suffixState();
+  state.turnHistory.history.entitiesByKey.latest = { turnId: 'latest', items: [question('tail-first'), question('tail-last')], itemsPagination: { hasLoadedOldest: false } };
+  const view = desktopView(state);
+  view.turns.at(-1).items[0].pendingQuestionIds = [questionIdFor('tail-first')];
+  assert.equal(pendingAsyncQuestions(view, 'tail-first'), null);
+  assert.equal(pendingAsyncQuestions(view, 'tail-last'), null, 'an incomplete canonical tail cannot fall back to an unproven final item');
+});
+
+test('answers and optimistic submissions in later suffix turns still resolve or block only their question identity', () => {
+  const state = suffixState(), id = questionIdFor('pending');
+  const answer = formatQuestionReply(inspectQuestions(question('pending')), { [id]: 'yes' });
+  const tail = state.turnHistory.history.entitiesByKey.latest;
+  tail.params = { input: [{ type: 'text', text: answer }] };
+  tail.remodexOptimisticPendingTurn = true;
+  const optimistic = desktopView(state);
+  assert.deepEqual(optimistic.turns[2].items[0].pendingQuestionIds, [id]);
+  assert.deepEqual(optimistic.turns[2].items[0].submittingQuestionIds, [id]);
+  assert.equal(pendingAsyncQuestions(optimistic, 'pending'), null);
+  delete tail.remodexOptimisticPendingTurn;
+  const accepted = desktopView(state);
+  assert.deepEqual(accepted.turns[2].items[0].pendingQuestionIds, []);
+  assert.equal(accepted.unknownQuestionItemIds.includes('pending'), false);
+  assert.equal(pendingAsyncQuestions(accepted, 'pending'), null);
+});
+
 test('reply parser rejects malformed, duplicate or noncanonical question identities', () => {
   const wrap = replies => `<send_user_message_question_reply>\n${JSON.stringify(replies)}\n</send_user_message_question_reply>`;
   const reply = { questionItemId: JSON.stringify(['request_user_input_async', 'item', 0]), question: 'Q', answer: 'A' };

@@ -1,3 +1,42 @@
+import { isDeepStrictEqual } from 'node:util';
+
+// This proof is process-local and is created from native history, never from
+// public pendingQuestionIds or other client-provided projection fields.
+const questionHistory = new WeakMap();
+const fullItems = turn => Array.isArray(turn?.items) && (!turn.itemsPagination ||
+  turn.itemsPagination.hasLoadedOldest === true && turn.itemsPagination.hasLoadedNewest !== false && turn.itemsPagination.evicted !== true);
+
+export function registerAsyncQuestionHistory(view, state) {
+  const safe = new Set(), legacy = Array.isArray(state.turns) ? state.turns : [];
+  const canonical = state.turnHistory?.kind === 'canonical' ? state.turnHistory.history : null;
+  if (canonical) {
+    const islands = canonical.islands, entities = canonical.entitiesByKey;
+    if (Array.isArray(islands) && entities && typeof entities === 'object' && islands.every(island => Array.isArray(island.entries))) {
+      const entries = islands.flatMap(island => island.entries);
+      const rawTurns = entries.map(entry => entities[entry?.value]);
+      const uniqueKeys = new Set(entries.map(entry => entry?.value)).size === entries.length;
+      const mirrored = !legacy.length || legacy.length === rawTurns.length && legacy.every((turn, index) => {
+        const { id, ...withoutDisplayId } = turn;
+        return isDeepStrictEqual(withoutDisplayId, rawTurns[index]);
+      });
+      const tail = islands.at(-1);
+      if (uniqueKeys && mirrored && rawTurns.length === view.turns.length &&
+          rawTurns.every((turn, index) => turn && (typeof turn.turnId === 'string' ? turn.turnId : null) === view.turns[index]?.id) && tail?.newerBoundary?.status === 'exhausted') {
+        const start = entries.length - tail.entries.length;
+        for (let index = entries.length - 1; index >= start; index--) {
+          if (!fullItems(rawTurns[index])) break;
+          safe.add(view.turns[index]);
+        }
+      }
+    }
+    questionHistory.set(view, safe);
+  } else if (view.history?.complete === true) {
+    for (const turn of view.turns) safe.add(turn);
+    questionHistory.set(view, safe);
+  }
+  return safe;
+}
+
 export function questionId(itemId, index) { return JSON.stringify(['request_user_input_async', itemId, index]); }
 
 export function parseQuestionReply(text) {
@@ -25,10 +64,12 @@ export function pendingAsyncQuestions(view, itemId) {
   const matches = items.map((item, index) => ({ item, index })).filter(({ item }) => item?.type === 'agentMessage' && item.id === itemId && item.questions?.length);
   if (matches.length !== 1) return null;
   const { item, index } = matches[0];
-  if (view.history?.complete !== true) {
+  const proof = questionHistory.get(view);
+  if (proof && ![...proof].some(turn => turn.items.includes(item))) return null;
+  if (!proof && view.history?.complete !== true) {
     const last = view.turns.at(-1)?.items || [];
     const lastIndex = last.indexOf(item);
-    if (lastIndex < 0 || (!Array.isArray(item.pendingQuestionIds) && last.slice(lastIndex + 1).some(next => next.type === 'userMessage' || next.questions?.length))) return null;
+    if (lastIndex < 0 || last.slice(lastIndex + 1).some(next => next.type === 'userMessage' || next.questions?.length)) return null;
   }
   const answered = new Set(items.slice(index + 1).flatMap(next => next?.type === 'userMessage' && Array.isArray(next.questionReplyIds) ? next.questionReplyIds : []));
   const pending = item.questions.filter(question => !answered.has(question.id));

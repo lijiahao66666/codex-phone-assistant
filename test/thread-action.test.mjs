@@ -8,6 +8,16 @@ import { fixture, threadId as localThreadId, turn, until } from './helpers/owner
 const deviceId = '11111111-1111-4111-8111-111111111111';
 const hostId = '22222222-2222-4222-8222-222222222222';
 const threadId = '33333333-3333-4333-8333-333333333333';
+const listed = id => ({ projects: [], recent: [{ id, title: 'fixture' }] });
+const routerFor = localOwner => ({ localOwner,
+  discover: async () => ({ kind: 'owner', ownerId: localOwner.ownerId() }),
+  isRecoveryLocked: () => false, journal: { threadWritePending: () => false },
+});
+const idleOwner = methods => ({ state: 'ready', pendingWrites: 0, uncertainWrites: false,
+  ownerId: () => 'fixture-helper', client: { pending: new Map() },
+  owner: { isThreadOwned: () => true, canPerformThreadAction: () => true, isThreadReleasing: () => false },
+  ...methods,
+});
 
 test('archive and delete use the guarded owner action without unsubscribing first', { timeout: 5000 }, async () => {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
@@ -17,11 +27,11 @@ test('archive and delete use the guarded owner action without unsubscribing firs
   const connector = createPreviewConnector({
     url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId,
     allowInsecureForTests: true,
-    ownerRouter: { localOwner: {
+    ownerRouter: routerFor(idleOwner({
       async threadAction(id, action) { calls.push([`thread/${action}`, { threadId: id }]); return {}; },
       async request() { assert.fail('thread actions must not bypass the owner action guard'); },
-    } },
-    listThreads: async () => ({ projects: [], recent: [] }),
+    })),
+    listThreads: async () => listed(threadId),
   });
   connector.start();
   const [socket] = await incoming;
@@ -56,11 +66,15 @@ test('a failed owner request is reported instead of a silent success', { timeout
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await once(server, 'listening');
   const incoming = once(server, 'connection');
+  const calls = [];
   const connector = createPreviewConnector({
     url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId,
     allowInsecureForTests: true,
-    ownerRouter: { localOwner: { async threadAction() { throw Object.assign(new Error('denied'), { code: 'unavailable' }); } } },
-    listThreads: async () => ({ projects: [], recent: [] }),
+    ownerRouter: routerFor(idleOwner({ async threadAction(id, action) {
+      calls.push([id, action]);
+      throw Object.assign(new Error('denied'), { code: 'unavailable' });
+    } })),
+    listThreads: async () => listed(threadId),
   });
   connector.start();
   const [socket] = await incoming;
@@ -70,6 +84,7 @@ test('a failed owner request is reported instead of a silent success', { timeout
     socket.send(JSON.stringify({ type: 'thread-action', id: 'b1', deviceId, conversationId: threadId, action: 'delete' }));
     for (let attempt = 0; attempt < 100 && !messages.some(message => message.id === 'b1'); attempt++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(messages.find(message => message.id === 'b1')?.status, 'unavailable');
+    assert.deepEqual(calls, [[threadId, 'delete']], 'the real action rejection, rather than an authorization failure, is reported');
   } finally { await connector.close(); server.close(); }
 });
 
@@ -125,8 +140,8 @@ test('thread actions never archive or delete locally running, uncertain, queued 
       const incoming = once(server, 'connection');
       connector = createPreviewConnector({
         url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId,
-        allowInsecureForTests: true, ownerRouter: { localOwner: f.local },
-        listThreads: async () => ({ projects: [], recent: [] }),
+        allowInsecureForTests: true, ownerRouter: routerFor(f.local),
+        listThreads: async () => listed(localThreadId),
       });
       connector.start();
       const [socket] = await incoming;

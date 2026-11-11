@@ -22,6 +22,8 @@ import { createRecordedHistoryPager } from '../desktop/recorded-history-page.mjs
 import { BoundedSnapshotStream } from './bounded-snapshot-stream.mjs';
 import { payloadDigest } from '../media/payload-digest.mjs';
 import { createModelService } from '../desktop/model-service.mjs';
+import { TaskNotificationMonitor } from '../notifications/task-monitor.mjs';
+import { createThreadArchive } from '../desktop/thread-archive.mjs';
 
 export function viewUpdate(previous, conversation, seq, version = 1) {
   const snapshot = { event: 'state', data: { seq, conversation } };
@@ -197,6 +199,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     scheduler = connectionScheduler;
     const deviceCleanups = new Map(), deviceTransitions = new Map(), deviceEpochs = new Map();
     const uploads = new Map(), staged = new Map(), revoked = new Set(), inflightUploads = new Map(), readRequests = new Map(), writeReplies = new Map(), pendingClaims = new Set(), sidebarStreams = new Map();
+    let notificationMonitor;
     let currentUploadContext;
     const uploadsBusy = () => {
       if (!currentUploadContext) return uploads.size > 0 || staged.size > 0;
@@ -302,7 +305,17 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       }
       if (mutation) activeMutations++;
       try {
-      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'notification-settings') {
+        if (msg.enabled === true && !notificationMonitor && connection === ws && !shuttingDown) {
+          notificationMonitor = new TaskNotificationMonitor({ createSession, listThreads: listAuthorizedThreads,
+            onEvent: event => { if (connection === ws && !shuttingDown) send({ type: 'task-notification', event }, connection); },
+            onClear: event => { if (connection === ws && !shuttingDown) send({ type: 'task-notification-clear', event }, connection); },
+            onHealth: health => { if (connection === ws) send({ type: 'notification-health', health }, connection); },
+          }).start();
+        } else if (msg.enabled !== true && notificationMonitor) { const old = notificationMonitor; notificationMonitor = null; await old.close(); }
+        return;
+      }
       if (msg.type === 'device-restored' && typeof msg.deviceId === 'string') {
         const epoch = (deviceEpochs.get(msg.deviceId) || 0) + 1; deviceEpochs.set(msg.deviceId, epoch);
         const transition = Promise.resolve(deviceCleanups.get(msg.deviceId)).then(() => { if (deviceEpochs.get(msg.deviceId) === epoch) revoked.delete(msg.deviceId); });
@@ -636,14 +649,21 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         const answer = beginWrite(msg);
         if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || !['archive', 'delete'].includes(action)) return answer('unavailable');
         const owner = ownerRouter?.localOwner;
-        if (typeof owner?.threadAction !== 'function' || writes.has(id)) return answer('unavailable');
+        if (typeof owner?.threadAction !== 'function' || writes.has(id) || models?.isLocked(id)) return answer('unavailable');
         writes.add(id);
         try {
-          // The owning runtime archives/deletes directly. Unsubscribing first
-          // would split writer release from the guarded destructive action.
-          await owner.threadAction(id, action);
+          const data = await listAllThreads(listAuthorizedThreads);
+          const allowed = new Set([...data.recent, ...data.projects.flatMap(project => project.threads)].map(thread => thread.id));
+          if (answer.cancelled() || !allowed.has(id) || recoveryLocked(id) || models?.isLocked(id) || ownerRouter.journal?.threadWritePending?.(hostId, id) !== false) return answer('unavailable');
+          if (action === 'archive') {
+            const archive = createThreadArchive({ localOwner: owner, discover: threadId => ownerRouter.discover(threadId),
+              isAuthorized: threadId => !answer.cancelled() && allowed.has(threadId),
+              isLocked: threadId => recoveryLocked(threadId) || Boolean(models?.isLocked(threadId)) || ownerRouter.journal?.threadWritePending?.(hostId, threadId) !== false,
+            });
+            await archive.archive(id);
+          } else await owner.threadAction(id, action);
           answer('accepted');
-        } catch (error) { answer(['unavailable', 'unsupported-state'].includes(error?.code) ? 'unavailable' : 'unknown'); }
+        } catch (error) { answer(error?.code === 'not-supported-desktop-owner' ? error.code : ['unavailable', 'unsupported-state'].includes(error?.code) ? 'unavailable' : 'unknown'); }
         finally { writes.delete(id); }
         return;
       }
@@ -977,7 +997,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       } catch { streams.delete(msg.id); void closeSession(session); send({ type: 'end', id: msg.id }, connection); }
       } finally { if (mutation) activeMutations--; }
     });
-    ws.on('close', () => { trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
+    ws.on('close', () => { void notificationMonitor?.close(); notificationMonitor = null; trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
   }
   return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async beginShutdown() { if (shuttingDown || activeMutations || [...uploadChecks].some(check => check())) throw Object.assign(new Error('Connector writes are active'), { code: 'tasks-active' }); shuttingDown = true; try { if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls(); } catch { shuttingDown = false; throw Object.assign(new Error('Connector replies could not be flushed'), { code: 'tasks-active' }); } }, cancelShutdown() { shuttingDown = false; }, async close() { stopped = true; observedOwner?.off?.('threadReleased', onThreadReleased); clearTimeout(timer); closeStreams(); await models?.close(); if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls().catch(() => {}); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
 }

@@ -383,6 +383,42 @@ goalObjective.addEventListener('click', () => goalObjective.classList.toggle('ex
 const summaryScrim = document.querySelector('#summary-scrim');
 const summaryContent = document.querySelector('#summary-content');
 const summaryToggle = document.querySelector('#toggle-summary');
+const settingsOverlay = document.querySelector('#settings-overlay');
+const settingsPanel = document.querySelector('#settings-panel');
+const settingsToggle = document.querySelector('#open-settings');
+const settingsClose = document.querySelector('#close-settings');
+const settingsScrim = document.querySelector('#settings-scrim');
+let settingsReturnFocus = null;
+function showSettings(show) {
+  if (!settingsOverlay || !settingsToggle) return;
+  if (show) {
+    settingsReturnFocus = document.activeElement || settingsToggle;
+    closeAllPickers(); closeDevices(); showSidebar(false); showSummary(false);
+  }
+  settingsOverlay.hidden = !show;
+  settingsToggle.setAttribute('aria-expanded', String(show));
+  window.setNotificationSettingsOpen?.(show);
+  if (show) settingsClose?.focus?.();
+  else {
+    let target = settingsReturnFocus;
+    const sidebarClosedOnMobile = (window.innerWidth || 1024) <= 700 && !sidebar.classList.contains('open');
+    if (!target || (target === settingsToggle && sidebarClosedOnMobile) || !target.getClientRects?.().length) target = document.querySelector('#open-sidebar');
+    target?.focus?.(); settingsReturnFocus = null;
+  }
+}
+settingsToggle?.addEventListener('click', () => showSettings(true));
+settingsClose?.addEventListener('click', () => showSettings(false));
+settingsScrim?.addEventListener('click', () => showSettings(false));
+document.addEventListener?.('keydown', event => {
+  if (settingsOverlay?.hidden !== false) return;
+  if (event.key === 'Escape') { event.preventDefault(); showSettings(false); }
+  else if (event.key === 'Tab') {
+    const focusable = [...(settingsPanel?.querySelectorAll('button, a[href], input, select, textarea, [tabindex="0"]') || [])].filter(node => !node.hidden && !node.disabled && node.getClientRects?.().length);
+    const first = focusable[0] || settingsPanel, last = focusable.at(-1) || settingsPanel;
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === settingsPanel)) { event.preventDefault(); last?.focus?.(); }
+    else if (!event.shiftKey && (document.activeElement === last || !focusable.includes(document.activeElement))) { event.preventDefault(); first?.focus?.(); }
+  }
+});
 const deviceMenu = document.querySelector('#devices');
 const deviceScrim = document.querySelector('#device-scrim');
 const deviceCurrent = document.querySelector('#device-current');
@@ -414,11 +450,13 @@ async function scopedFetch(url, options = {}) {
   return response;
 }
 function resetHistoryScope(clearStored = false) {
+  clearTaskNotifications();
   cancelOutgoingForScopeChange(); cancelAsyncQuestionWrites(); clearToolOutputEntries(); historyRequest?.abort(); historyRequest = null; recordedHistory = null; historyScope = null; historyScopeGeneration++; deviceLoadGeneration++; homeConnectionConfirmed = false;
 }
 // Unknown writes remain bound to their original device; switching never retries them.
 const deviceCreationDrafts = new Map(), deviceSubmissionGuards = new Map(), deviceConversationDrafts = new Map();
 function invalidateDeviceState() {
+  window.setNotificationContext?.(null);
   clearTimeout(deviceIdentityRetryTimer); deviceIdentityRetryTimer = undefined;
   if (newDraft && currentDeviceId) {
     newDraft.text = messageInput.value;
@@ -943,6 +981,8 @@ newProject.addEventListener('change', () => selectDraftProject(newProject.value)
 currentProject.addEventListener('change', () => selectDraftProject(currentProject.value));
 const inputDrafts = new Map();
 let renderedQuestionPanel = null;
+let questionLiveConfirmed = false;
+let unknownQuestionItems = new Set();
 const asyncQuestionWrites = new Map();
 function cancelAsyncQuestionWrites() {
   for (const write of asyncQuestionWrites.values()) {
@@ -1612,6 +1652,8 @@ voiceButton.addEventListener('click', () => {
 });
 function updateComposer() {
   updateHomeInstallPrompt();
+  if (document.hidden !== true && !pageSuspended && !newDraft && selectedId) clearTaskNotification(selectedId);
+  window.refreshNotificationPresence?.();
   const state = selectedId && submissions.get(selectedId);
   updateRecoveryControl();
   updateRecoveryGuardedControls();
@@ -2163,7 +2205,7 @@ async function responseError(response, fallback) {
   return fallback;
 }
 let displayedHistoryId = null, homeErrorSource = null;
-function clearConversation() { cancelAsyncQuestionWrites(); clearToolOutputEntries(); cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; renderedQuestionPanel = null; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
+function clearConversation() { cancelAsyncQuestionWrites(); clearToolOutputEntries(); cancelPendingRender(); historyRequest?.abort(); historyRequest = null; loadEarlier.disabled = false; loadedHistory = null; recordedHistory = null; loadEarlier.hidden = true; historyCanLoad = false; historyAutoBlocked = false; historyScrollThread = null; previousHistoryScrollTop = null; displayedHistoryId = null; recoverableHistoryId = null; recoveryGuardedControls = []; renderedQuestionPanel = null; questionLiveConfirmed = false; recoveryControl.hidden = true; stopGoalClock(); clearImagePreviews(); clearWorkGroupRecords(); filePreviewCache.clear(); activeTurnId = null; liveMode = null; liveModel = null; liveRuntimeStatus = null; goalPanel.hidden = true; questionPanel.hidden = true; questionPanel.replaceChildren(); title.textContent = selectedId ? (selectedTitle || '未命名任务') : '尚未选择任务'; history.textContent = ''; turns.replaceChildren(); summaryContent.replaceChildren(); renderOutgoingMessages(); }
 function diffStats(changes) {
   let added = 0, removed = 0;
   for (const change of changes || []) {
@@ -2191,6 +2233,7 @@ function clearHomeError(source) {
 function element(tag, className, text) { const node = document.createElement(tag); node.className = className; node.textContent = text ?? ''; return node; }
 function updateHomeInstallPrompt() {
   window.setInstallPromptPageEligible?.(!selectedId && !newDraft && connected && !homeErrorSource && error.hidden);
+  window.setNotificationHomeEligible?.(!selectedId && !newDraft && connected && !homeErrorSource && error.hidden);
 }
 function showConversationEmpty() {
   updateHomeInstallPrompt();
@@ -2440,6 +2483,7 @@ async function loadDevices() {
       historyScope = { hostId: current.hostId, deviceId: current.deviceId };
     } else invalidateDeviceState();
     currentDeviceId = current?.deviceId || null;
+    window.setNotificationContext?.(current ? { hostId: current.hostId, deviceId: current.deviceId } : null);
     if (historyScope && deviceConversationDrafts.has(currentDeviceId)) {
       const saved = deviceConversationDrafts.get(currentDeviceId); deviceConversationDrafts.delete(currentDeviceId);
       savedNewDraft = saved.savedCreation;
@@ -2546,6 +2590,7 @@ function applyProjectStatuses() {
     indicator.title = state === 'active' ? '目录内有任务进行中' : state === 'checking' ? '目录任务状态更新中' : '';
     indicator.setAttribute('aria-label', indicator.title);
   }
+  refreshTaskNotificationIndicators();
 }
 function invalidateProjectStatuses() {
   for (const group of projectStatusGroups.values()) for (const task of group.tasks) task.status = 'unknown';
@@ -2657,12 +2702,146 @@ function updateLiveTaskStatus(id, status) {
   if (taskStatusIsActive(status)) liveTaskStatus.set(id, 'active'); else liveTaskStatus.delete(id);
   for (const task of projectList.querySelectorAll('.task')) {
     if (task.dataset.id !== id) continue;
+    task.dataset.status = taskStatusIsActive(status) ? 'active' : status === 'idle' ? 'idle' : 'unknown';
     const marker = task.querySelector?.('.task-active');
     setTaskIndicator(marker, taskStatusIsActive(status) || taskStatusIsActive(sidebarStatusSnapshot?.get(id)) ? 'active' : 'idle');
   }
   for (const group of projectStatusGroups.values()) for (const task of group.tasks) if (task.id === id) task.status = taskStatusIsActive(status) ? 'active' : status === 'idle' ? 'idle' : 'unknown';
   applyProjectStatuses();
 }
+// These reminders are local notification events, not native desktop unread state.
+const taskNotifications = new Map();
+const taskNotificationEvents = new Set();
+const clearedTaskNotificationEvents = new Set();
+const pendingTaskNotifications = new Map();
+const taskNotificationVersions = new Map();
+let lastTaskNotificationListComplete = false;
+let taskNotificationListGeneration = 0;
+function touchTaskNotification(id) { taskNotificationVersions.set(id, (taskNotificationVersions.get(id) || 0) + 1); }
+const taskNotificationLabels = { completed: '任务已完成', question: '任务需要回答', approval: '任务等待审批' };
+const taskNotificationSymbols = { completed: '', question: '待回答', approval: '待审批' };
+function renderTaskNotification(marker, notification, state = 'idle') {
+  if (!marker) return;
+  marker.hidden = !notification || (notification.kind === 'completed' && (taskStatusIsActive(state) || state === 'checking'));
+  marker.dataset.kind = notification?.kind || '';
+  marker.textContent = notification ? taskNotificationSymbols[notification.kind] : '';
+  marker.title = notification ? taskNotificationLabels[notification.kind] : '';
+  marker.setAttribute('aria-label', notification ? notification.kind === 'completed' ? '有新提醒，任务已完成' : taskNotificationSymbols[notification.kind] : '');
+}
+function refreshTaskNotificationIndicators(prune = false) {
+  const known = new Set([...projectStatusGroups.values()].flatMap(group => group.tasks.map(task => task.id)));
+  if (prune) for (const id of taskNotifications.keys()) if (!known.has(id) && !pendingTaskNotifications.has(id)) {
+    taskNotifications.delete(id); touchTaskNotification(id);
+    if (historyScope) void window.taskReminderStore?.remove(historyScope, id)?.catch(() => {});
+  }
+  for (const task of projectList.querySelectorAll('.task')) {
+    const id = task.dataset.id, notification = taskNotifications.get(id);
+    const state = liveTaskStatus.get(id) === 'active' ? 'active' : statusHandovers.has(id) ? 'checking' : sidebarStatusSnapshot?.get(id) ?? task.dataset.status;
+    renderTaskNotification(task.querySelector?.('.task-notification'), notification, state);
+    setTaskIndicator(task.querySelector?.('.task-active'), notification && notification.kind !== 'completed' ? 'idle' : state);
+  }
+  for (const [key, group] of projectStatusGroups) {
+    const notices = group.tasks.map(task => taskNotifications.get(task.id)).filter(Boolean);
+    const questions = notices.filter(item => item.kind === 'question').length;
+    const approvals = notices.filter(item => item.kind === 'approval').length;
+    const states = group.tasks.map(task => liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : sidebarStatusSnapshot?.get(task.id) ?? task.status?.type ?? task.status ?? 'unknown');
+    const folded = !groupExpanded.get(key), busy = states.some(state => taskStatusIsActive(state) || state === 'checking');
+    const count = notices.length;
+    if (!group.notificationIndicator) continue;
+    group.notificationIndicator.hidden = !count || !folded || (busy && !questions && !approvals);
+    group.notificationIndicator.textContent = questions || approvals ? [questions ? `待回答${questions > 1 ? ` ${questions}` : ''}` : '', approvals ? `待审批${approvals > 1 ? ` ${approvals}` : ''}` : ''].filter(Boolean).join(' · ') : count ? String(count) : '';
+    group.notificationIndicator.title = questions || approvals ? '目录内有待处理提醒' : `${count} 个任务有提醒`;
+    group.notificationIndicator.setAttribute('aria-label', group.notificationIndicator.title);
+    const state = folded && busy && !questions && !approvals ? states.some(taskStatusIsActive) ? 'active' : 'checking' : 'idle';
+    setTaskIndicator(group.indicator, state);
+    group.indicator.className += ' project-status';
+    group.indicator.title = state === 'active' ? '目录内有任务进行中' : state === 'checking' ? '目录任务状态更新中' : '';
+    group.indicator.setAttribute('aria-label', group.indicator.title);
+  }
+  const count = [...taskNotifications.keys()].filter(id => known.has(id)).length;
+  const entry = document.querySelector('#open-sidebar');
+  if (!entry?.querySelector || !entry?.append) return;
+  let marker = entry.querySelector('.sidebar-notification');
+  if (!marker) { marker = element('span', 'task-notification sidebar-notification'); marker.setAttribute('aria-hidden', 'true'); entry.append(marker); }
+  marker.hidden = !count; marker.textContent = count > 9 ? '9+' : String(count);
+  entry.setAttribute('aria-label', count ? `打开侧栏，${count} 个任务有提醒` : '打开侧栏');
+  entry.title = count ? `${count} 个任务有提醒` : '打开侧栏';
+}
+function clearTaskNotification(id, force = false) {
+  touchTaskNotification(id);
+  const changed = taskNotifications.delete(id);
+  if ((changed || force) && historyScope) void window.taskReminderStore?.remove(historyScope, id)?.catch(() => {});
+  if (changed) refreshTaskNotificationIndicators();
+}
+function clearTaskNotifications() { taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
+window.clearTaskNotificationEvent = async notification => {
+  if (!notification || !historyScope || historyScope.hostId !== notification.hostId || historyScope.deviceId !== notification.deviceId || !uuid.test(notification.threadId || '') || typeof notification.eventId !== 'string' || !notification.eventId || notification.eventId.length > 512) return false;
+  const pair = { ...historyScope }, generation = historyScopeGeneration;
+  const key = JSON.stringify([notification.threadId, notification.eventId]);
+  clearedTaskNotificationEvents.add(key);
+  if (clearedTaskNotificationEvents.size > 2048) clearedTaskNotificationEvents.delete(clearedTaskNotificationEvents.values().next().value);
+  taskNotificationEvents.add(notification.eventId);
+  if (taskNotificationEvents.size > 2048) taskNotificationEvents.delete(taskNotificationEvents.values().next().value);
+  touchTaskNotification(notification.threadId);
+  const changed = taskNotifications.get(notification.threadId)?.eventId === notification.eventId;
+  if (changed) taskNotifications.delete(notification.threadId);
+  if (pendingTaskNotifications.get(notification.threadId)?.notification.eventId === notification.eventId) pendingTaskNotifications.delete(notification.threadId);
+  else {
+    const pending = pendingTaskNotifications.get(notification.threadId);
+    if (pending) pending.version = taskNotificationVersions.get(notification.threadId);
+  }
+  if (changed) refreshTaskNotificationIndicators();
+  try { await window.taskReminderStore?.removeEvent(pair, { threadId: notification.threadId, eventId: notification.eventId }); } catch { return false; }
+  return generation === historyScopeGeneration && historyScope?.hostId === pair.hostId && historyScope?.deviceId === pair.deviceId;
+};
+window.getNotificationThreadId = () => newDraft ? null : selectedId;
+function applyTaskNotification(notification, restored = false) {
+  if (!notification || !historyScope || historyScope.hostId !== notification.hostId || historyScope.deviceId !== notification.deviceId || !uuid.test(notification.threadId || '') || !Object.hasOwn(taskNotificationLabels, notification.kind) || typeof notification.eventId !== 'string' || !notification.eventId || notification.eventId.length > 4096) return false;
+  if (clearedTaskNotificationEvents.has(JSON.stringify([notification.threadId, notification.eventId]))) return true;
+  if (![...projectStatusGroups.values()].some(group => group.tasks.some(task => task.id === notification.threadId))) {
+    if (pendingTaskNotifications.get(notification.threadId)?.notification.eventId === notification.eventId) return true;
+    if (!restored) touchTaskNotification(notification.threadId);
+    pendingTaskNotifications.delete(notification.threadId);
+    pendingTaskNotifications.set(notification.threadId, { generation: historyScopeGeneration, version: taskNotificationVersions.get(notification.threadId) || 0, restored, notification: { hostId: notification.hostId, deviceId: notification.deviceId, threadId: notification.threadId, eventId: notification.eventId, kind: notification.kind } });
+    if (pendingTaskNotifications.size > 32) pendingTaskNotifications.delete(pendingTaskNotifications.keys().next().value);
+    refreshChangedThreadList();
+    return true;
+  }
+  const seen = taskNotificationEvents.has(notification.eventId);
+  if (!seen) { taskNotificationEvents.add(notification.eventId); if (taskNotificationEvents.size > 2048) taskNotificationEvents.delete(taskNotificationEvents.values().next().value); }
+  if (document.hidden !== true && !pageSuspended && !newDraft && selectedId === notification.threadId) { clearTaskNotification(notification.threadId, true); return true; }
+  if (seen) return true;
+  if (!restored) touchTaskNotification(notification.threadId);
+  taskNotifications.set(notification.threadId, { kind: notification.kind, eventId: notification.eventId });
+  void window.taskReminderStore?.put(historyScope, notification)?.catch(() => {});
+  refreshTaskNotificationIndicators();
+  return true;
+}
+window.acceptTaskNotification = notification => applyTaskNotification(notification);
+function drainPendingTaskNotifications() {
+  const known = new Set([...projectStatusGroups.values()].flatMap(group => group.tasks.map(task => task.id)));
+  for (const [id, entry] of pendingTaskNotifications) {
+    if (entry.generation !== historyScopeGeneration || historyScope?.hostId !== entry.notification.hostId || historyScope?.deviceId !== entry.notification.deviceId || entry.version !== (taskNotificationVersions.get(id) || 0)) { pendingTaskNotifications.delete(id); continue; }
+    if (known.has(id)) { pendingTaskNotifications.delete(id); applyTaskNotification(entry.notification, entry.restored); }
+  }
+}
+window.restoreTaskReminders = async () => {
+  if (!historyScope || !window.taskReminderStore) return;
+  const pair = { ...historyScope }, generation = historyScopeGeneration, versions = new Map(taskNotificationVersions);
+  const listGeneration = taskNotificationListGeneration;
+  const complete = lastTaskNotificationListComplete;
+  const known = new Set([...projectStatusGroups.values()].flatMap(group => group.tasks.map(task => task.id)));
+  let notifications;
+  try { notifications = await window.taskReminderStore.list(pair); } catch { return; }
+  if (generation !== historyScopeGeneration || listGeneration !== taskNotificationListGeneration || historyScope?.hostId !== pair.hostId || historyScope?.deviceId !== pair.deviceId || !Array.isArray(notifications)) return;
+  for (const notification of notifications) {
+    if (!uuid.test(notification?.threadId || '') || (versions.get(notification.threadId) || 0) !== (taskNotificationVersions.get(notification.threadId) || 0)) continue;
+    if (complete && !known.has(notification.threadId) && !pendingTaskNotifications.has(notification.threadId)) {
+      touchTaskNotification(notification.threadId);
+      void window.taskReminderStore.remove(pair, notification.threadId)?.catch(() => {});
+    } else applyTaskNotification({ ...notification, ...pair }, true);
+  }
+};
 function renderTask(task) {
   if (!task || !uuid.test(task.id)) return null;
   const button = element('button', 'task', '');
@@ -2677,9 +2856,12 @@ function renderTask(task) {
   const indicator = element('span', 'task-active', ''); indicator.title = '进行中'; indicator.setAttribute('aria-label', '进行中');
   const observedStatus = sidebarStatusSnapshot?.get(task.id) ?? button.dataset.status;
   button.append(indicator);
+  const notificationIndicator = element('span', 'task-notification');
+  renderTaskNotification(notificationIndicator, taskNotifications.get(task.id));
+  button.append(notificationIndicator);
   // Unread indicators are deferred until H5 can acknowledge desktop read state.
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
-  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
@@ -2693,7 +2875,8 @@ function renderGroup(key, name, tasks, recent = false, initialExpanded = recent)
   icon.setAttribute('aria-hidden', 'true');
   if (!recent) icon.innerHTML = '<svg class="folder-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4l2 3h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/></svg><svg class="folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18V6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2"/><path d="M3 18l2-6a2 2 0 0 1 2-1.4h14a1 1 0 0 1 .9 1.4l-2.3 6.5A2 2 0 0 1 17.7 20H5a2 2 0 0 1-2-2Z"/></svg>';
   const projectIndicator = element('span', 'task-active project-status');
-  heading.append(icon, element('span', 'project-name', name), projectIndicator, chevronIcon());
+  const notificationIndicator = element('span', 'task-notification project-notification'); notificationIndicator.hidden = true;
+  heading.append(icon, element('span', 'project-name', name), projectIndicator, notificationIndicator, chevronIcon());
   const contents = element('div', 'project-contents');
   contents.hidden = collapsed;
   heading.addEventListener('click', () => {
@@ -2702,10 +2885,18 @@ function renderGroup(key, name, tasks, recent = false, initialExpanded = recent)
     heading.setAttribute('aria-expanded', String(!next));
     groupExpanded.set(key, !next);
     applyProjectStatuses();
+    refreshTaskNotificationIndicators();
     scheduleVisibleStatusRefresh();
   });
   const valid = tasks.filter(task => task && uuid.test(task.id));
-  projectStatusGroups.set(key, { heading, tasks: valid.map(task => ({ ...task })), indicator: projectIndicator });
+  projectStatusGroups.set(key, { heading, tasks: valid.map(task => ({ ...task })), indicator: projectIndicator, notificationIndicator,
+    showTask(id) {
+      if (!valid.some(task => task.id === id)) return false;
+      contents.hidden = false; heading.setAttribute('aria-expanded', 'true'); groupExpanded.set(key, true);
+      expandedGroups.add(key); renderItems(); applyProjectStatuses(); refreshTaskNotificationIndicators();
+      return true;
+    },
+  });
   applyProjectStatuses();
   const more = element('button', 'show-more');
   more.type = 'button';
@@ -2719,6 +2910,7 @@ function renderGroup(key, name, tasks, recent = false, initialExpanded = recent)
       more.setAttribute('aria-expanded', String(expanded));
       contents.append(more);
     }
+    refreshTaskNotificationIndicators();
   }
   more.addEventListener('click', () => {
     if (expandedGroups.has(key)) expandedGroups.delete(key); else expandedGroups.add(key);
@@ -2953,6 +3145,7 @@ async function loadThreads() {
   return request.promise;
 }
 function renderThreadList(data) {
+  ++taskNotificationListGeneration;
   projectStatusGroups.clear();
   const fragment = document.createDocumentFragment();
   for (const project of data.projects) {
@@ -2965,7 +3158,24 @@ function renderThreadList(data) {
   const previousScroll = projectList.scrollTop;
   projectList.replaceChildren(fragment);
   if (Number.isFinite(previousScroll)) projectList.scrollTop = previousScroll;
+  lastTaskNotificationListComplete = data.truncated !== true;
+  refreshTaskNotificationIndicators(lastTaskNotificationListComplete);
+  drainPendingTaskNotifications();
+  void window.restoreTaskReminders?.();
+  const notification = window.takeNotificationTarget?.(historyScope);
+  if (notification) window.openNotificationTask?.(notification);
 }
+window.openNotificationTask = target => {
+  if (!historyScope || historyScope.hostId !== target?.hostId || historyScope.deviceId !== target?.deviceId || newDraft) return false;
+  let task = [...projectList.querySelectorAll('.task')].find(node => node.dataset.id === target.threadId);
+  if (!task) {
+    const group = [...projectStatusGroups.values()].find(group => group.tasks.some(task => task.id === target.threadId));
+    if (!group?.showTask?.(target.threadId)) return false;
+    task = [...projectList.querySelectorAll('.task')].find(node => node.dataset.id === target.threadId);
+  }
+  if (!task) return false;
+  task.click(); return true;
+};
 async function fetchThreadList() {
   if (document.hidden === true || pageSuspended) return false;
   clearTimeout(listRetryTimer);
@@ -3205,10 +3415,11 @@ async function loadEarlierPage() {
 }
 loadEarlier.addEventListener('click', () => loadEarlierPage());
 function questionPanelSignature(view, controlTurns, scope) {
-  const questions = turns => turns.map(turn => [turn.viewKey || turn.id, (turn.items || [])
+  const questions = turns => turns.filter(turn => (turn.items || []).some(item => item?.questions?.length)).map(turn => [turn.viewKey || turn.id, (turn.items || [])
     .filter(item => item?.questions?.length || item?.type === 'userMessage')
     .map(item => [item.id, item.type, item.questions, item.pendingQuestionIds, item.submittingQuestionIds, item.questionReplyIds])]);
-  return JSON.stringify([scope, (view.requests || []).filter(request => request.kind === 'userInput'), questions(controlTurns), questions(view.turns || [])]);
+  const legacyTail = controlTurns.some(turn => (turn.items || []).some(item => item?.questions?.length && !Array.isArray(item.pendingQuestionIds))) ? (controlTurns.at(-1)?.viewKey || controlTurns.at(-1)?.id) : null;
+  return JSON.stringify([scope, (view.requests || []).filter(request => request.kind === 'userInput'), questions(controlTurns), legacyTail, view.unknownQuestionItemIds]);
 }
 function reconcileQuestionDraft(draft, questions) {
   draft.questionSchemas ||= new Map();
@@ -3219,6 +3430,16 @@ function reconcileQuestionDraft(draft, questions) {
   }
 }
 function questionInputSchema(question) { return JSON.stringify([question.question, question.options, question.isOther]); }
+function questionControlTurns(view) {
+  const source = view.turns || [], keys = new Set(source.map(turn => turn.viewKey || turn.id)), turns = new Map();
+  for (const turn of Array.isArray(view.pendingQuestionTurns) ? view.pendingQuestionTurns : []) {
+    if (!turn || typeof (turn.viewKey || turn.id) !== 'string' || !Array.isArray(turn.items)) continue;
+    if (!keys.has(turn.viewKey || turn.id)) turns.set(turn.viewKey || turn.id, turn);
+  }
+  // Preserve invalid duplicates within the authoritative source so the existing
+  // ambiguity guards still reject them; only supplemental copies are deduped.
+  return [...turns.values(), ...source];
+}
 function showState(view, live = true, loadingPreview = false, immediateWork = null) {
   recoveryGuardedControls = [];
   const viewThread = selectedId;
@@ -3241,7 +3462,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   }
   for (const key of transientWorkKeys) if (key !== immediateWork?.key && (!immediateWork || ![...immediateKeys.values()].includes(key))) expandedWork.delete(key);
   transientWorkKeys.clear();
-  const controlTurns = view.turns || [];
+  const controlTurns = questionControlTurns(sourceView);
   if (!live && typeof view.id === 'string' && view.id && view.id === selectedId && recordedHistory?.baseView !== view) {
     const indexed = view.history?.readOnly === true;
     if (indexed) validateRecordedPage(view, selectedId);
@@ -3283,7 +3504,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   const firstRender = renderedThreadId !== selectedId;
   if (firstRender) { followLatest = true; renderedThreadId = selectedId; }
   const oldScrollTop = conversation?.scrollTop;
-  const running = controlTurns.filter(turn => turn.status === 'inProgress' && uuid.test(turn.id || ''));
+  const running = (sourceView.turns || []).filter(turn => turn.status === 'inProgress' && uuid.test(turn.id || ''));
   activeTurnId = live && running.length === 1 ? running[0].id : null;
   updateLiveTaskStatus(selectedId, live && (taskStatusIsActive(view.runtimeStatus) || running.length > 0 || Boolean(activeTurnId)) ? 'active' : 'unknown');
   if (selectedId && stops.has(selectedId) && stops.get(selectedId).turnId !== activeTurnId && !stops.get(selectedId).pending && !stops.get(selectedId).goalPauseFailed && (activeTurnId || !stops.get(selectedId).error)) stops.delete(selectedId);
@@ -3292,13 +3513,24 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   history.textContent = '';
   error.hidden = true;
   const fragment = document.createDocumentFragment();
-  const questionFragment = document.createDocumentFragment();
-  const questionScope = JSON.stringify([historyScope?.hostId, historyScope?.deviceId, currentDeviceId, selectedId, historyScopeGeneration, live]);
-  const questionSignature = questionPanelSignature(view, controlTurns, questionScope);
+  const questionNodes = [];
+  const questionScope = JSON.stringify([historyScope?.hostId, historyScope?.deviceId, currentDeviceId, selectedId, historyScopeGeneration]);
+  questionLiveConfirmed = live && sourceView.id === selectedId;
+  if (live) unknownQuestionItems = new Set(Array.isArray(sourceView.unknownQuestionItemIds) ? sourceView.unknownQuestionItemIds : []);
+  // Recorded pages may add display history, but only this live control source
+  // can change an already attached question editor.
+  const questionSignature = questionPanelSignature(sourceView, controlTurns, questionScope);
   // Keeping the actual form attached preserves the iOS keyboard, selection and
   // an in-flight IME composition. Refocusing a newly created input cannot do so.
-  const reuseQuestions = renderedQuestionPanel?.signature === questionSignature;
+  const preserveQuestions = !live && renderedQuestionPanel?.live === true && renderedQuestionPanel.scope === questionScope;
+  const reuseQuestions = preserveQuestions || (renderedQuestionPanel?.signature === questionSignature && renderedQuestionPanel.live === live);
   const questionControls = reuseQuestions ? renderedQuestionPanel.controls : [];
+  const questionCards = reuseQuestions ? renderedQuestionPanel.cards : new Map();
+  const previousQuestionCards = renderedQuestionPanel?.scope === questionScope && renderedQuestionPanel.live ? renderedQuestionPanel.cards : null;
+  const retainQuestionCard = record => {
+    questionNodes.push(record.card); questionCards.set(record.key, record);
+    questionControls.push(...record.controls); recoveryGuardedControls.push(...record.controls); pendingQuestionCount++;
+  };
   if (reuseQuestions) recoveryGuardedControls.push(...questionControls);
   let pendingQuestionCount = 0;
   const fileTargets = new Map();
@@ -3308,13 +3540,21 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
       const card = element('div', request.kind === 'userInput' ? 'question-card' : 'pending-request');
       if (request.kind === 'userInput') {
         if (reuseQuestions) continue;
+        const cardKey = JSON.stringify(['request', request.id]), cardSignature = JSON.stringify(request.questions);
+        const previousCard = previousQuestionCards?.get(cardKey);
+        if (previousCard?.signature === cardSignature && questionPanel.contains(previousCard.card)) { retainQuestionCard(previousCard); continue; }
+        const firstCardControl = questionControls.length;
         card.append(element('div', 'question-card-title', '问题'));
         const threadId = selectedId;
+        const deviceId = currentDeviceId, scopeGeneration = historyScopeGeneration;
         const key = JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId, 'request', request.id]);
         let draft = inputDrafts.get(key);
         if (!draft) { draft = { answers: Object.create(null), pending: false }; inputDrafts.set(key, draft); }
         reconcileQuestionDraft(draft, request.questions);
         const form = element('form', 'user-input-form');
+        const isCurrentScope = () => selectedId === threadId && currentDeviceId === deviceId && historyScopeGeneration === scopeGeneration && inputDrafts.get(key) === draft;
+        const isCurrentForm = () => isCurrentScope() && draft.controls?.form === form && questionPanel.contains?.(form) !== false;
+        const canSubmit = () => isCurrentForm() && connected && questionLiveConfirmed;
         for (const question of request.questions) {
           const group = element('fieldset', 'user-input-question');
           const legend = element('legend', '', question.question);
@@ -3325,6 +3565,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
               const radio = element('input'); radio.type = 'radio'; radio.name = question.id; radio.value = option.label;
               radio.checked = draft.answers[question.id] === option.label;
               radio.addEventListener('change', () => {
+                if (!isCurrentForm()) return;
                 draft.answers[question.id] = option.label;
                 const other = group.querySelectorAll('.user-input-text')[0];
                 if (other) other.value = '';
@@ -3338,18 +3579,18 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
             const input = element('input', 'user-input-text'); input.type = 'text'; input.placeholder = question.options.length ? '其他回答' : '输入回答';
             input.dataset.inputDraftKey = key; input.dataset.inputQuestionId = question.id; input.dataset.inputQuestionSchema = questionInputSchema(question);
             input.value = question.options.some(o => o.label === draft.answers[question.id]) ? '' : (draft.answers[question.id] || '');
-            input.addEventListener('input', () => { draft.answers[question.id] = input.value; for (const radio of group.querySelectorAll('input[type=radio]')) radio.checked = false; });
+            input.addEventListener('input', () => { if (!isCurrentForm()) return; draft.answers[question.id] = input.value; for (const radio of group.querySelectorAll('input[type=radio]')) radio.checked = false; });
             group.append(input);
           }
           form.append(group);
         }
-        const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending);
+        const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending || !canSubmit());
         questionControls.push(recoveryGuardedControls.at(-1));
         const status = element('p', 'list-error', draft.feedback || ''); form.append(submit, status);
-        draft.controls = { submit, status };
+        draft.controls = { submit, status, form };
         form.addEventListener('submit', async event => {
           event.preventDefault();
-          if (draft.pending || selectedId !== threadId || recoveryBlocksWrite()) return;
+          if (draft.pending || !canSubmit() || recoveryBlocksWrite()) return;
           if (!request.questions.every(q => draft.answers[q.id]?.trim())) { status.textContent = '请回答所有问题'; return; }
           draft.pending = true; submit.disabled = true; status.textContent = '';
           try {
@@ -3357,10 +3598,11 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
             if (!response.ok) throw new Error();
             draft.feedback = '已提交，等待任务更新'; draft.outcome = '已提交';
           } catch { draft.feedback = '结果暂不确定，请查看电脑上的任务状态'; draft.outcome = '结果待确认'; }
-          draft.controls.status.textContent = draft.feedback;
-          draft.controls.submit.textContent = draft.outcome;
+          if (isCurrentScope()) { draft.controls.status.textContent = draft.feedback; draft.controls.submit.textContent = draft.outcome; }
         });
-        card.append(form); questionFragment.append(card); pendingQuestionCount++; continue;
+        card.append(form); questionNodes.push(card); pendingQuestionCount++;
+        questionCards.set(cardKey, { key: cardKey, kind: 'request', signature: cardSignature, card, controls: questionControls.slice(firstCardControl) });
+        continue;
       }
       {
         const threadId = selectedId;
@@ -3408,7 +3650,10 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   }
   const turnKeyCounts = new Map();
   for (const turn of view.turns || []) { const key = turn.viewKey || turn.id; turnKeyCounts.set(key, (turnKeyCounts.get(key) || 0) + 1); }
-  for (const [turnIndex, turn] of (view.turns || []).entries()) {
+  const timelineTurns = view.turns || [], timelineKeys = new Set(timelineTurns.map(turn => turn.viewKey || turn.id));
+  const controlOnlyTurns = live ? controlTurns.filter(turn => !timelineKeys.has(turn.viewKey || turn.id)) : [];
+  for (const [turnIndex, turn] of [...timelineTurns, ...controlOnlyTurns].entries()) {
+    const controlOnly = turnIndex >= timelineTurns.length;
     const turnDisplayKey = turn.viewKey || turn.id;
     const row = element('article', 'turn');
     if (turn.status === 'interrupted' || turn.status === 'failed') row.append(element('div', 'turn-meta', turn.status === 'interrupted' ? '已中断' : '失败'));
@@ -3634,7 +3879,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
       const knownPending = pendingIds !== null && new Set(pendingIds).size === pendingIds.length && asyncQuestions.every(question => typeof question.id === 'string' && question.id && asyncQuestionCounts.get(question.id) === 1) && pendingIds.every(id => typeof id === 'string' && asyncQuestions.filter(question => question.id === id).length === 1);
       const formQuestions = knownPending ? asyncQuestions.filter(question => pendingIds.includes(question.id)) : asyncQuestions;
       const remoteSubmitting = Array.isArray(controlItem?.submittingQuestionIds) && formQuestions.some(question => controlItem.submittingQuestionIds.includes(question.id));
-      const pendingAsync = asyncQuestions.length && live && controlItem && asyncItemCounts.get(item.id) === 1 && (remoteSubmitting || (pendingIds !== null ? knownPending && formQuestions.length > 0 : controlTurn === controlTurns.at(-1) && !turnItems.slice(itemIndex + 1).some(entry => entry.type === 'userMessage' || entry.questions?.length)));
+      const pendingAsync = asyncQuestions.length && live && !unknownQuestionItems.has(item.id) && controlItem && asyncItemCounts.get(item.id) === 1 && (remoteSubmitting || (pendingIds !== null ? knownPending && formQuestions.length > 0 : controlTurn === controlTurns.at(-1) && !turnItems.slice(itemIndex + 1).some(entry => entry.type === 'userMessage' || entry.questions?.length)));
       const skipKey = formQuestions.length === 1 && item.id ? JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id, formQuestions[0].id]) : null;
       if (skipKey && !pendingAsync) skippedAsyncQuestions.delete(skipKey);
       const showAsyncForm = pendingAsync && (remoteSubmitting || !(skipKey && skippedAsyncQuestions.has(skipKey)));
@@ -3677,7 +3922,13 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         section.append(text, toggle);
       } else if (content) section.append(item.type === 'agentMessage' ? assistantContent(content, live && turn.id && item.id ? { threadId: selectedId, turnId: turn.id, itemId: item.id } : null) : element('p', item.type === 'commandExecution' ? 'item-code' : 'item-text', content));
       if (item.type === 'userMessage' && item.questionReplyPendingIds?.length) section.append(element('p', 'file-change-empty', '结果待确认'));
-      if (showAsyncForm && !reuseQuestions) {
+      const asyncCardSignature = JSON.stringify([formQuestions, remoteSubmitting]);
+      const asyncCardKey = JSON.stringify(['async', item.id]);
+      const previousCard = previousQuestionCards?.get(asyncCardKey);
+      const reuseAsyncCard = showAsyncForm && !reuseQuestions && previousCard?.signature === asyncCardSignature && questionPanel.contains(previousCard.card);
+      if (reuseAsyncCard) retainQuestionCard(previousCard);
+      if (showAsyncForm && !reuseQuestions && !reuseAsyncCard) {
+        const firstCardControl = questionControls.length;
         const threadId = selectedId, key = JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', threadId, 'async', item.id]);
         let draft = inputDrafts.get(key);
         if (!draft) { draft = { answers: Object.create(null), pending: false }; inputDrafts.set(key, draft); }
@@ -3695,8 +3946,9 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         collapse.type = 'button'; collapse.setAttribute('aria-expanded', String(!draft.collapsed));
         heading.append(collapse); card.append(heading);
         const form = element('form', 'user-input-form');
-        const isCurrentScope = () => selectedId === threadId && currentDeviceId === deviceId && historyScopeGeneration === scopeGeneration && inputDrafts.get(key) === draft && connected;
-        const isCurrentForm = () => isCurrentScope() && draft.controls?.form === form;
+        const isCurrentScope = () => selectedId === threadId && currentDeviceId === deviceId && historyScopeGeneration === scopeGeneration && inputDrafts.get(key) === draft;
+        const isCurrentForm = () => isCurrentScope() && draft.controls?.form === form && questionPanel.contains?.(form) !== false;
+        const canSubmit = () => isCurrentForm() && connected && questionLiveConfirmed && !unknownQuestionItems.has(item.id);
         form.hidden = Boolean(draft.collapsed);
         collapse.addEventListener('click', () => {
           if (!isCurrentForm()) return;
@@ -3727,14 +3979,14 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           input.addEventListener('input', () => { if (!isCurrentForm()) return; draft.answers[question.id] = input.value; for (const radio of group.querySelectorAll('input[type=radio]')) radio.checked = false; });
           group.append(input); form.append(group);
         }
-        const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : remoteSubmitting ? '结果待确认' : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending || remoteSubmitting || asyncQuestionWrites.has(writeKey) || !isCurrentScope());
+        const submit = element('button', 'approval-accept', draft.pending ? (draft.outcome || '正在提交') : remoteSubmitting ? '结果待确认' : '提交'); submit.type = 'submit'; guardRecoveryControl(submit, () => draft.pending || remoteSubmitting || asyncQuestionWrites.has(writeKey) || !canSubmit());
         questionControls.push(recoveryGuardedControls.at(-1));
         const feedback = element('p', 'list-error', draft.feedback || (remoteSubmitting ? '回答结果待确认，请查看电脑上的任务状态' : ''));
         const actions = element('div', 'question-actions');
         if (skipKey) {
-          const skip = element('button', 'question-skip', '跳过'); skip.type = 'button'; skip.disabled = draft.pending || remoteSubmitting;
+          const skip = element('button', 'question-skip', '跳过'); skip.type = 'button'; guardRecoveryControl(skip, () => draft.pending || remoteSubmitting || !canSubmit()); questionControls.push(recoveryGuardedControls.at(-1));
           skip.addEventListener('click', () => {
-            if (draft.pending || remoteSubmitting || !isCurrentForm() || skipKey !== JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id, formQuestions[0].id])) return;
+            if (draft.pending || remoteSubmitting || !canSubmit() || skipKey !== JSON.stringify([historyScope?.hostId || '', historyScope?.deviceId || '', selectedId, turn.id, item.id, formQuestions[0].id])) return;
             if (skippedAsyncQuestions.size >= 1024) skippedAsyncQuestions.delete(skippedAsyncQuestions.values().next().value);
             skippedAsyncQuestions.add(skipKey); delete draft.answers[formQuestions[0].id]; card.remove();
             if (!questionPanel.querySelector('.question-card, .pending-request')) questionPanel.hidden = true;
@@ -3745,7 +3997,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
         draft.controls = { submit, status: feedback, form };
         form.addEventListener('submit', async event => {
           event.preventDefault();
-          if (draft.pending || remoteSubmitting || asyncQuestionWrites.has(writeKey) || !isCurrentForm() || recoveryBlocksWrite()) return;
+          if (draft.pending || remoteSubmitting || asyncQuestionWrites.has(writeKey) || !canSubmit() || recoveryBlocksWrite()) return;
           if (!formQuestions.every(q => draft.answers[q.id]?.trim())) { feedback.textContent = '请回答所有问题'; return; }
           const attempt = {}; draft.attempt = attempt;
           draft.pending = true; draft.pendingGeneration = scopeGeneration; draft.sentQuestionIds = formQuestions.map(question => question.id); submit.disabled = true;
@@ -3765,7 +4017,8 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
           draft.controls.status.textContent = draft.feedback;
           draft.controls.submit.textContent = draft.outcome;
         });
-        card.append(form); questionFragment.append(card); pendingQuestionCount++;
+        card.append(form); questionNodes.push(card); pendingQuestionCount++;
+        questionCards.set(asyncCardKey, { key: asyncCardKey, kind: 'async', itemId: item.id, signature: asyncCardSignature, card, controls: questionControls.slice(firstCardControl) });
       }
       if (!content && !images.length && !videos.length) continue;
       if (item.type === 'userMessage' && images.length) {
@@ -3800,7 +4053,11 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     if (liveTurn && running.some(candidate => candidate.id === turn.id) && !hasLiveActivityHeading) {
       row.append(element('div', 'thinking-title live-activity-title live-thinking', '正在思考'));
     }
-    fragment.append(row);
+    if (!controlOnly) fragment.append(row);
+  }
+  if (live && !reuseQuestions) for (const itemId of unknownQuestionItems) {
+    const key = JSON.stringify(['async', itemId]), previousCard = previousQuestionCards?.get(key);
+    if (previousCard && questionPanel.contains(previousCard.card) && !questionCards.has(key)) retainQuestionCard(previousCard);
   }
   for (const [scope, groups] of priorWorkGroups) if (!renderedWorkScopes.has(scope)) {
     for (const group of groups) expandedWork.delete(group.key);
@@ -3819,16 +4076,25 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
     if (target?.tagName === workFocus.tag && target.className === workFocus.className && target.textContent === workFocus.text) target.focus?.({ preventScroll: true });
   }
   if (!reuseQuestions) {
-    questionPanel.replaceChildren(questionFragment);
+    // Keep retained editors attached. Moving them through a fragment would
+    // dismiss the iOS keyboard even when the same nodes are appended again.
+    const wanted = new Set(questionNodes);
+    for (const child of [...questionPanel.children]) if (!wanted.has(child)) child.remove();
+    for (let index = 0; index < questionNodes.length; index++) {
+      const card = questionNodes[index];
+      if (questionPanel.contains(card)) continue;
+      const next = questionNodes.slice(index + 1).find(node => questionPanel.contains(node));
+      if (next) next.before(card); else questionPanel.append(card);
+    }
     questionPanel.hidden = pendingQuestionCount === 0;
-    renderedQuestionPanel = { signature: questionSignature, scope: questionScope, controls: questionControls };
+    renderedQuestionPanel = { signature: questionSignature, scope: questionScope, controls: questionControls, cards: questionCards, live };
   }
   updateRecoveryGuardedControls();
   if (Number.isFinite(oldQuestionScroll)) questionPanel.scrollTop = oldQuestionScroll;
   if (inputFocus) {
     const replacement = [...questionPanel.querySelectorAll('.user-input-text')].find(input => input.dataset.inputDraftKey === inputFocus.key && input.dataset.inputQuestionId === inputFocus.question && input.dataset.inputQuestionSchema === inputFocus.schema);
     const form = replacement?.closest('form');
-    if (replacement && !replacement.disabled && !form?.hidden && !form?.querySelector('button[type="submit"]')?.disabled) { replacement.focus({ preventScroll: true }); replacement.setSelectionRange(inputFocus.start, inputFocus.end, inputFocus.direction); }
+    if (replacement && replacement !== focusedInput && !replacement.disabled && !form?.hidden && !form?.querySelector('button[type="submit"]')?.disabled) { replacement.focus({ preventScroll: true }); replacement.setSelectionRange(inputFocus.start, inputFocus.end, inputFocus.direction); }
   }
   if (conversation) {
     if (followLatest) conversation.scrollTop = conversation.scrollHeight;
@@ -3923,8 +4189,8 @@ function queueDeltaRender(view) {
   });
 }
 function controlSignature(view) {
-  return JSON.stringify([view.runtimeStatus, view.collaborationMode, view.model, view.reasoningEffort, view.goal, view.requests,
-    (view.turns || []).map(turn => [turn.id, turn.status, (turn.items || []).filter(item => item?.questions?.length || item?.type === 'userMessage').map(item => [item.id, item.type, item.questions, item.pendingQuestionIds, item.questionReplyIds, item.submittingQuestionIds, item.questionReplyPendingIds])])]);
+  return JSON.stringify([view.runtimeStatus, view.collaborationMode, view.model, view.reasoningEffort, view.goal, view.requests, view.unknownQuestionItemIds,
+    questionControlTurns(view).map(turn => [turn.viewKey || turn.id, turn.status, (turn.items || []).filter(item => item?.questions?.length || item?.type === 'userMessage').map(item => [item.id, item.type, item.questions, item.pendingQuestionIds, item.questionReplyIds, item.submittingQuestionIds, item.questionReplyPendingIds])])]);
 }
 const recentViews = new Map();
 let recentViewBytes = 0;
@@ -3994,7 +4260,7 @@ function handleEvent(block) {
     }
     if (order.some(id => !turns.has(id))) throw new Error('状态缺失');
     const previousControls = controlSignature(streamView);
-    streamView = { id: metadata.id, title: metadata.title, runtimeStatus: metadata.runtimeStatus, collaborationMode: metadata.collaborationMode, model: metadata.model, reasoningEffort: metadata.reasoningEffort, goal: metadata.goal, history: metadata.history, requests: metadata.requests, turns: order.map(id => turns.get(id)) };
+    streamView = { id: metadata.id, title: metadata.title, runtimeStatus: metadata.runtimeStatus, collaborationMode: metadata.collaborationMode, model: metadata.model, reasoningEffort: metadata.reasoningEffort, goal: metadata.goal, history: metadata.history, requests: metadata.requests, pendingQuestionTurns: metadata.pendingQuestionTurns, unknownQuestionItemIds: metadata.unknownQuestionItemIds, turns: order.map(id => turns.get(id)) };
     streamSeq = seq;
     if (controlSignature(streamView) !== previousControls) { cancelPendingRender(); rememberView(streamView); showState(streamView); }
     else queueDeltaRender(streamView);
@@ -4077,7 +4343,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
   if (preserveView) {
     historyRequest?.abort(); historyRequest = null; stopGoalClock();
     activeTurnId = null; liveMode = null; liveRuntimeStatus = null;
-    goalPanel.hidden = true; questionPanel.hidden = true; renderedQuestionPanel = null;
+    goalPanel.hidden = true; questionLiveConfirmed = false;
   } else clearConversation();
   homeErrorSource = null; error.hidden = true; status(preserveView ? '重新连接中' : '连接中', 'connecting');
   if (!preserveView) showConversationLoading();
@@ -4231,6 +4497,8 @@ async function checkPairingStatus(pending) {
 if (window.pairingReady) { status('连接中', 'connecting'); showConversationLoading(); void checkPairingStatus(window.pairingReady); }
 else startPairedHome();
 document.addEventListener?.('visibilitychange', () => {
+  if (document.hidden !== true && !pageSuspended && !newDraft && selectedId) clearTaskNotification(selectedId);
+  window.refreshNotificationPresence?.();
   if (document.hidden !== true && !pageSuspended && (pairingAvailable || pairingWasReplaced)) void refreshPairingStatus();
   if (document.hidden === true) { discardDeferredListRender(); pauseBackgroundPolling(); }
   else if (!pageSuspended && pairingAvailable) { if (!historyScope) void startPairedHome(); else { void loadThreads(); void refreshHostStatus(); } }

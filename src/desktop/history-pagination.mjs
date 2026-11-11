@@ -26,7 +26,18 @@ function validated(view, recentCount) {
 }
 export function makeWindow(view, { recentCount = 3 } = {}) {
   const parts = validated(view, recentCount), { historicalHash, mediaRevision } = historyDigests(parts.prefix);
-  return { ...view, turns: parts.recent, history: { ...view.history, complete: parts.split === 0 && view.history?.complete === true, reason: parts.split ? 'on-demand' : view.history?.reason, available: parts.split, historicalHash, mediaRevision, keyField: parts.key, cursor: parts.split ? keyOf(parts.recent[0], parts.key) : null } };
+  // A pending editor is a live control even when its transcript turn has aged
+  // out of the recent window. Send only its question metadata, never that
+  // turn's potentially large tool output or historical message body.
+  const pendingQuestionTurns = parts.prefix.flatMap(turn => {
+    const items = (turn.items || []).filter(item => item.type === 'agentMessage' && Array.isArray(item.questions)
+      && item.questions.some(question => item.pendingQuestionIds?.includes(question.id) || item.submittingQuestionIds?.includes(question.id)))
+      .map(item => ({ id: item.id, type: item.type, text: '', questions: item.questions,
+        ...(Array.isArray(item.pendingQuestionIds) ? { pendingQuestionIds: item.pendingQuestionIds } : {}),
+        ...(Array.isArray(item.submittingQuestionIds) ? { submittingQuestionIds: item.submittingQuestionIds } : {}) }));
+    return items.length ? [{ id: turn.id, ...(turn.viewKey ? { viewKey: turn.viewKey } : {}), status: turn.status, items }] : [];
+  });
+  return { ...view, turns: parts.recent, pendingQuestionTurns, history: { ...view.history, complete: parts.split === 0 && view.history?.complete === true, reason: parts.split ? 'on-demand' : view.history?.reason, available: parts.split, historicalHash, mediaRevision, keyField: parts.key, cursor: parts.split ? keyOf(parts.recent[0], parts.key) : null } };
 }
 export function makePage(view, { recentCount = 3, historicalHash, before, maxBytes = 256 * 1024, maxSingleTurnBytes = 4 * 1024 * 1024 } = {}) {
   const parts = validated(view, recentCount);

@@ -12,7 +12,13 @@ export function relayConfig(env = process.env) {
     if (!['0', '1'].includes(env[name])) throw new Error(`${name} must be 0 or 1.`);
     return env[name] === '1';
   };
+  const notifications = flag('HUB_NOTIFICATIONS', false) ? {
+    database: resolve(env.HUB_PUSH_DATABASE || 'data/push.sqlite'),
+    vapidDetails: { subject: env.HUB_PUSH_SUBJECT, publicKey: env.HUB_PUSH_PUBLIC_KEY, privateKey: env.HUB_PUSH_PRIVATE_KEY },
+  } : null;
+  if (notifications && Object.values(notifications.vapidDetails).some(value => typeof value !== 'string' || !value)) throw new Error('Push VAPID configuration is required.');
   return { port, origin: env.HUB_ORIGIN, database: resolve(env.HUB_DATABASE || 'data/relay.sqlite'),
+    ...(notifications ? { notifications } : {}),
     production: true, trustedProxy: flag('HUB_TRUSTED_PROXY', false),
     imageUpload: flag('HUB_IMAGE_UPLOAD', false), imagePreview: flag('HUB_IMAGE_PREVIEW', false) };
 }
@@ -20,6 +26,7 @@ export function relayConfig(env = process.env) {
 export async function startRelay(env = process.env) {
   const { port, ...config } = relayConfig(env);
   await mkdir(dirname(config.database), { recursive: true, mode: 0o700 });
+  if (config.notifications) await mkdir(dirname(config.notifications.database), { recursive: true, mode: 0o700 });
   const relay = createPairRelay(config);
   try {
     const boundPort = await relay.listen(port);

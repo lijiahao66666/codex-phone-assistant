@@ -1,0 +1,62 @@
+# 原生已读与归档接口验证
+
+验证日期：2026-11-11。本文供开发排障，不能作为功能已支持的说明。
+
+## 范围与方法
+
+使用单独创建的空验收会话。该会话已经正常交给 Codex Desktop，原生 owner 在线且处于空闲状态；未向模型发送消息。只通过原生工具和已存在的 IPC / app-server 协议测试，没有直接修改原生数据库、全局状态文件、应用包或依赖仓库。未操作已有用户会话。
+
+本文不记录会话名称、会话 ID、owner ID、账号字段或认证信息。更细的本机临时探测记录不随仓库发布。
+
+## 未读状态
+
+原生工具将验收会话标为未读后，只读检查原生持久集合确认其未读状态为 `true`。随后通过助手自己的 IPC 连接发送 `thread-read-state-changed` v3，要求将其改为 `false`；使用的当前身份和唯一 local execution-host 作用域匹配。等待约 2.58 秒后，原生未读集合仍为 `true`，也没有收到原生确认广播。
+
+同一时段原生日志明确返回：
+
+```text
+warning [IpcClient] Received broadcast but no handler is configured method=thread-read-state-changed
+```
+
+测试后通过原生工具恢复该验收会话为已读，并未将“socket 发送成功”当作已读成功。
+
+原生代码存在中央 read-state 服务，但仅在对应本地协调模式开启时注册外部广播处理器；renderer 的转发注册也明确拒绝 read-state 转发。因此，存在协议名称并不代表当前运行模式支持外部写入。桌面拥有会话 owner 也不会自动启用这条已读同步路径。
+
+只读投影可继续读取当前身份、唯一 local host 下的原生未读集合。缺失身份、多个 local host、损坏或不完整状态必须报告不可用，不能误报为全部已读。原生 execution-host key 取决于实际 transport；不可永久假定为 stdio 的空 WebSocket 地址。
+
+补充限制：当前持久集合只保存布尔未读成员，没有已读时间或回合水位。通知观察器每 5 秒采样，在两次采样之间完成“未读 → 已读”会漏过该变化；连接器重启也无法仅由初始 false 证明某条旧提醒已被查看。因此当前电脑到手机的清除并非完整同步，不可用“首次读到 false”乐观清除弥补。原生 `thread/read` 的 durable `readState` 对部分任务可用、对部分任务为 null；已存在 durable 已读与桌面全局集合未读不一致的证据，不能将两个状态源直接互换。
+
+复核 durable 更新的既有现场收据：`thread/readState/update` 接受带 `expectedRevision` 的 read 操作并更新 revision 后，原生未读集合的两项布尔状态仍保持 `[false, true]`，未清除未读。因此这不是尚未尝试过的新入口。当前 adapter 的 `saved.syncWithServer` 硬编码为 `true`，不能把它描述成用户关闭的配置；整体 `canSync` 还取决于内部就绪状态、版本、host 等条件，当前未通过合法外部只读接口确认。存在带 revision 的 `thread/readState/changed` 事件，也不能证明助手可订阅该事件并覆盖所有本机会话。此次仅核读既有收据和当前资源，没有重做任何已读写入。
+
+结论：当前 `canMarkRead` 保持 `false`，不提供假清除或乐观原生已读。H5 已启用的本地通知蓝点不代表双向原生未读同步。只有正常集成入口通过真实“原生未读 → 手机读取 → 原生已读”的测试后，才能开启手机向桌面写入已读状态。
+
+## 归档
+
+验收会话处于原生 owner 下且空闲时，从助手 app-server 调用 `thread/archive` 被拒绝，RPC 错误码为 `-32600`，错误中的标识已省略：
+
+```text
+thread <omitted> already has an active writer
+```
+
+当前原生 follower 请求清单没有归档、删除或释放 owner 方法。`thread-archived` 是列表元数据广播，不能替代真实归档；host 的 `archive-thread` 消息处理 worktree 清理准备，也不能据此声称完成归档。原生 `archiveConversation` 向它自己的 stdio app-server 发送真实 `thread/archive`，此通道不是助手可直接复用的 TCP 接口。
+
+助手自己合法持有且空闲、没有活动目标、排队消息、审批、在途或结果未知写入的会话，现有 `thread/archive` 路径可以成功。这不能外推为能归档原生 owner 会话。
+
+结论：原生 owner 归档仍不可用；先检查 owner 与写入边界并清楚拒绝。不得抢 owner、直接改索引、伪造 follower 方法或修改原生程序绕过限制。
+
+## 当前原生工具入口复核
+
+2026-11-11 再次只读检查当前运行程序：Codex `26.1103.60933 / 25894`，归档主资源 `early-bootstrap-815-e030c49be4b9c405.js` 与先前取证副本逐字节哈希一致，原限制没有随测试站更新改变。
+
+原生 `set_thread_archived` 工具在 renderer `182735.7f13786b92.js:266` 调用内部 `manager.archiveConversation`。该工具的存在不能证明手机助手有相同能力：主资源 `815:104` 和 `815:1587` 的动态工具 socket 使用原生 `authorizeSocketPeer` 校验；bundled `codex-app-tools/server.mjs:34606` 和 `:34743` 需要执行会话上下文及宿主注入的 pipe。`815:1437` 的 HTTP MCP 桥也依赖原生会话认证及执行元数据，并非产品公共归档 RPC。此次没有发出归档请求、操作聊天或读取认证密钥。
+
+对原生授权组件的只读静态检查进一步确认：该 socket 要求调用进程属于当前桌面程序子孙链，且进程、父进程及祖父进程均满足 OpenAI 团队签名和内置签名标识允许名单。第三方应用使用自己的正常开发者签名也不能满足此条件；并非给助手补签名或弹出系统授权框即可接入。
+
+手机助手不能通过代理在验收时调用原生工具来冒充产品集成成功。完成桌面 owner 归档，需要原生提供手机助手可授权调用并确认结果的集成入口。
+
+## 开启能力前的验收条件
+
+- 使用可丢弃的独立会话，不以用户当前工作聊天测试。
+- 已读必须双向验证，并覆盖登录身份或 host 变化、页面后台、迟到请求和连续新回复。
+- 归档必须在原生列表与持久索引中确认消失，并验证重连后不会被旧快照重新显示。
+- socket 发送、HTTP 接受、元数据广播及读取历史均不算写入结果确认。
