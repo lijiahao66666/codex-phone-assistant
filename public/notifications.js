@@ -57,6 +57,7 @@
       const data = await request(pair, '/api/notifications');
       if (!fresh()) return;
       config = data; available = data.enabled === true;
+      window.setDesktopNotificationReadReady?.(pair, available && data.desktopReadReady === true, data.desktopReadSupported);
       // Keep the current pair's confirmed controls visible while async checks run.
       if (!available) { enable.hidden = disable.hidden = true; window.setTaskNotificationSession?.(pair, false); return render(); }
       await syncCleared(pair, epoch);
@@ -85,6 +86,7 @@
       window.setTaskNotificationSession?.(pair, registered && Notification.permission === 'granted');
       const readiness = status ?? data;
       config = { ...data, ...readiness };
+      window.setDesktopNotificationReadReady?.(pair, available && config.desktopReadReady === true, config.desktopReadSupported);
       const active = registered && Notification.permission === 'granted' && readiness.desktopReady === true && readiness.monitorStatus === 'healthy';
       message.textContent = readiness.desktopReady !== true
         ? readiness.monitorStatus === 'offline' ? '电脑上的桌面助手未连接，连接后才能接收任务通知。' : '请更新电脑上的桌面助手后开启任务通知。'
@@ -104,7 +106,7 @@
     contextInitialized = true; ++refreshRevision;
     clearTimeout(refreshTimer); refreshTimer = null;
     enable.hidden = disable.hidden = true;
-    context = pair; window.setTaskNotificationSession?.(pair, false); ++generation; available = false; subscription = null; config = null; busy = false; onboardingDismissed = false; onboardingText = null; render();
+    context = pair; window.setDesktopNotificationReadReady?.(pair, false); window.setTaskNotificationSession?.(pair, false); ++generation; available = false; subscription = null; config = null; busy = false; onboardingDismissed = false; onboardingText = null; render();
     contextActivation = Promise.resolve();
     if (typeof window.taskReminderStore?.activate === 'function') {
       const epoch = generation;

@@ -90,10 +90,11 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   function notificationReadiness(hostId) {
     const peer = peers.get(hostId), connected = peer?.readyState === WebSocket.OPEN;
     const desktopReady = Boolean(connected && peer.taskNotifications === 1);
+    const desktopReadSupported = connected && peer.taskNotifications !== undefined ? peer.desktopNotificationRead === 1 : null;
     const monitorReason = peer?.notificationHealth?.reason !== 'ready' ? peer?.notificationHealth?.reason : null;
     const failureReason = monitorReason || peer?.notificationDeliveryHealth;
     const monitorStatus = !connected ? 'offline' : !desktopReady ? 'unsupported' : !push?.hasActiveSubscriptions(hostId) ? 'idle' : failureReason ? 'degraded' : peer.notificationHealth?.reason === 'ready' ? 'healthy' : 'starting';
-    return { desktopReady, monitorStatus, ...(monitorStatus === 'degraded' ? { monitorReason: failureReason } : {}) };
+    return { desktopReady, desktopReadSupported, desktopReadReady: Boolean(desktopReady && desktopReadSupported === true && peer.notificationEnabled === true), monitorStatus, ...(monitorStatus === 'degraded' ? { monitorReason: failureReason } : {}) };
   }
   function updateNotificationSettings(hostId, eventId) {
     const peer = peers.get(hostId);
@@ -418,6 +419,27 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-accel-buffering': 'no' });
         renewNotificationStream(key, entry);
         writeNotificationFrame(key, entry, 'event: connected\ndata: {}\n\n');
+        return;
+      }
+      if (requested === '/api/notifications/read' && req.method === 'POST') {
+        if (!push) return send(res, 409, { error: 'notifications-unavailable' });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 2048);
+        if (res.writableEnded || res.destroyed) return;
+        const data = reserved?.data;
+        if (!data || Object.keys(data).length !== 2 || Object.keys(data).some(key => !['threadId', 'eventId'].includes(key))
+            || !uuid.test(data.threadId || '') || typeof data.eventId !== 'string' || !data.eventId || data.eventId.length > 512) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId);
+        if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (peer.taskNotifications !== 1 || peer.desktopNotificationRead !== 1 || !peer.notificationEnabled) return send(res, 409, { error: 'desktop-read-unavailable' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'notification-read', id, deviceId: phone.deviceId, conversationId: data.threadId, eventId: data.eventId }));
         return;
       }
       if (requested === '/api/notifications/ack' && req.method === 'POST') {
@@ -860,7 +882,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (push && peers.get(hostId) === ws && ws.taskNotifications === 1 && ws.notificationEnabled && monitorReasons.has(msg.health?.reason)) ws.notificationHealth = { reason: msg.health.reason };
         return;
       }
-      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
+      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
       const entry = pending.get(msg.id); if (!entry || entry.hostId !== hostId) return;
       if (entry.historyChunks && msg.type === 'history-chunk' && msg.frame) {
         const frame = msg.frame;

@@ -125,14 +125,14 @@ export async function populateThreadStatuses({ sidebarStatus, statusPriorities, 
 }
 
 // Only one authenticated relay is configured; no arbitrary local HTTP proxying.
-export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
+export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
   const target = new URL(url);
   if ((target.protocol !== 'wss:' && !(allowInsecureForTests && target.protocol === 'ws:' && target.hostname === '127.0.0.1')) || target.pathname !== '/connector' || target.search || target.hash || target.username || target.password) throw new Error('WSS connector URL required');
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1) throw new Error('Invalid heartbeat timeout');
-  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
+  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
   const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(), uploadChecks = new Set(); let ws, scheduler, timer, stopped = false, shuttingDown = false, activeMutations = 0;
-  const mutationTypes = new Set(['recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
+  const mutationTypes = new Set(['notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
   const models = modelRequest ? createModelService({ request: modelRequest, writes, journal: modelJournal, hostId, ...(allowInsecureForTests ? {} : { createObserver: id => createSession({ conversationId: id, hostId: 'local' }) }), sessionFor: (deviceId, id) => [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === deviceId) }) : null;
   const recoveryLocked = id => {
     try { return ownerRouter ? ownerRouter.isRecoveryLocked(id) !== false : false; }
@@ -305,10 +305,10 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       }
       if (mutation) activeMutations++;
       try {
-      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
       if (msg.type === 'notification-settings') {
         if (msg.enabled === true && !notificationMonitor && connection === ws && !shuttingDown) {
-          notificationMonitor = new TaskNotificationMonitor({ createSession, listThreads: listAuthorizedThreads,
+          notificationMonitor = (createNotificationMonitorForTests || (options => new TaskNotificationMonitor(options)))({ createSession, listThreads: listAuthorizedThreads,
             onEvent: event => { if (connection === ws && !shuttingDown) send({ type: 'task-notification', event }, connection); },
             onClear: event => { if (connection === ws && !shuttingDown) send({ type: 'task-notification-clear', event }, connection); },
             onHealth: health => { if (connection === ws) send({ type: 'notification-health', health }, connection); },
@@ -328,6 +328,25 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (typeof msg.deviceId === 'string') await deviceTransitions.get(msg.deviceId);
       if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) return;
       if (connection !== ws || connection.readyState !== WebSocket.OPEN) return;
+      if (msg.type === 'notification-read') {
+        const id = msg.conversationId, monitor = notificationMonitor;
+        const answer = beginWrite(msg);
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id || '')
+            || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(msg.deviceId || '')
+            || typeof msg.eventId !== 'string' || !msg.eventId || msg.eventId.length > 512
+            || typeof monitor?.readOnDesktop !== 'function' || writes.has(id) || models?.isLocked(id) || recoveryLocked(id)) return answer('unavailable');
+        writes.add(id);
+        try {
+          const data = await listAllThreads(listAuthorizedThreads);
+          const allowed = new Set([...data.recent, ...data.projects.flatMap(project => project.threads)].map(thread => thread.id));
+          const cancelled = () => answer.cancelled() || notificationMonitor !== monitor || shuttingDown || recoveryLocked(id) || Boolean(models?.isLocked(id));
+          if (cancelled() || !allowed.has(id)) return answer('unavailable');
+          const result = await monitor.readOnDesktop({ threadId: id, eventId: msg.eventId }, { isCancelled: cancelled });
+          answer(result === true || result?.read === true ? 'accepted' : 'unavailable');
+        } catch { answer('unavailable'); }
+        finally { writes.delete(id); }
+        return;
+      }
       if (msg.type === 'recover-chat') {
         const recoveryStarted = performance.now();
         const request = { id: msg.id, deviceId: msg.deviceId, cancelled: false };

@@ -512,3 +512,28 @@ test('concurrent duplicate push events share one successful display and receipt 
   display.resolve(); await Promise.all([first, repeated]);
   assert.equal(displays, 1); assert.equal(f.reminders.length, 1);
 });
+
+
+test('desktop read capability is scoped to the active pairing and independent of push permission', async () => {
+  let pending; const calls = [];
+  const f = await fixture({ iphone: true, fetch(url) {
+    if (url === '/api/notifications') return pending?.promise ?? json({ enabled: true, desktopReadReady: true });
+  } });
+  f.window.setDesktopNotificationReadReady = (pair, ready) => calls.push({ pair: pair && { ...pair }, ready });
+  await f.select(); assert.deepEqual(calls.at(-1), { pair: pairA, ready: true });
+  pending = deferred(); f.window.setNotificationContext(pairB); await flush();
+  assert.deepEqual(calls.at(-1), { pair: pairB, ready: false });
+  f.window.setNotificationContext(null); pending.resolve(json({ enabled: true, desktopReadReady: true })); await flush();
+  assert.deepEqual(calls.at(-1), { pair: null, ready: false }, 'a stale old-pair response cannot enable desktop navigation');
+});
+
+
+test('a delayed initial notification config cannot signal unsupported desktop reads before capabilities are known', async () => {
+  const pending = deferred(), calls = [];
+  const f = await fixture({ fetch(url) { if (url === '/api/notifications') return pending.promise; } });
+  f.window.setDesktopNotificationReadReady = (pair, ready, supported) => calls.push({ pair: pair && { ...pair }, ready, supported });
+  f.window.setNotificationContext(pairA); await flush();
+  assert.equal(calls.length, 1); assert.equal(calls[0].ready, false); assert.equal(calls[0].supported, undefined);
+  pending.resolve(json({ enabled: true, desktopReadReady: true, desktopReadSupported: true, desktopReady: true })); await flush();
+  assert.equal(calls.at(-1).ready, true); assert.equal(calls.at(-1).supported, true);
+});

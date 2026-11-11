@@ -671,3 +671,102 @@ test('native accepted steering answers follow their unique steered marker chrono
   assert.equal(taskNotificationSummary(afterQuestion).controls.length, 0);
   assert.equal(taskNotificationSummary(afterQuestion).resolvedAsyncControls.length, 1);
 });
+
+test('phone navigation clears a completion only after Desktop reports read in the same scope', async () => {
+  let receipt = nativeRead('phone-scope', [threadId]), opened = 0;
+  const f = fixture({ readState: async () => receipt, openThread: async id => {
+    assert.equal(id, threadId); opened++; assert.equal(f.clears.length, 0);
+    receipt = nativeRead('phone-scope');
+  } });
+  f.monitor.start(); await flush();
+  try {
+    const s = f.sessions[0]; s.publish(state(threadId, turn('phone-live'))); s.publish(state(threadId, turn('phone-live', 'completed')));
+    const completed = f.events[0];
+    const result = await f.monitor.readOnDesktop(completed);
+    assert.equal(result.read, true); assert.equal(opened, 1);
+    assert.deepEqual(f.clears.map(x => [x.eventId, x.reason]), [[completed.eventId, 'desktop-read']]);
+  } finally { await f.monitor.close(); }
+});
+
+test('a restored baseline completion can be explicitly read without generating another task event', async () => {
+  let receipt = nativeRead('restart-scope', [threadId]), opened = 0;
+  const f = fixture({ readState: async () => receipt, openThread: async () => { opened++; receipt = nativeRead('restart-scope'); } });
+  f.monitor.start(); await flush();
+  try {
+    f.sessions[0].publish(state(threadId, turn('previous-completed', 'completed')));
+    assert.equal(f.events.length, 0);
+    const eventId = JSON.stringify(['completed', threadId, 'previous-completed']);
+    await f.monitor.readOnDesktop({ threadId, eventId });
+    assert.equal(opened, 1); assert.equal(f.events.length, 0); assert.equal(f.clears[0].eventId, eventId);
+  } finally { await f.monitor.close(); }
+});
+
+test('stale, pending-control, cancelled and unavailable reads never navigate Desktop', async () => {
+  let receipt = nativeRead('safe-scope'), opened = 0;
+  const f = fixture({ readState: async () => receipt, openThread: async () => { opened++; } });
+  f.monitor.start(); await flush();
+  try {
+    f.sessions[0].publish(state(threadId, turn('safe', 'completed')));
+    const event = { threadId, eventId: JSON.stringify(['completed', threadId, 'safe']) };
+    await assert.rejects(f.monitor.readOnDesktop({ ...event, eventId: 'stale-event' }), { code: 'stale' });
+    await assert.rejects(f.monitor.readOnDesktop(event, { isCancelled: () => true }), { code: 'unavailable' });
+    receipt = { status: 'unavailable' };
+    await assert.rejects(f.monitor.readOnDesktop(event), { code: 'unavailable' });
+    assert.equal(opened, 0); assert.equal(f.clears.length, 0);
+  } finally { await f.monitor.close(); }
+  const pending = fixture({ openThread: async () => { opened++; } }); pending.monitor.start(); await flush();
+  try {
+    pending.sessions[0].publish(state(threadId, turn('question', 'completed'), [request('still-pending')]));
+    await assert.rejects(pending.monitor.readOnDesktop({ threadId, eventId: JSON.stringify(['completed', threadId, 'question']) }), { code: 'stale' });
+    assert.equal(opened, 0);
+  } finally { await pending.monitor.close(); }
+});
+
+test('native unread, identity change, newer turn and cancellation after navigation preserve the reminder', async t => {
+  for (const scenario of ['unread', 'identity', 'newer-turn', 'cancelled']) await t.test(scenario, async () => {
+    let receipt = nativeRead('initial-scope', [threadId]), cancelled = false;
+    const f = fixture({ desktopReadTimeoutMs: 1, readState: async () => receipt, openThread: async () => {
+      if (scenario === 'identity') receipt = nativeRead('different-scope');
+      if (scenario === 'newer-turn') {
+        f.monitor.records.get(threadId).summary = { turnId: 'newer', status: 'inProgress', active: true, controls: [] };
+        receipt = nativeRead('initial-scope');
+      }
+      if (scenario === 'cancelled') { cancelled = true; receipt = nativeRead('initial-scope'); }
+    } });
+    f.monitor.start(); await flush();
+    try {
+      f.sessions[0].publish(state(threadId, turn('initial', 'completed')));
+      const event = { threadId, eventId: JSON.stringify(['completed', threadId, 'initial']) };
+      await assert.rejects(f.monitor.readOnDesktop(event, { isCancelled: () => cancelled }));
+      assert.equal(f.clears.length, 0);
+    } finally { await f.monitor.close(); }
+  });
+});
+
+test('concurrent clicks cannot open multiple Desktop conversations while a read confirmation is pending', async () => {
+  let finishOpen, opened = 0, receipt = nativeRead('serial-scope', [threadId]);
+  const f = fixture({ readState: async () => receipt, openThread: async () => { opened++; await new Promise(resolve => { finishOpen = resolve; }); } });
+  f.monitor.start(); await flush();
+  try {
+    f.sessions[0].publish(state(threadId, turn('serial', 'completed')));
+    const event = { threadId, eventId: JSON.stringify(['completed', threadId, 'serial']) };
+    const first = f.monitor.readOnDesktop(event); await flush();
+    await assert.rejects(f.monitor.readOnDesktop(event), { code: 'unavailable' });
+    assert.equal(opened, 1); assert.equal(f.clears.length, 0);
+    receipt = nativeRead('serial-scope'); finishOpen(); await first;
+    assert.equal(f.clears.length, 1);
+  } finally { finishOpen?.(); await f.monitor.close(); }
+});
+
+test('switching native identity before the phone click cannot acknowledge a completion from the previous identity', async () => {
+  let receipt = nativeRead('identity-a', [threadId]), opened = 0;
+  const f = fixture({ readState: async () => receipt, openThread: async () => { opened++; } });
+  f.monitor.start(); await flush();
+  try {
+    f.sessions[0].publish(state(threadId, turn('identity-a-turn', 'completed')));
+    receipt = nativeRead('identity-b');
+    await f.monitor.poll(); await flush();
+    await assert.rejects(f.monitor.readOnDesktop({ threadId, eventId: JSON.stringify(['completed', threadId, 'identity-a-turn']) }), { code: 'unavailable' });
+    assert.equal(opened, 0); assert.equal(f.clears.length, 0);
+  } finally { await f.monitor.close(); }
+});

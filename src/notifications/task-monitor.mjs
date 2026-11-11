@@ -2,6 +2,8 @@ import { DesktopSession } from '../desktop/session.mjs';
 import { listDesktopThreads } from '../desktop/thread-list.mjs';
 import { desktopIpcPool } from '../desktop/ipc-pool.mjs';
 import { readDesktopReadState } from '../desktop/read-state.mjs';
+import { openDesktopThread } from '../desktop/open-thread.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { inspectQuestions, parseQuestionReply, pendingAsyncQuestions, registerAsyncQuestionHistory } from '../desktop/async-question-guard.mjs';
 
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 1024;
@@ -128,10 +130,12 @@ function isAsyncControl(eventId) {
 }
 
 export class TaskNotificationMonitor {
-  constructor({ hostId = 'local', createSession = options => new DesktopSession(options), createProbeClient = () => desktopIpcPool.acquire(), readState = readDesktopReadState, listThreads = listDesktopThreads, onEvent = () => {}, onClear = () => {}, onHealth = () => {}, now = Date.now, pollMs = 5000, coalesceMs = 250, snapshotTimeoutMs = 15000, retryMs = 30000, maxActive = 64, concurrency = 2, discoveryConcurrency = 8, probesPerPoll = 64, initialProbeLimit = 64, maxQueued = 128, maxRecords = 10000 } = {}) {
+  constructor({ hostId = 'local', createSession = options => new DesktopSession(options), createProbeClient = () => desktopIpcPool.acquire(), readState = readDesktopReadState, openThread = openDesktopThread, desktopReadTimeoutMs = 3000, listThreads = listDesktopThreads, onEvent = () => {}, onClear = () => {}, onHealth = () => {}, now = Date.now, pollMs = 5000, coalesceMs = 250, snapshotTimeoutMs = 15000, retryMs = 30000, maxActive = 64, concurrency = 2, discoveryConcurrency = 8, probesPerPoll = 64, initialProbeLimit = 64, maxQueued = 128, maxRecords = 10000 } = {}) {
     for (const [name, value] of Object.entries({ pollMs, coalesceMs, snapshotTimeoutMs, retryMs, maxActive, concurrency, discoveryConcurrency, probesPerPoll, initialProbeLimit, maxQueued, maxRecords })) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`Invalid ${name}`);
     if (concurrency > maxActive || discoveryConcurrency > 8 || maxActive > 256 || initialProbeLimit > 256 || maxQueued > 1024 || maxRecords > 50000 || typeof createSession !== 'function' || typeof createProbeClient !== 'function' || typeof readState !== 'function' || typeof listThreads !== 'function' || typeof onEvent !== 'function' || typeof onClear !== 'function' || typeof onHealth !== 'function') throw new TypeError('Invalid monitor configuration');
     Object.assign(this, { hostId, createSession, createProbeClient, readState, listThreads, onEvent, onClear, onHealth, now, pollMs, coalesceMs, snapshotTimeoutMs, retryMs, maxActive, concurrency, discoveryConcurrency, probesPerPoll, initialProbeLimit, maxQueued, maxRecords });
+    if (typeof openThread !== 'function' || !Number.isSafeInteger(desktopReadTimeoutMs) || desktopReadTimeoutMs < 1 || desktopReadTimeoutMs > 10000) throw new TypeError('Invalid desktop read configuration');
+    this.openThread = openThread; this.desktopReadTimeoutMs = desktopReadTimeoutMs;
     this.records = new Map(); this.entries = new Map(); this.queue = new Map(); this.probing = new Map(); this.ready = new Map();
     this.generation = 0; this.running = false; this.budget = 0; this.healthSignature = null;
   }
@@ -141,6 +145,50 @@ export class TaskNotificationMonitor {
     this.running = true; ++this.generation;
     this.timer = setInterval(() => { void this.poll(); }, this.pollMs); this.timer.unref?.();
     void this.poll(); return this;
+  }
+
+  // A phone click may use Desktop's normal navigation to mark one completion
+  // read. Opening is a side effect, never a heartbeat or a permission to clear
+  // locally: only a same-identity native receipt authorizes the clear event.
+  async readOnDesktop({ threadId, eventId } = {}, { isCancelled = () => false } = {}) {
+    const fail = code => { throw Object.assign(new Error('Desktop read was not confirmed'), { code }); };
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId || '') || typeof eventId !== 'string' || !eventId || eventId.length > 512 || typeof isCancelled !== 'function') fail('invalid');
+    if (this.desktopReadPending) fail('unavailable');
+    const generation = this.generation, record = this.records.get(threadId);
+    let expectedScope = null;
+    const current = () => this.running && generation === this.generation && !isCancelled() && this.records.get(threadId) === record;
+    const matches = () => record && record.summary?.status === 'completed' && !record.summary.active && !record.summary.controls.length
+      && eventId === eventKey('completed', threadId, record.summary.turnId)
+      && (!record.latestEvent || record.latestEvent.eventId === eventId && record.latestEvent.kind === 'completed');
+    const requireCurrent = () => { if (!current() || expectedScope !== null && record?.readScopeKey !== expectedScope) fail('unavailable'); if (!matches()) fail('stale'); };
+    const validReadState = state => state?.status === 'available' && state.canReadUnread === true
+      && typeof state.scopeKey === 'string' && state.scopeKey.length > 0 && state.unreadThreadIds instanceof Set;
+    requireCurrent();
+    const pending = {}; this.desktopReadPending = pending;
+    try {
+      const before = await this.readState();
+      requireCurrent();
+      if (!validReadState(before) || record.readScopeKey !== before.scopeKey) fail('unavailable');
+      expectedScope = before.scopeKey;
+      await this.openThread(threadId);
+      requireCurrent();
+      const deadline = Date.now() + this.desktopReadTimeoutMs;
+      for (;;) {
+        const receipt = await this.readState();
+        requireCurrent();
+        if (!validReadState(receipt) || receipt.scopeKey !== before.scopeKey) fail('unavailable');
+        if (!receipt.unreadThreadIds.has(threadId)) {
+          // Exact-event clears also work after connector restart: the baseline
+          // must still prove this is the same completed native turn, and the
+          // explicit navigation above must have a readable native receipt.
+          this.#clear(threadId, eventId, 'desktop-read');
+          return { read: true, threadId, eventId };
+        }
+        if (Date.now() >= deadline) fail('unavailable');
+        await delay(Math.min(100, deadline - Date.now()));
+        requireCurrent();
+      }
+    } finally { if (this.desktopReadPending === pending) this.desktopReadPending = null; }
   }
 
   async poll() {
@@ -328,7 +376,7 @@ export class TaskNotificationMonitor {
     let session;
     try { session = this.createSession({ conversationId: id, hostId: this.hostId, snapshotTimeoutMs: this.snapshotTimeoutMs }); }
     catch { this.#failed(record); queueMicrotask(() => this.#pump()); return; }
-    const entry = { session, initialized: false, latest: null, listener: null, timer: null, snapshotTimer: null };
+    const entry = { session, readScopeKey: this.nativeReadState?.scopeKey ?? null, initialized: false, latest: null, listener: null, timer: null, snapshotTimer: null };
     this.entries.set(id, entry);
     const fail = () => {
       if (this.entries.get(id) !== entry) return;
@@ -377,7 +425,7 @@ export class TaskNotificationMonitor {
       this.#clear(id, eventId, 'resolved'); record.emittedControls.delete(eventId);
     }
     if (summary.controls.length || record.emittedControls?.size) summary.active = true;
-    record.summary = summary; record.observedAt = this.now(); record.failed = false; record.retryAt = 0; record.failures = 0;
+    record.summary = summary; record.readScopeKey = entry.readScopeKey; record.observedAt = this.now(); record.failed = false; record.retryAt = 0; record.failures = 0;
     // A turn that asks the user for input remains a question notification even
     // if its runtime also reports completed. Do not add a second completion
     // notification when that same question is subsequently answered.

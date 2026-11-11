@@ -44,7 +44,7 @@ async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStr
     assert.equal(response.status, 201);
     const host = await response.json(); return { ...host, phone: await pair(host) };
   };
-  const connector = async (host, { capable = true } = {}) => {
+  const connector = async (host, { capable = true, readCapable = false } = {}) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/connector`, { headers: { authorization: 'Bearer ' + host.secret } });
     peers.push(ws);
     const messages = [], changed = new EventEmitter();
@@ -60,7 +60,7 @@ async function fixture({ enabled = true, sender, maxInFlight, maxNotificationStr
     };
     await once(ws, 'open');
     await wait(message => message.type === 'flow-probe');
-    ws.send(JSON.stringify({ type: 'capabilities', streamFlow: 2, ...(capable ? { taskNotifications: 1 } : {}) }));
+    ws.send(JSON.stringify({ type: 'capabilities', streamFlow: 2, ...(capable ? { taskNotifications: 1 } : {}), ...(readCapable ? { desktopNotificationRead: 1 } : {}) }));
     if (enabled && capable) await wait(message => message.type === 'notification-settings');
     const barrier = async () => { const pong = once(ws, 'pong'); ws.ping(); await pong; };
     await barrier();
@@ -187,7 +187,7 @@ test('notifications work from desktop host events without any phone SSE and cann
     assert.equal(f.deliveries[1].subscription.endpoint, sb.endpoint);
     assert.equal(f.deliveries[1].data.hostId, b.hostId);
     const scoped = await f.request('/api/notifications/status', { method: 'POST', data: { endpoint: sa.endpoint }, cookie: b.phone.cookie });
-    assert.deepEqual(await scoped.json(), { enabled: true, subscribed: false, publicKey: f.publicKeys.publicKey, desktopReady: true, monitorStatus: 'starting' });
+    assert.deepEqual(await scoped.json(), { enabled: true, subscribed: false, publicKey: f.publicKeys.publicKey, desktopReady: true, desktopReadSupported: false, desktopReadReady: false, monitorStatus: 'starting' });
     assert.equal(ca.messages.some(message => message.type === 'request'), false);
     assert.equal(cb.messages.some(message => message.type === 'request'), false);
   } finally { await f.close(); }
@@ -198,7 +198,7 @@ test('notification readiness distinguishes offline and legacy desktops and permi
   try {
     const host = await f.enroll(), sub = subscription();
     const status = async () => (await f.request('/api/notifications', { cookie: host.phone.cookie })).json();
-    assert.deepEqual({ ...await status(), publicKey: undefined }, { enabled: true, subscribed: false, publicKey: undefined, desktopReady: false, monitorStatus: 'offline' });
+    assert.deepEqual({ ...await status(), publicKey: undefined }, { enabled: true, subscribed: false, publicKey: undefined, desktopReady: false, desktopReadSupported: null, desktopReadReady: false, monitorStatus: 'offline' });
     assert.equal((await f.request('/api/notifications', { method: 'POST', data: { subscription: sub }, cookie: host.phone.cookie })).status, 409);
     const legacy = await f.connector(host, { capable: false });
     assert.equal((await status()).monitorStatus, 'unsupported');
@@ -598,4 +598,86 @@ for (const change of ['close', 'unsubscribe', 'revoke', 'clear']) test(`pending 
     await pending;
     assert.equal(f.deliveries.length, change === 'close' ? 1 : 0, 'close falls back; withdrawn pair/subscription/event cannot send after the await');
   } finally { await f.close(); }
+});
+
+
+test('phone desktop-read requests are capability-gated, host-scoped and never clear a reminder from an HTTP acknowledgement', { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const a = await f.enroll(), b = await f.enroll();
+    const pa = await f.connector(a, { readCapable: true }), pb = await f.connector(b, { readCapable: true });
+    for (const host of [a, b]) await f.request('/api/notifications', { method: 'POST', data: { subscription: subscription() }, cookie: host.phone.cookie });
+    const readiness = await (await f.request('/api/notifications', { cookie: a.phone.cookie })).json();
+    assert.equal(readiness.desktopReadReady, true); assert.equal(readiness.desktopReadSupported, true);
+    const notice = event();
+    const request = f.request('/api/notifications/read', { method: 'POST', cookie: a.phone.cookie, extra: { 'x-codex-expected-device': a.phone.deviceId }, data: { threadId: notice.threadId, eventId: notice.eventId } });
+    const forwarded = await pa.wait(message => message.type === 'notification-read');
+    assert.equal(forwarded.deviceId, a.phone.deviceId); assert.equal(forwarded.conversationId, notice.threadId); assert.equal(forwarded.eventId, notice.eventId);
+    assert.equal(pb.messages.some(message => message.type === 'notification-read'), false);
+    pb.ws.send(JSON.stringify({ type: 'response', id: forwarded.id, status: 'accepted' }));
+    pa.ws.send(JSON.stringify({ type: 'response', id: forwarded.id, status: 'accepted' }));
+    const response = await request;
+    assert.equal(response.status, 202); assert.deepEqual(await response.json(), { status: 'accepted' });
+    const clears = await f.request('/api/notifications/cleared', { cookie: a.phone.cookie, extra: { 'x-codex-expected-device': a.phone.deviceId } });
+    assert.deepEqual(await clears.json(), { cleared: [] }, 'only an actual desktop clear event may clear the phone reminder');
+  } finally { await f.close(); }
+});
+
+test('desktop-read rejects old connectors, malformed bodies, missing device pin and replaced devices before forwarding', { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const host = await f.enroll(), peer = await f.connector(host);
+    await f.request('/api/notifications', { method: 'POST', data: { subscription: subscription() }, cookie: host.phone.cookie });
+    const data = { threadId: randomUUID(), eventId: randomUUID() }, extra = { 'x-codex-expected-device': host.phone.deviceId };
+    const legacyReadiness = await f.request('/api/notifications', { cookie: host.phone.cookie }).then(response => response.json());
+    assert.equal(legacyReadiness.desktopReadReady, false); assert.equal(legacyReadiness.desktopReadSupported, false);
+    assert.equal((await f.request('/api/notifications/read', { method: 'POST', data, cookie: host.phone.cookie, extra })).status, 409);
+    peer.ws.send(JSON.stringify({ type: 'capabilities', taskNotifications: 1, desktopNotificationRead: 1 }));
+    await peer.wait(message => message.type === 'notification-settings', peer.messages.length);
+    assert.equal((await f.request('/api/notifications/read', { method: 'POST', data, cookie: host.phone.cookie })).status, 409);
+    for (const invalid of [{ ...data, extra: true }, { threadId: '../other', eventId: data.eventId }, { ...data, eventId: '' }, { ...data, eventId: 'x'.repeat(513) }, { threadId: data.threadId }]) {
+      assert.equal((await f.request('/api/notifications/read', { method: 'POST', data: invalid, cookie: host.phone.cookie, extra })).status, 400);
+    }
+    await f.pair(host);
+    assert.equal((await f.request('/api/notifications/read', { method: 'POST', data, cookie: host.phone.cookie, extra })).status, 401);
+    assert.equal(peer.messages.some(message => message.type === 'notification-read'), false);
+  } finally { await f.close(); }
+});
+
+test('desktop-read HTTP cancellation sends cancel-reply and ignores late connector results', { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const host = await f.enroll(), peer = await f.connector(host, { readCapable: true });
+    await f.request('/api/notifications', { method: 'POST', data: { subscription: subscription() }, cookie: host.phone.cookie });
+    const controller = new AbortController();
+    const request = fetch(f.base + '/api/notifications/read', { method: 'POST', signal: controller.signal, headers: { ...f.headers, cookie: host.phone.cookie, 'x-codex-expected-device': host.phone.deviceId }, body: JSON.stringify({ threadId: randomUUID(), eventId: randomUUID() }) });
+    const forwarded = await peer.wait(message => message.type === 'notification-read');
+    controller.abort(); await assert.rejects(request, error => error.name === 'AbortError');
+    await peer.wait(message => message.type === 'cancel-reply' && message.id === forwarded.id);
+    peer.ws.send(JSON.stringify({ type: 'response', id: forwarded.id, status: 'accepted' }));
+    const clears = await f.request('/api/notifications/cleared', { cookie: host.phone.cookie, extra: { 'x-codex-expected-device': host.phone.deviceId } });
+    assert.deepEqual(await clears.json(), { cleared: [] });
+  } finally { await f.close(); }
+});
+
+
+test('desktop-read readiness distinguishes unknown capability, explicit legacy and unsubscribed supported peers', { timeout: 10000 }, async () => {
+  const f = await fixture();
+  let pendingPeer;
+  try {
+    const host = await f.enroll();
+    const status = () => f.request('/api/notifications', { cookie: host.phone.cookie }).then(response => response.json());
+    assert.equal((await status()).desktopReadSupported, null);
+    pendingPeer = new WebSocket(f.base.replace('http:', 'ws:') + '/connector', { headers: { authorization: 'Bearer ' + host.secret } });
+    await once(pendingPeer, 'open');
+    assert.equal((await status()).desktopReadSupported, null, 'a connected socket is not a known legacy peer before capability discovery');
+    pendingPeer.send(JSON.stringify({ type: 'capabilities', taskNotifications: 1, desktopNotificationRead: 1 }));
+    const pong = once(pendingPeer, 'pong'); pendingPeer.ping(); await pong;
+    const supported = await status();
+    assert.equal(supported.desktopReadSupported, true); assert.equal(supported.desktopReadReady, false, 'supported but inactive monitoring is not ready');
+    await f.request('/api/notifications', { method: 'POST', data: { subscription: subscription() }, cookie: host.phone.cookie });
+    assert.equal((await status()).desktopReadReady, true);
+    pendingPeer.terminate(); await once(pendingPeer, 'close'); pendingPeer = null;
+    assert.equal((await status()).desktopReadSupported, null, 'disconnection loses current capability knowledge without falling back to legacy');
+  } finally { pendingPeer?.terminate(); await f.close(); }
 });

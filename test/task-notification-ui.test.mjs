@@ -12,7 +12,7 @@ const c = '55555555-5555-4555-8555-555555555555';
 let eventNumber = 0;
 const notification = (threadId, kind = 'completed', extra = {}) => ({ hostId, deviceId, threadId, kind, eventId: `fixture-event-${++eventNumber}`, ...extra });
 
-async function fixture() {
+async function fixture(options = {}) {
   const nodes = new Map(), documentListeners = new Map(), windowListeners = new Map(), settingsCalls = [], presence = [], timers = new Map();
   let document;
   class Element {
@@ -44,7 +44,7 @@ async function fixture() {
   const context = vm.createContext({ document, window, crypto: webcrypto, AbortController, TextDecoder, TextEncoder, URLSearchParams, Date,
     setTimeout(fn, ms) { const key = { unref() {} }; timers.set(key, { fn, ms }); return key; }, clearTimeout(key) { timers.delete(key); },
     localStorage: { getItem() { return null; }, removeItem() {}, setItem() {} }, sessionStorage: { removeItem() {} }, store: { read: async () => null },
-    fetch: async () => { throw new Error('This interaction fixture must not make a network request'); },
+    fetch: options.fetch ?? (async () => { throw new Error('This interaction fixture must not make a network request'); }),
   });
   const source = (await readFile(new URL('../public/desktop.js', import.meta.url), 'utf8')).replace("import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore())", 'Promise.resolve(store)');
   const run = code => vm.runInContext(code, context);
@@ -53,6 +53,7 @@ async function fixture() {
   const enable = new Element('button'); enable.hidden = true; nodes.set('#notification-enable', enable);
   settingsPanel.append(enable); settingsOverlay.append(settingsPanel); settingsOverlay.hidden = true;
   run(`historyScope={hostId:'${hostId}',deviceId:'${deviceId}'};currentDeviceId='${deviceId}';selectedId='${a}';scheduleVisibleStatusRefresh=()=>{};scheduleThreadConnect=()=>{};clearConversation=()=>{};beginStatusHandover=()=>{};`);
+  if (options.unknownDesktopRead !== true) window.setDesktopNotificationReadReady({ hostId, deviceId }, false, false);
   const data = { projects: [{ id: 'fixture-project', name: 'Fixture', expanded: false, threads: [{ id: a, title: 'Task A', status: 'idle' }, { id: b, title: 'Task B', status: 'idle' }] }], recent: [{ id: c, title: 'Task C', status: 'idle' }] };
   const render = value => { context.testData = value; run('renderThreadList(testData)'); };
   render(data);
@@ -442,4 +443,111 @@ test('a competing worker watermark or read receipt during put removes only the s
   f.notify(notification(b, 'question', { createdAt: 200 }));
   releaseOld({ stale: true }); await old;
   assert.equal(f.row(b).querySelector('.task-notification').textContent, '待回答');
+});
+
+
+test('opening a completed reminder requests desktop read once and waits for an exact desktop clear', async () => {
+  const requests = [], removes = [], receipts = []; let finish, catchups = 0;
+  const f = await fixture({ fetch: (url, request) => { if (url !== '/api/notifications/read') throw new Error('Unrelated fixture request'); requests.push({ url, ...request }); return new Promise(resolve => { finish = resolve; }); } });
+  f.window.taskReminderStore = { async put() {}, async remove(...args) { removes.push(args); }, async removeEvent(pair, event) { receipts.push(event); } };
+  f.window.syncClearedTaskNotifications = async () => { catchups++; };
+  f.run('pairingAvailable=true;refreshPairingStatus=async()=>{};loadThreads=async()=>{};refreshHostStatus=async()=>{}');
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  const event = notification(b, 'completed', { createdAt: 100 }); f.notify(event);
+  f.row(b).click(); f.row(b).click();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/api/notifications/read'); assert.equal(requests[0].method, 'POST');
+  assert.equal(requests[0].headers['x-codex-expected-device'], deviceId);
+  assert.deepEqual(JSON.parse(requests[0].body), { threadId: b, eventId: event.eventId });
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false); assert.equal(removes.length, 0);
+  f.run('updateComposer()'); f.visibility(true); f.visibility(false); f.notify(event);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'selection, visibility and duplicate current-task SSE cannot clear a pending desktop receipt');
+  // The preceding background transition cancels the navigation request.
+  finish({ ok: true }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(catchups, 0); assert.equal(receipts.length, 0);
+  f.row(b).click(); assert.equal(requests.length, 2); finish({ ok: true }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(catchups, 1); assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'HTTP acceptance is not a read receipt');
+  await f.window.clearTaskNotificationEvent(event);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true); assert.equal(receipts.at(-1).eventId, event.eventId);
+});
+
+test('desktop read failures retain the marker and retry, while old-client local behavior remains available', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: async (url, request) => { requests.push(request); return { ok: false }; } });
+  f.window.taskReminderStore = { async put() {}, async remove() {} };
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  const event = notification(b); f.notify(event); f.row(b).click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false); assert.match(f.row(b).querySelector('.task-notification').title, /重试/);
+  f.row(b).click(); await new Promise(resolve => setImmediate(resolve)); assert.equal(requests.length, 2);
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, false); f.run('updateComposer()'); f.row(b).click();
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'an offline previously capable desktop must not fall back to optimistic clearing');
+  assert.equal(requests.length, 2);
+  const legacy = await fixture(); legacy.window.setDesktopNotificationReadReady({ hostId, deviceId }, false, false);
+  legacy.notify(notification(b)); legacy.row(b).click(); assert.equal(legacy.row(b).querySelector('.task-notification').hidden, true);
+});
+
+test('desktop read applies only to user-opened completed reminders and does not replace question behavior or current-task quiet', async () => {
+  const requests = [], removes = [];
+  const f = await fixture({ fetch: async (url, request) => { requests.push(request); return { ok: true }; } });
+  f.window.taskReminderStore = { async put() {}, async remove(pair, id) { removes.push(id); }, async removeEvent() {} };
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  f.notify(notification(a)); assert.equal(f.row(a).querySelector('.task-notification').hidden, true); assert.equal(requests.length, 0);
+  f.notify(notification(b, 'question')); f.row(b).click(); assert.equal(f.row(b).querySelector('.task-notification').hidden, true); assert.equal(requests.length, 0);
+  f.run(`selectedId='${a}'`);
+  const restored = notification(a, 'completed', { createdAt: 100 });
+  f.window.taskReminderStore.list = async () => [restored]; await f.window.restoreTaskReminders();
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, false, 'an existing reminder hydrated in the selected task waits for a real user open');
+  assert.equal(requests.length, 0); f.row(a).click(); assert.equal(requests.length, 1);
+});
+
+test('quick task and pair switches cancel pending desktop reads, and an old clear cannot consume a newer completion', async () => {
+  const requests = [], completions = []; let catchups = 0;
+  const f = await fixture({ fetch: (url, request) => { requests.push(request); return new Promise(resolve => { completions.push(resolve); }); } });
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent() {} };
+  f.window.syncClearedTaskNotifications = async () => { catchups++; };
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  const old = notification(b, 'completed', { createdAt: 100 }); f.notify(old); f.row(b).click();
+  const newer = notification(b, 'completed', { createdAt: 200 }); f.notify(newer);
+  await f.window.clearTaskNotificationEvent(old);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  assert.equal(f.run(`taskNotifications.get('${b}').eventId`), newer.eventId);
+  f.row(c).click(); assert.equal(requests[0].signal.aborted, true);
+  completions[0]({ ok: true }); await new Promise(resolve => setImmediate(resolve)); assert.equal(catchups, 0);
+  f.row(b).click(); assert.equal(requests.length, 2); f.run('invalidateDeviceState()');
+  assert.equal(requests[1].signal.aborted, true); completions[1]({ ok: true }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(catchups, 0); assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').hidden, true);
+});
+
+
+test('unknown desktop capability retains a restored completed reminder until the initial status response arrives', async () => {
+  const requests = [];
+  const f = await fixture({ unknownDesktopRead: true, fetch: async (url, request) => { requests.push(request); return { ok: true }; } });
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async list() { return [notification(b, 'completed', { createdAt: 100 })]; } };
+  await f.window.restoreTaskReminders(); f.row(b).click(); f.run('updateComposer()');
+  assert.equal(requests.length, 0); assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, false);
+  f.run('updateComposer()'); assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'an offline or failed status check is not evidence of an old client');
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, false, false);
+  f.run('updateComposer()'); assert.equal(f.row(b).querySelector('.task-notification').hidden, true, 'only an explicitly unsupported legacy client restores the old local clearing behavior');
+});
+
+
+test('old local storage receipts cannot clear an exact completed marker awaiting desktop confirmation', async () => {
+  for (const inspection of [{ status: 'stale' }, { status: 'seen', stored: false }]) {
+    const f = await fixture(), removals = [];
+    f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+    f.window.taskReminderStore = { async put() {}, async removeEvent(pair, event) { removals.push(event); } };
+    const event = notification(b, 'completed', { createdAt: 100 }); f.notify(event);
+    f.window.taskReminderStore.inspectEvent = async () => inspection;
+    assert.equal(await f.window.taskNotificationReceipt(event), false);
+    assert.equal(f.row(b).querySelector('.task-notification').hidden, false); assert.equal(removals.length, 0);
+    await f.window.clearTaskNotificationEvent(event); assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  }
+  const f = await fixture(); let finish;
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  f.window.taskReminderStore = { put: () => new Promise(resolve => { finish = resolve; }) };
+  const event = notification(b, 'completed', { createdAt: 100 });
+  const receipt = f.window.taskNotificationReceipt(event);
+  finish({ stale: true }); assert.equal(await receipt, false);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'an older storage receipt cannot replace the desktop clear chain');
 });
