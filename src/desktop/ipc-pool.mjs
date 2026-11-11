@@ -67,7 +67,7 @@ export class DesktopIpcPool {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     const key = keyFor(id, host);
     if (lease.subscriptions.has(key)) throw new Error('Thread already subscribed');
-    const consumer = { lease, listener, key, awaitingSnapshot: true };
+    const consumer = { lease, listener, key, awaitingSnapshot: true, snapshotRequested: false, beforeSnapshotRequest };
     lease.subscriptions.set(key, consumer);
     try {
       // Admission belongs to the consumer. A sidebar wait must not hold the
@@ -78,10 +78,15 @@ export class DesktopIpcPool {
       const client = lease.transport;
       let entry = this.entries.get(key), existing = Boolean(entry);
       if (!entry) {
-        entry = { id, host, consumers: new Set(), client, off: null, pending: null, generation: 0, beforeSnapshotRequest };
+        entry = { id, host, consumers: new Set(), client, off: null, pending: null, generation: 0, snapshotRequested: false, snapshotPending: false };
         this.entries.set(key, entry);
       }
       entry.consumers.add(consumer); consumer.entry = entry;
+      // A baseline already on the wire is fresh for every waiting consumer.
+      // Share that response instead of asking Desktop to serialize it again.
+      if (existing && entry.snapshotPending) {
+        consumer.snapshotRequested = true; beforeSnapshotRequest?.();
+      }
       if (!existing) {
         entry.pending = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
         this.startSubscription(key, entry);
@@ -91,7 +96,10 @@ export class DesktopIpcPool {
       if (this.entries.get(key) !== entry || lease.subscriptions.get(key) !== consumer) throw unavailable();
       // Do not retain another complete history in the pool. The owner sends a
       // fresh snapshot for this thread, also preserving existing listeners.
-      if (existing) { beforeSnapshotRequest?.(); client.refreshSubscription(id, host); }
+      if (existing && !consumer.snapshotRequested) {
+        consumer.snapshotRequested = true; beforeSnapshotRequest?.();
+        entry.snapshotPending = true; client.refreshSubscription(id, host);
+      }
       return () => lease.subscriptions.get(key) === consumer && this.unsubscribe(lease, id, host);
     } catch (error) {
       if (lease.subscriptions.get(key) === consumer) this.unsubscribe(lease, id, host);
@@ -100,8 +108,10 @@ export class DesktopIpcPool {
   }
   startSubscription(key, entry) {
     const { id, host, client } = entry, generation = ++entry.generation;
+    entry.snapshotRequested = false; entry.snapshotPending = false;
     void client.subscribe(id, (change, source) => {
       if (this.entries.get(key) !== entry || this.client !== client || entry.generation !== generation) return;
+      if (change?.type === 'snapshot') entry.snapshotPending = false;
       for (const item of [...entry.consumers]) {
         if (item.lease.state !== 'ready' || item.lease.subscriptions.get(key) !== item) continue;
         if (item.awaitingSnapshot && change?.type !== 'snapshot') continue;
@@ -109,7 +119,14 @@ export class DesktopIpcPool {
         try { item.listener(change, source); }
         catch (error) { item.lease.emit('listenerError', error); }
       }
-    }, host, { beforeSnapshotRequest: entry.beforeSnapshotRequest }).then(off => {
+    }, host, { beforeSnapshotRequest: () => {
+      if (this.entries.get(key) !== entry || entry.generation !== generation) return;
+      entry.snapshotRequested = true; entry.snapshotPending = true;
+      for (const consumer of entry.consumers) {
+        if (consumer.snapshotRequested) continue;
+        consumer.snapshotRequested = true; consumer.beforeSnapshotRequest?.();
+      }
+    } }).then(off => {
       if (this.entries.get(key) !== entry || entry.generation !== generation) { off(); return; }
       entry.off = off; entry.resolve();
     }, error => {
@@ -120,7 +137,7 @@ export class DesktopIpcPool {
     lease.assertReady();
     const key = keyFor(id, host), entry = this.entries.get(key);
     if (!entry || !entry.consumers.size || !lease.subscriptions.has(key)) return false;
-    if (entry.off) return true;
+    if (entry.off || entry.snapshotRequested) return true;
     if (token != null && entry.recoveryToken === token) return true;
     entry.recoveryToken = token ?? Symbol('recovery');
     entry.client.unsubscribe(id, host);
@@ -196,6 +213,7 @@ class IpcLease extends EventEmitter {
         this.abort.signal.addEventListener('abort', cancelled, { once: true });
         probe.on('disconnect', cancelled);
         probe.on('ownerDisconnected', disconnectedOwner);
+        const pendingEntry = this.pool.entries.get(keyFor(id, 'local'));
         void probe.subscribe(id, (change, source) => {
           if (!armed || change?.type !== 'snapshot') return;
           if (source?.ownerId !== expectedOwnerId) return reject(unavailable());
@@ -204,6 +222,12 @@ class IpcLease extends EventEmitter {
           if (change.conversationState.remodexRemoved === true) return reject(unavailable());
           resolve({ revision: change.revision });
         }, 'local', { beforeSnapshotRequest: () => { armed = true; } }).catch(reject);
+        // Recovery discovery may already see the native owner while an older
+        // viewer discovery is still waiting for the router's absent-peer timeout.
+        // Replace only that read; an issued follow must keep its snapshot in flight.
+        if (pendingEntry && this.pool.entries.get(keyFor(id, 'local')) === pendingEntry && !pendingEntry.snapshotRequested) {
+          probe.refreshRecoveryDiscovery(id, 'local');
+        }
       });
       return await result;
     } finally {

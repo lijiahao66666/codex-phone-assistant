@@ -6,6 +6,16 @@ import { join } from 'node:path';
 import { desktopView } from './view.mjs';
 import { insidePath } from '../common/path-utils.mjs';
 
+// Recovery needs permission to attach, not a second projection of the messages.
+// Recheck the same index policy on every request; cached history is not proof
+// that the thread is still visible or that a phone-created id is authorized.
+export function isRecoverableHistoryThread(threadId, { codexHome = join(homedir(), '.codex'), phoneThreadIds = [] } = {}) {
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId)) throw new TypeError('Invalid thread');
+  const db = new DatabaseSync(join(codexHome, 'state_5.sqlite'), { readOnly: true });
+  try { return permittedRow(db, threadId, null, phoneThreadIds) !== null; }
+  finally { db.close(); }
+}
+
 // Rollout data is historical and must never authorize live control operations.
 export async function readRolloutHistory(threadId, { codexHome = join(homedir(), '.codex'), maxBytes = 16 * 1024 * 1024, parentThreadId = null, phoneThreadIds = [] } = {}) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) throw new TypeError('Invalid thread');

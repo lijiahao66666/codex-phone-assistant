@@ -5,7 +5,7 @@ import { trace } from '../desktop/diagnostics.mjs';
 import { createStreamDiagnostics } from '../common/stream-diagnostics.mjs';
 import { desktopView } from '../desktop/view.mjs';
 import { listDesktopThreads, ThreadListChanges } from '../desktop/thread-list.mjs';
-import { readRolloutHistory } from '../desktop/rollout-history.mjs';
+import { readRolloutHistory, isRecoverableHistoryThread } from '../desktop/rollout-history.mjs';
 import { UploadStore } from '../media/upload-store.mjs';
 import { ChunkUploads } from '../media/chunk-upload.mjs';
 import { mkdir, lstat } from 'node:fs/promises';
@@ -123,7 +123,7 @@ export async function populateThreadStatuses({ sidebarStatus, statusPriorities, 
 }
 
 // Only one authenticated relay is configured; no arbitrary local HTTP proxying.
-export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
+export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
   const target = new URL(url);
   if ((target.protocol !== 'wss:' && !(allowInsecureForTests && target.protocol === 'ws:' && target.hostname === '127.0.0.1')) || target.pathname !== '/connector' || target.search || target.hash || target.username || target.password) throw new Error('WSS connector URL required');
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
@@ -316,6 +316,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) return;
       if (connection !== ws || connection.readyState !== WebSocket.OPEN) return;
       if (msg.type === 'recover-chat') {
+        const recoveryStarted = performance.now();
         const request = { id: msg.id, deviceId: msg.deviceId, cancelled: false };
         writeReplies.set(msg.id, request);
         trace('recover', 'request', { thread: msg.conversationId, requestId: msg.requestId });
@@ -341,11 +342,12 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           const session = [...streams.values()].find(s => s.conversationId === msg.conversationId && s.uploadDeviceId === msg.deviceId);
           if (!session || writes.has(msg.conversationId)) throw new Error('unavailable');
           writes.add(msg.conversationId); locked = true;
-          const history = await readAuthorizedHistory(msg.conversationId);
-          if (cancelled() || ![...streams.values()].includes(session) || history?.id !== msg.conversationId) throw new Error('unavailable');
+          const permitted = await canRecoverHistory(msg.conversationId, phoneOptions());
+          if (cancelled() || ![...streams.values()].includes(session) || permitted !== true) throw new Error('unavailable');
+          trace('recover', 'authorized', { thread: msg.conversationId, elapsedMs: Math.round(performance.now() - recoveryStarted) });
           dispatched = true;
           await ownerRouter.route(msg.conversationId, { isCancelled: cancelled, deviceId: msg.deviceId, requestId: msg.requestId });
-          trace('recover', 'accepted', { thread: msg.conversationId });
+          trace('recover', 'accepted', { thread: msg.conversationId, elapsedMs: Math.round(performance.now() - recoveryStarted) });
           if (!ownerRouter.journal.finishRecoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId, 'accepted') && ownerRouter.journal.recoveryAttempt(hostId, msg.deviceId, msg.conversationId, msg.requestId) !== 'accepted') throw new Error('recovery outcome unknown');
           if (!cancelled()) {
             wakeSessions();

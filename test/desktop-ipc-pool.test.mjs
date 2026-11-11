@@ -302,3 +302,76 @@ test('owner or transport disconnection rejects an outstanding probe immediately'
     assert.equal(f.pool.entries.size, 0); assert.equal(f.pool.leases.size, 0);
   } finally { await f.close(); }
 });
+
+test('a fresh owner probe replaces stale pending discovery for every waiting consumer', async () => {
+  let heldDiscovery, discoveries = 0;
+  const f = await fixture({ onRequest({ socket, msg, reply }) {
+    if (msg.method === 'thread-owner-discovery' && ++discoveries === 1) {
+      heldDiscovery = () => reply(socket, msg); return true;
+    }
+  } });
+  try {
+    const main = await f.pool.acquire().connect(), peer = await f.pool.acquire().connect(), caller = await f.pool.acquire().connect();
+    const first = [], second = [];
+    const subscribing = main.subscribe('thread', change => first.push(change));
+    const joining = peer.subscribe('thread', change => second.push(change));
+    void subscribing.catch(() => {}); void joining.catch(() => {});
+    await until(() => heldDiscovery);
+    assert.equal((await caller.discover('thread')).ownerId, 'owner', 'a separate recovery discovery already sees the native owner');
+    assert.deepEqual(await caller.probeOwner('thread', 'owner', { timeout: 200 }), { revision: 1 });
+    await Promise.all([subscribing, joining]);
+    assert.deepEqual(first.map(change => change.type), ['snapshot']);
+    assert.deepEqual(second.map(change => change.type), ['snapshot']);
+    heldDiscovery(); await delay(10);
+    const follows = f.messages.filter(msg => msg.method === 'thread-stream-following-changed' && msg.params.following);
+    assert.equal(follows.length, 1, 'late old discovery cannot issue a second follow or snapshot');
+    assert.equal(f.pool.entries.get(JSON.stringify(['local', 'thread'])).consumers.size, 2);
+    assert.equal(f.connections, 1);
+    assert.equal(f.messages.some(msg => msg.method === 'thread-stream-following-changed' && !msg.params.following), false);
+  } finally { await f.close(); }
+});
+
+test('a probe shares an already requested first baseline without issuing another follow', async () => {
+  const f = await fixture({ onRequest({ msg }) {
+    if (msg.method === 'thread-stream-following-changed' && msg.params.following) return true;
+  } });
+  try {
+    const main = await f.pool.acquire().connect(), caller = await f.pool.acquire().connect();
+    const changes = [];
+    await main.subscribe('thread', change => changes.push(change));
+    await until(() => f.messages.some(msg => msg.method === 'thread-stream-following-changed' && msg.params.following));
+    const probing = caller.probeOwner('thread', 'owner', { timeout: 1000 });
+    void probing.catch(() => {});
+    await until(() => f.pool.entries.get(JSON.stringify(['local', 'thread'])).consumers.size === 2);
+    await delay(10);
+    assert.equal(f.messages.filter(msg => msg.method === 'thread-owner-discovery').length, 1);
+    assert.equal(f.messages.filter(msg => msg.method === 'thread-stream-following-changed' && msg.params.following).length, 1);
+    f.change([...f.sockets][0], 'thread');
+    assert.deepEqual(await probing, { revision: 1 });
+    assert.equal(changes.length, 1);
+    assert.equal(main.state, 'ready');
+  } finally { await f.close(); }
+});
+
+test('a restarted discovery still rejects an unexpected owner without removing the viewer', async () => {
+  let heldDiscovery, discoveries = 0;
+  const f = await fixture({ onRequest({ socket, msg, reply }) {
+    if (msg.method === 'thread-owner-discovery' && ++discoveries === 1) {
+      heldDiscovery = () => reply(socket, msg); return true;
+    }
+  } });
+  try {
+    const main = await f.pool.acquire().connect(), caller = await f.pool.acquire().connect();
+    const changes = [], subscribing = main.subscribe('thread', change => changes.push(change));
+    void subscribing.catch(() => {});
+    await until(() => heldDiscovery);
+    await assert.rejects(caller.probeOwner('thread', 'stale-owner', { timeout: 200 }), { code: 'unavailable' });
+    await subscribing;
+    assert.equal(changes.length, 1);
+    assert.equal(f.pool.entries.get(JSON.stringify(['local', 'thread'])).consumers.size, 1);
+    heldDiscovery(); await delay(10);
+    assert.equal(f.messages.filter(msg => msg.method === 'thread-stream-following-changed' && msg.params.following).length, 1);
+    assert.equal(main.state, 'ready');
+    assert.equal(f.messages.some(msg => msg.method === 'thread-stream-following-changed' && !msg.params.following), false);
+  } finally { await f.close(); }
+});

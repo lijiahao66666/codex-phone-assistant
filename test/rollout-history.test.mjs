@@ -1,10 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectRolloutHistory, readRolloutHistory } from '../src/desktop/rollout-history.mjs';
+import { projectRolloutHistory, readRolloutHistory, isRecoverableHistoryThread } from '../src/desktop/rollout-history.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+test('recovery authorizes from current thread metadata without opening or projecting message files', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'recovery-access-'));
+  const id = '12345678-1234-1234-1234-123456789012';
+  let db;
+  try {
+    db = new DatabaseSync(join(home, 'state_5.sqlite'));
+    db.exec('CREATE TABLE threads (id TEXT, rollout_path TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, thread_source TEXT)');
+    db.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, 0, ?, ?)').run(id, join(home, 'missing.jsonl'), 'Title', null, 'vscode', 'user');
+    const options = { codexHome: home };
+    assert.equal(isRecoverableHistoryThread(id, options), true, 'a valid indexed chat can attach before its history is available');
+    db.prepare('UPDATE threads SET archived=1').run();
+    assert.equal(isRecoverableHistoryThread(id, options), false, 'an earlier preview must not authorize an archived chat');
+    db.prepare('UPDATE threads SET archived=0, thread_source=NULL').run();
+    assert.equal(isRecoverableHistoryThread(id, options), false);
+    assert.equal(isRecoverableHistoryThread(id, { ...options, phoneThreadIds: [id] }), true);
+    assert.equal(isRecoverableHistoryThread(id, { ...options, phoneThreadIds: ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'] }), false);
+    for (const [source, threadSource] of [['cli', 'user'], ['vscode', 'subagent'], ['vscode', 'unknown']]) {
+      db.prepare('UPDATE threads SET source=?, thread_source=?').run(source, threadSource);
+      assert.equal(isRecoverableHistoryThread(id, { ...options, phoneThreadIds: [id] }), false);
+    }
+    db.prepare('UPDATE threads SET source=?, thread_source=?').run('vscode', 'agent_created_thread');
+    assert.equal(isRecoverableHistoryThread(id, options), true);
+    db.prepare('DELETE FROM threads').run();
+    assert.equal(isRecoverableHistoryThread(id, options), false);
+    assert.throws(() => isRecoverableHistoryThread('invalid', options), TypeError);
+    assert.throws(() => isRecoverableHistoryThread(id, { codexHome: join(home, 'missing') }));
+  } finally { db?.close(); await rm(home, { recursive: true, force: true }); }
+});
 
 test('subagent history requires its actual parent and a matching session file', async () => {
   const home = await mkdtemp(join(tmpdir(), 'subagent-history-'));
