@@ -13,7 +13,7 @@
     <Version>1.0.1</Version>
     <AssemblyVersion>1.0.1.0</AssemblyVersion>
     <FileVersion>1.0.1.0</FileVersion>
-    <UpdateBuildNumber>54</UpdateBuildNumber>
+    <UpdateBuildNumber>55</UpdateBuildNumber>
     <UpdateFeedUrl>https://codex.air-inc.top/download/windows/latest-manual.json</UpdateFeedUrl>
     <UpdatePublicKey>MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/w67b2seFuKYKIz3NUZDm/kov/H4iruzcQblSxkz+oryE4tNYlAyxtn51IB4Py2NZTuDyFfFstRdEiGOLskoeQ==</UpdatePublicKey>
     <UpdateReleaseNotesUrl>https://codex.air-inc.top/download/</UpdateReleaseNotesUrl>
