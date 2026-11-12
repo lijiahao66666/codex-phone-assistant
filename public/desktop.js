@@ -2599,6 +2599,7 @@ function acceptSidebarStatuses(value) {
   // The observer also retains running tasks outside the visible slots.
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 1024 || Object.entries(value).some(([id, state]) => !uuid.test(id) || !['active', 'idle', 'unknown'].includes(state))) return;
   sidebarStatusSnapshot = new Map(Object.entries(value));
+  for (const [id, state] of sidebarStatusSnapshot) if (state === 'active') clearCompletedWhenRunning(id);
   for (const [id, state] of sidebarStatusSnapshot) if (state === 'active' || state === 'idle') clearStatusHandover(id);
   for (const task of projectList.querySelectorAll?.('.task') || []) {
     const state = sidebarStatusSnapshot.get(task.dataset.id);
@@ -2699,6 +2700,7 @@ function chevronIcon() {
 }
 function updateLiveTaskStatus(id, status) {
   if (!id) return;
+  if (taskStatusIsActive(status)) clearCompletedWhenRunning(id);
   clearStatusHandover(id);
   if (taskStatusIsActive(status)) liveTaskStatus.set(id, 'active'); else liveTaskStatus.delete(id);
   for (const task of projectList.querySelectorAll('.task')) {
@@ -2922,6 +2924,20 @@ function clearTaskNotification(id, force = false) {
   const changed = taskNotifications.delete(id);
   if ((changed || force) && historyScope) void window.taskReminderStore?.remove(historyScope, id)?.catch(() => {});
   if (changed) refreshTaskNotificationIndicators();
+}
+// A confirmed active state supersedes only completion events already observed
+// for this exact pair. Keep questions, approvals, and newer distinct events.
+function clearCompletedWhenRunning(id) {
+  if (!historyScope || !uuid.test(id || '')) return;
+  // The native unread bit has no message watermark. Suppress this observed
+  // bit locally until an authoritative read followed by a new unread bit.
+  if (nativeUnreadVisible(id)) requestNativeUnreadRead(id, { navigate: false });
+  const pair = { ...historyScope };
+  const candidates = [taskNotifications.get(id), pendingTaskNotifications.get(id)?.notification];
+  for (const item of candidates) if (item?.kind === 'completed' && typeof item.eventId === 'string') {
+    const event = { ...item, ...pair, threadId: id };
+    trackTaskNotificationReceipt(event, window.clearTaskNotificationEvent(event, { exactOnly: true }));
+  }
 }
 function clearTaskNotifications() { cancelDesktopNotificationReads(); clearNativeUnreadState(); desktopNotificationReadScope = null; pendingDesktopNotificationReads.clear(); taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationWatermarks.clear(); taskNotificationReceipts.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
 window.clearTaskNotificationEvent = async (notification, { exactOnly = false } = {}) => {
@@ -3818,7 +3834,7 @@ function showState(view, live = true, loadingPreview = false, immediateWork = nu
   const oldScrollTop = conversation?.scrollTop;
   const running = (sourceView.turns || []).filter(turn => turn.status === 'inProgress' && uuid.test(turn.id || ''));
   activeTurnId = live && running.length === 1 ? running[0].id : null;
-  updateLiveTaskStatus(selectedId, live && (taskStatusIsActive(view.runtimeStatus) || running.length > 0 || Boolean(activeTurnId)) ? 'active' : 'unknown');
+  updateLiveTaskStatus(selectedId, live && (taskStatusIsActive(view.runtimeStatus) || running.length > 0 || Boolean(activeTurnId) || view.goal?.status === 'active') ? 'active' : 'unknown');
   if (selectedId && stops.has(selectedId) && stops.get(selectedId).turnId !== activeTurnId && !stops.get(selectedId).pending && !stops.get(selectedId).goalPauseFailed && (activeTurnId || !stops.get(selectedId).error)) stops.delete(selectedId);
   selectedTitle = view.title || selectedTitle || '未命名任务';
   title.textContent = selectedTitle;

@@ -304,22 +304,60 @@ test('completed task reminders render an empty labelled blue-dot marker while no
   assert.equal(f.window.openNotificationTask({ hostId, deviceId, threadId: hostId }), false);
 });
 
-test('running and checking states hide a retained completed dot; observed idle restores it and viewing clears it', async () => {
-  const f = await fixture(); const removes = [];
-  f.window.taskReminderStore = { async put() {}, async remove(pair, id) { removes.push(id); } };
-  f.notify(notification(b));
+for (const snapshot of [false, true]) test(`confirmed running clears only the exact earlier completion, while a later completion still appears (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const f = await fixture({ snapshot }); const removes = [];
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent(pair, event) { removes.push({ pair, event }); return { removed: true }; } };
+  const first = notification(b); f.notify(first);
   const dot = f.row(b).querySelector('.task-notification'), spinner = f.row(b).querySelector('.task-active');
   assert.equal(dot.hidden, false);
   f.run(`updateLiveTaskStatus('${b}','active')`);
   assert.equal(dot.hidden, true); assert.equal(spinner.hidden, false); assert.equal(f.group().notificationIndicator.hidden, true); assert.equal(f.group().indicator.hidden, false);
-  assert.equal(f.run(`taskNotifications.has('${b}')`), true); assert.deepEqual(removes, []);
+  assert.equal(f.run(`taskNotifications.has('${b}')`), false); assert.equal(removes[0].event.eventId, first.eventId);
   f.run(`updateLiveTaskStatus('${b}','idle')`);
-  assert.equal(dot.hidden, false); assert.equal(spinner.hidden, true); assert.equal(f.group().notificationIndicator.hidden, false); assert.equal(f.group().indicator.hidden, true);
+  assert.equal(dot.hidden, true); assert.equal(spinner.hidden, true);
+  const next = notification(b, 'completed', { eventId: 'later-completion', createdAt: 9999999999999 }); f.notify(next);
+  assert.equal(dot.hidden, false);
   f.run(`statusHandovers.set('${b}',{});applySidebarStatuses()`);
   assert.equal(dot.hidden, true); assert.equal(spinner.hidden, false); assert.equal(spinner.dataset.status, 'checking');
   f.run(`acceptSidebarStatuses({'${b}':'idle'})`);
   assert.equal(dot.hidden, false); assert.equal(spinner.hidden, true);
-  f.row(b).click(); assert.equal(dot.hidden, true); assert.equal(removes.at(-1), b);
+  f.row(b).click(); assert.equal(dot.hidden, true);
+});
+
+for (const snapshot of [false, true]) test(`running confirmation preserves pending actions and ignores unknown status (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const f = await fixture({ snapshot }); const removed = [];
+  f.window.taskReminderStore = { async put() {}, async removeEvent(pair, event) { removed.push(event); return { removed: true }; } };
+  f.notify(notification(b, 'completed')); f.run(`acceptSidebarStatuses({'${b}':'unknown'})`);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  f.notify(notification(b, 'question')); f.run(`acceptSidebarStatuses({'${b}':'active'})`);
+  assert.equal(f.row(b).querySelector('.task-notification').textContent, '待回答'); assert.equal(removed.length, 0);
+  f.notify(notification(b, 'approval')); f.run(`acceptSidebarStatuses({'${b}':'active'})`);
+  assert.equal(f.row(b).querySelector('.task-notification').textContent, '待审批'); assert.equal(removed.length, 0);
+});
+
+for (const snapshot of [false, true]) test(`late running confirmation clears the old event without consuming a newer event or another pairing (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const f = await fixture({ snapshot }); let finish; const removals = [];
+  f.window.taskReminderStore = { async put() {}, removeEvent(pair, event) { removals.push({ pair, event }); return new Promise(resolve => { finish = resolve; }); } };
+  const old = notification(b); f.notify(old);
+  f.run(`acceptSidebarStatuses({'${b}':'active'})`);
+  assert.equal(removals.length, 1); assert.equal(removals[0].event.eventId, old.eventId); assert.equal(removals[0].event.createdAt, undefined);
+  const newer = notification(b, 'completed', { eventId: 'newer-completion' }); f.notify(newer);
+  finish({ removed: true }); await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.run(`taskNotifications.get('${b}').eventId`), newer.eventId);
+  f.run(`clearTaskNotifications();historyScope={hostId:'${hostId}',deviceId:'${c}'};historyScopeGeneration++`);
+  assert.equal(f.run('taskNotifications.size'), 0); assert.equal(removals[0].pair.deviceId, deviceId);
+});
+
+for (const snapshot of [false, true]) test(`running suppresses native unread locally until a later observed read and unread (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const requests = []; const f = await fixture({ snapshot, fetch: async url => { requests.push(url); return { ok: true, json: async () => ({}) }; } });
+  const list = unread => ({ ...f.data, nativeUnread: { status: 'available', scopeKey: 'a'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: [{ id: a, title: 'Task A', status: 'idle' }, { id: b, title: 'Task B', status: 'idle', unread }] }] });
+  f.render(list(true)); assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  f.run(`acceptSidebarStatuses({'${b}':'active'})`); f.run(`acceptSidebarStatuses({'${b}':'idle'})`);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  f.render(list(true)); assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  f.run('listRequestGeneration++'); f.render(list(false));
+  f.run('listRequestGeneration++'); f.render(list(true)); assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  assert.equal(requests.some(url => String(url).includes('/desktop-read')), false);
 });
 
 test('pending questions and approvals use text instead of a simultaneous spinner and folded directory status follows that priority', async () => {
