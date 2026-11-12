@@ -773,7 +773,7 @@ for (const runtime of ['idle', 'active']) {
     try {
       const ready = new Promise(resolve => session.on('state', event => { if (event.status === 'ready') resolve(); }));
       session.start(); await ready;
-      await assert.rejects(session.sendText('test'), { code: 'unavailable' });
+      await assert.rejects(session.sendText('test'), { code: 'unavailable', reason: 'state-changed-before-write' });
       assert.equal(writes, 0);
     } finally { await session.close(); await f.close(); }
   });
@@ -794,6 +794,19 @@ test('control reports owner errors and does not retry timed-out writes', async (
     assert.equal(writes, 2);
     assert.equal(client.pending.size, 0);
   } finally { await client.close(); await f.close(); }
+});
+
+test('a refused inconsistent runtime reports a bounded diagnostic without dispatching the message', async () => {
+  const session = new DesktopSession({ conversationId: 'thread' });
+  session.status = 'ready';
+  session.conversation = { ownerId: 'owner', revision: 1, value: { id: 'thread', cwd: tmpdir(), threadRuntimeStatus: { type: 'idle' }, turns: [{ turnId: 'active', status: 'inProgress' }] } };
+  session.client = { startTurn() { assert.fail('cannot start from inconsistent state'); }, steerTurn() { assert.fail('cannot steer from inconsistent state'); } };
+  await assert.rejects(session.sendText('private input'), error => {
+    assert.deepEqual({ code: error.code, reason: error.reason, runtime: error.runtime, activeTurnCount: error.activeTurnCount },
+      { code: 'unsupported-state', reason: 'runtime-turn-mismatch', runtime: 'idle', activeTurnCount: 1 });
+    assert.equal(JSON.stringify(error).includes('private input'), false);
+    return true;
+  });
 });
 
 test('rejects changed or missing owner before sending a write frame', async () => {

@@ -124,15 +124,15 @@ export class DesktopSession extends EventEmitter {
 
   async #sendInput(input, idleOnly) {
     if (this.status !== 'ready' || !this.client || !this.value || this.value.id !== this.conversationId) {
-      throw Object.assign(new Error('Session unavailable'), { code: 'unavailable' });
+      throw Object.assign(new Error('Session unavailable'), { code: 'unavailable', reason: 'session-not-ready' });
     }
     const state = this.value;
     const expectedOwnerId = this.conversation.ownerId;
-    if (typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw Object.assign(new Error('Session unavailable'), { code: 'unavailable' });
+    if (typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw Object.assign(new Error('Session unavailable'), { code: 'unavailable', reason: 'owner-missing' });
     const client = this.client, revision = this.revision;
     const beforeWrite = () => this.status === 'ready' && this.client === client && this.revision === revision && this.conversation.ownerId === expectedOwnerId && this.value?.id === this.conversationId;
     const cwd = state.cwd;
-    if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw Object.assign(new Error('Invalid working directory'), { code: 'unsupported-state' });
+    if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw Object.assign(new Error('Invalid working directory'), { code: 'unsupported-state', reason: 'cwd-invalid' });
     const history = state.turnHistory?.kind === 'canonical' ? state.turnHistory.history : null;
     const turns = [...(Array.isArray(state.turns) ? state.turns : [])];
     if (history) {
@@ -153,7 +153,7 @@ export class DesktopSession extends EventEmitter {
     if (!idleOnly && state.threadRuntimeStatus?.type === 'active' && activeIds.size === 1) {
       return client.steerTurn(this.conversationId, input, { cwd, expectedOwnerId, beforeWrite });
     }
-    throw Object.assign(new Error('Thread state unsupported'), { code: 'unsupported-state' });
+    throw Object.assign(new Error('Thread state unsupported'), { code: 'unsupported-state', reason: 'runtime-turn-mismatch', runtime: ['active', 'idle'].includes(state.threadRuntimeStatus?.type) ? state.threadRuntimeStatus.type : 'unknown', activeTurnCount: activeIds.size });
   }
 
   start() {

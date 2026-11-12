@@ -5,6 +5,18 @@ import { pathToFileURL } from 'node:url';
 import { desktopView } from '../src/desktop/view.mjs';
 import { referencedMediaPaths } from '../src/media/media-resolver.mjs';
 
+test('shows a safe high-demand explanation when Desktop stores the error on the failed turn', () => {
+  const turn = { turnId: 'turn', status: 'failed', error: { message: 'We’re currently experiencing high demand, which may cause temporary errors.', additionalDetails: 'private details' }, items: [] };
+  const project = t => desktopView({ id: 'thread', turns: [t] }).turns[0].items;
+  assert.deepEqual(project(turn), [{ id: 'turn-error:high-demand', type: 'error', message: '服务当前繁忙，请稍后重试。' }]);
+  assert.equal(project({ ...turn, status: 'completed' }).length, 0);
+  assert.equal(project({ ...turn, error: { message: 'unrelated private error' } }).length, 0);
+  const existing = project({ ...turn, items: [{ id: 'already', type: 'error', message: 'high demand' }] });
+  assert.equal(existing.length, 1);
+  const collision = project({ ...turn, items: [{ id: 'turn-error:high-demand', type: 'agentMessage', text: 'existing' }] });
+  assert.equal(collision[1].id, 'turn-error:high-demand:');
+});
+
 test('projects native effort only when collaboration settings omit it, preserving explicit default', () => {
   const state = { id: 'thread', latestReasoningEffort: 'high', latestCollaborationMode: { mode: 'default', settings: { model: 'model' } } };
   assert.equal(desktopView(state).reasoningEffort, 'high');

@@ -37,6 +37,11 @@ const final = { id: 'a', type: 'agentMessage', phase: 'final_answer', text: '收
 const emptyReasoning = { id: 'r', type: 'reasoning', summary: [] };
 
 for (const mode of ['live', 'history', 'agent-history']) {
+  if (mode !== 'agent-history') test(`${mode}: a failed turn shows the projected service error`, async () => {
+    const f = await fixture();
+    const rendered = descendants(f.render({ id: 'turn', status: 'failed', items: [{ id: 'error', type: 'error', message: '服务当前繁忙，请稍后重试。' }] }, mode));
+    assert.ok(rendered.some(node => node.textContent === '服务当前繁忙，请稍后重试。'));
+  });
   test(`${mode}: a simple response with empty reasoning has no empty work or thinking disclosure`, async () => {
     for (const summary of [[], [' ', '\n'], undefined]) {
       const f = await fixture();

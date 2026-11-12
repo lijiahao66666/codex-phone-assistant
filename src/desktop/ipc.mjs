@@ -109,10 +109,10 @@ export class DesktopIpc extends EventEmitter {
     if (typeof expectedOwnerId !== 'string' || !expectedOwnerId) throw new TypeError('expectedOwnerId required');
     if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
     const { ownerId } = await this.discover(conversationId, 'local', { signal });
-    if (ownerId !== expectedOwnerId) throw Object.assign(new Error('Thread owner changed'), { code: 'unavailable' });
+    if (ownerId !== expectedOwnerId) throw Object.assign(new Error('Thread owner changed'), { code: 'unavailable', reason: 'owner-changed' });
     if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
     if (this.state !== 'ready') throw new Error('IPC not ready');
-    if (beforeWrite && !(await beforeWrite())) throw Object.assign(new Error('Thread state changed'), { code: 'unavailable' });
+    if (beforeWrite && !(await beforeWrite())) throw Object.assign(new Error('Thread state changed'), { code: 'unavailable', reason: 'state-changed-before-write' });
     if (signal?.aborted) throw Object.assign(new Error('Caller closed'), { code: 'unavailable' });
     if (this.state !== 'ready') throw new Error('IPC not ready');
     const response = await this.#request(method, { conversationId, ...params }, { version, targetClientId: ownerId });

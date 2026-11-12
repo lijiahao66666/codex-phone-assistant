@@ -767,7 +767,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           } else { submitted = true; await session.sendText(msg.text); }
           answer('accepted');
         }
-        catch (error) { if (!submitted || ['unavailable', 'unsupported-state'].includes(error?.code)) { for (const item of claimed) await item.store.discardRejected(item.scope).catch(() => {}); sentRevisions.delete(id); rejectWrite(submitted ? 'session-rejected' : 'pre-dispatch'); } else answer('unknown'); }
+        catch (error) { if (!submitted || ['unavailable', 'unsupported-state'].includes(error?.code)) { for (const item of claimed) await item.store.discardRejected(item.scope).catch(() => {}); sentRevisions.delete(id); if (submitted) trace('write', 'session-rejected-detail', { thread: id, code: ['unavailable', 'unsupported-state'].includes(error?.code) ? error.code : 'other', reason: ['session-not-ready', 'owner-missing', 'cwd-invalid', 'runtime-turn-mismatch', 'owner-changed', 'state-changed-before-write'].includes(error?.reason) ? error.reason : 'other', ...(error?.reason === 'runtime-turn-mismatch' ? { runtime: error.runtime, activeTurnCount: error.activeTurnCount } : {}) }); rejectWrite(submitted ? 'session-rejected' : 'pre-dispatch'); } else answer('unknown'); }
         finally { finishClaims?.(); writes.delete(id); }
         return;
       }

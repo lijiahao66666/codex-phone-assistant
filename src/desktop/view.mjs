@@ -54,7 +54,7 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     ...(viewKeys ? { viewKey: viewKeys[index] } : {}),
     status: typeof turn.status === 'string' ? turn.status : 'unknown',
     startedAt: turn.turnStartedAtMs ?? null,
-    items: orderSteeringMessages(turnDisplayItems(turn, index)).filter(item => (item?.type !== 'steeringUserMessage' || !item.serverUserMessageId || !userMessageIds.has(item.serverUserMessageId)) && !emptyCompletedWait(item)).map(item => displayItem(item, imageHandles, mediaHandles, turn.remodexOptimisticPendingTurn === true)),
+    items: projectedTurnItems(turn, index, userMessageIds, imageHandles, mediaHandles),
   }));
   const view = { turns: viewTurns, history: { complete, reason } };
   const questionTurns = registerAsyncQuestionHistory(view, state);
@@ -105,6 +105,23 @@ export function desktopView(state, { imageHandles = new Map(), mediaHandles = ne
     // Keep only the request identity and method until each response contract is verified.
     requests: Array.isArray(state.requests) ? state.requests.filter(request => request?.completed !== true).map(request => inspectApproval(request, state.id) || inspectUserInput(request, state.id) || ({ id: request?.id, method: request?.method })).filter(request => request.id !== undefined) : [],
   });
+}
+
+function projectedTurnItems(turn, index, userMessageIds, imageHandles, mediaHandles) {
+  const items = orderSteeringMessages(turnDisplayItems(turn, index)).filter(item =>
+    (item?.type !== 'steeringUserMessage' || !item.serverUserMessageId || !userMessageIds.has(item.serverUserMessageId)) && !emptyCompletedWait(item))
+    .map(item => displayItem(item, imageHandles, mediaHandles, turn.remodexOptimisticPendingTurn === true));
+  // Desktop stores this upstream error on the turn rather than in its items.
+  // Expose a fixed explanation without forwarding arbitrary error details.
+  if (turn.status === 'failed' && typeof turn.error?.message === 'string'
+      && /currently experiencing high demand/i.test(turn.error.message)
+      && !items.some(item => item.type === 'error' && /high demand|服务.*繁忙/i.test(item.message || ''))) {
+    const ids = new Set(items.map(item => item.id));
+    let id = 'turn-error:high-demand';
+    while (ids.has(id)) id += ':';
+    items.push({ id, type: 'error', message: '服务当前繁忙，请稍后重试。' });
+  }
+  return items;
 }
 
 function inputIdentity(content) {
