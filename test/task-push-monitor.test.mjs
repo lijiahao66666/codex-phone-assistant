@@ -62,6 +62,25 @@ test('initial snapshot is baseline; live task completion emits once and releases
   } finally { await f.monitor.close(); }
 });
 
+test('activity-only probes discover older owners on demand and release even active followers', async () => {
+  const older = randomUUID(), f = fixture({ activityProbes: true, initialProbeLimit: 1 });
+  f.rows.push({ id: older, recency: 0 }); f.monitor.start(); await flush();
+  try {
+    assert.equal(f.sessions.length, 1);
+    f.sessions[0].publish(state(threadId, turn('turn-a'))); await flush();
+    assert.equal(f.sessions[0].closed, true);
+    f.monitor.requestActivityProbes([older]); await flush();
+    assert.equal(f.sessions.length, 2);
+    f.sessions[1].publish(state(older, turn('older'))); await flush();
+    assert.equal(f.sessions[1].closed, true);
+    assert.equal(f.monitor.records.get(older).summary.active, true);
+    assert.deepEqual(f.events, []);
+  } finally { await f.monitor.close(); }
+  const normal = fixture({ initialProbeLimit: 1 }); normal.rows.push({ id: older, recency: 0 }); normal.monitor.start(); await flush();
+  try { normal.monitor.requestActivityProbes([older]); await flush(); assert.equal(normal.sessions.length, 1); }
+  finally { await normal.monitor.close(); }
+});
+
 test('recency changes reopen a normally released idle thread and detect completion between polls', async () => {
   const f = fixture(); f.monitor.start(); await flush();
   try {

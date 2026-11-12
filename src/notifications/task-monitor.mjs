@@ -130,14 +130,28 @@ function isAsyncControl(eventId) {
 }
 
 export class TaskNotificationMonitor {
-  constructor({ hostId = 'local', createSession = options => new DesktopSession(options), createProbeClient = () => desktopIpcPool.acquire(), readState = readDesktopReadState, openThread = openDesktopThread, desktopReadTimeoutMs = 3000, listThreads = listDesktopThreads, onEvent = () => {}, onClear = () => {}, onHealth = () => {}, now = Date.now, pollMs = 5000, coalesceMs = 250, snapshotTimeoutMs = 15000, retryMs = 30000, maxActive = 64, concurrency = 2, discoveryConcurrency = 8, probesPerPoll = 64, initialProbeLimit = 64, maxQueued = 128, maxRecords = 10000 } = {}) {
+  constructor({ hostId = 'local', createSession = options => new DesktopSession(options), createProbeClient = () => desktopIpcPool.acquire(), readState = readDesktopReadState, openThread = openDesktopThread, desktopReadTimeoutMs = 3000, listThreads = listDesktopThreads, onEvent = () => {}, onClear = () => {}, onHealth = () => {}, now = Date.now, pollMs = 5000, coalesceMs = 250, snapshotTimeoutMs = 15000, retryMs = 30000, maxActive = 64, concurrency = 2, discoveryConcurrency = 8, probesPerPoll = 64, initialProbeLimit = 64, maxQueued = 128, maxRecords = 10000, activityProbes = false } = {}) {
     for (const [name, value] of Object.entries({ pollMs, coalesceMs, snapshotTimeoutMs, retryMs, maxActive, concurrency, discoveryConcurrency, probesPerPoll, initialProbeLimit, maxQueued, maxRecords })) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`Invalid ${name}`);
     if (concurrency > maxActive || discoveryConcurrency > 8 || maxActive > 256 || initialProbeLimit > 256 || maxQueued > 1024 || maxRecords > 50000 || typeof createSession !== 'function' || typeof createProbeClient !== 'function' || typeof readState !== 'function' || typeof listThreads !== 'function' || typeof onEvent !== 'function' || typeof onClear !== 'function' || typeof onHealth !== 'function') throw new TypeError('Invalid monitor configuration');
     Object.assign(this, { hostId, createSession, createProbeClient, readState, listThreads, onEvent, onClear, onHealth, now, pollMs, coalesceMs, snapshotTimeoutMs, retryMs, maxActive, concurrency, discoveryConcurrency, probesPerPoll, initialProbeLimit, maxQueued, maxRecords });
     if (typeof openThread !== 'function' || !Number.isSafeInteger(desktopReadTimeoutMs) || desktopReadTimeoutMs < 1 || desktopReadTimeoutMs > 10000) throw new TypeError('Invalid desktop read configuration');
     this.openThread = openThread; this.desktopReadTimeoutMs = desktopReadTimeoutMs;
+    if (typeof activityProbes !== 'boolean') throw new TypeError('Invalid activity probe configuration');
+    this.activityProbes = activityProbes;
     this.records = new Map(); this.entries = new Map(); this.queue = new Map(); this.probing = new Map(); this.ready = new Map();
     this.generation = 0; this.running = false; this.budget = 0; this.healthSignature = null;
+  }
+
+  // Reserved for the non-notifying, short-lived activity observer. The normal
+  // notification monitor never probes extra historical owners on request.
+  requestActivityProbes(ids) {
+    if (!this.activityProbes || !this.running || !Array.isArray(ids) || ids.length > 32 || ids.some(id => !validId(id))) return;
+    for (const id of ids) {
+      const record = this.records.get(id);
+      if (!record || this.entries.has(id) || this.probing.has(id) || this.ready.has(id) || this.queue.has(id) || record.retryAt > this.now()) continue;
+      record.needsProbe = true; this.#enqueue(id, record.recency);
+    }
+    this.#pump();
   }
 
   start() {
@@ -462,7 +476,7 @@ export class TaskNotificationMonitor {
       if (summary.turnId && !summary.controls.length && !record.emittedControls?.size && record.questionTurnId !== summary.turnId && summary.status === 'completed' && (observedCompletion || newCompletedTurn)) this.#event(id, { kind: 'completed', eventId: eventKey('completed', id, summary.turnId) });
     }
     record.forceBaseline = false; record.liveAfter = null;
-    if (!summary.active) { this.#release(id); this.#pump(); }
+    if (!summary.active || this.activityProbes) { this.#release(id); this.#pump(); }
     if (firstSummary || previous?.active !== summary.active) this.#reportReadiness();
   }
 
