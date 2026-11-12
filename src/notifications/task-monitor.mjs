@@ -197,7 +197,7 @@ export class TaskNotificationMonitor {
     const previousCompleteListAt = this.lastCompleteListAt;
     this.pollIssue = false;
     try {
-      await this.#readReceipts(generation);
+      await this.refreshReadReceipts();
       if (!this.running || generation !== this.generation) return;
       const { rows, complete } = await this.#list();
       if (!this.running || generation !== this.generation) return;
@@ -256,6 +256,26 @@ export class TaskNotificationMonitor {
     record.retryAt = this.now() + Math.min(300000, this.retryMs * 2 ** Math.min(record.failures - 1, 20));
   }
 
+  // A state-file change can arrive while a periodic sample is still being
+  // read. Serialize samples and retain one trailing read for all changes that
+  // occurred in flight; otherwise an old snapshot can overwrite a newer one.
+  refreshReadReceipts() {
+    if (!this.running) return Promise.resolve();
+    if (this.receiptScan) { this.receiptScan.dirty = true; return this.receiptScan.promise; }
+    const scan = { generation: this.generation, dirty: false, promise: null };
+    this.receiptScan = scan;
+    let resolveScan, rejectScan;
+    scan.promise = new Promise((resolve, reject) => { resolveScan = resolve; rejectScan = reject; })
+      .finally(() => { if (this.receiptScan === scan) this.receiptScan = null; });
+    void (async () => {
+      do {
+        scan.dirty = false;
+        await this.#readReceipts(scan.generation);
+      } while (this.running && this.generation === scan.generation && scan.dirty);
+    })().then(resolveScan, rejectScan);
+    return scan.promise;
+  }
+
   async #readReceipts(generation) {
     // A read may capture native state before its Promise settles. Only use
     // that sample for completion events already present when the scan began.
@@ -274,7 +294,10 @@ export class TaskNotificationMonitor {
       if (!valid || !previous || previous.scopeKey !== current.scopeKey) record.unreadSeen = null;
       const event = record.latestEvent;
       const observed = observedEvents.get(id);
-      if (!valid || observed?.record !== record || observed.event !== event) continue;
+      // An event followed under one Desktop identity cannot be acknowledged
+      // using a different identity's unread collection, even if the thread ID
+      // appears in both scopes.
+      if (!valid || record.readScopeKey !== current.scopeKey || observed?.record !== record || observed.event !== event) continue;
       if (current.unreadThreadIds.has(id)) {
         // The unread observation must postdate this exact completion event.
         // An older turn's unread bit cannot acknowledge a newer completion.
@@ -487,6 +510,7 @@ export class TaskNotificationMonitor {
 
   async close() {
     this.running = false; ++this.generation; clearInterval(this.timer); this.timer = null;
+    this.receiptScan = null;
     this.nativeReadState = null;
     const probes = [...this.probing.values()];
     for (const probe of probes) probe.abort.abort();

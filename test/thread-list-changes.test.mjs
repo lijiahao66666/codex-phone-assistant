@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ThreadListChanges, listDesktopThreads } from '../src/desktop/thread-list.mjs';
 import { createPairRelay } from '../src/relay/server.mjs';
@@ -90,7 +90,28 @@ test('desktop list changes cross connector and relay SSE before a phone reloads 
     assert.equal(listReads, 0, 'the watcher never queries the complete list');
     const list = await (await fetch(base + '/api/threads', { headers: { ...headers, cookie } })).json();
     assert.equal(list.recent[0].id, threadId);
+    assert.deepEqual(list.nativeUnread, { status: 'unavailable' });
     assert.equal(listReads, 1);
+    const identity = { accountId: 'fixture-account', userId: 'fixture-user' };
+    const identityKey = createHash('sha256').update(JSON.stringify(['chatgpt', identity.accountId, identity.userId])).digest('hex');
+    const native = { 'electron-persisted-atom-state': { 'local-document-identity': identity },
+      'electron-thread-read-state-v1': { unreadByIdentity: { [identityKey]: { [`local:${'a'.repeat(64)}`]: [threadId] } } } };
+    events = '';
+    await writeFile(join(dir, '.codex-global-state.json'), JSON.stringify(native));
+    await until(() => events.includes('event: thread-list-changed'), 'unread change reaches the paired phone');
+    const unread = await (await fetch(base + '/api/threads', { headers: { ...headers, cookie } })).json();
+    assert.equal(unread.nativeUnread.status, 'available');
+    assert.match(unread.nativeUnread.scopeKey, /^[a-f0-9]{64}$/);
+    assert.equal(unread.nativeUnread.snapshotKey, undefined);
+    assert.equal(unread.recent[0].unread, true);
+    assert.equal((await fetch(base + '/api/threads', { headers })).status, 401, 'unpaired callers cannot read the native state');
+    events = '';
+    native['electron-thread-read-state-v1'].unreadByIdentity[identityKey][`local:${'a'.repeat(64)}`].push(null);
+    await writeFile(join(dir, '.codex-global-state.json'), JSON.stringify(native));
+    await until(() => events.includes('event: thread-list-changed'), 'invalid native state refresh reaches the paired phone');
+    const invalid = await (await fetch(base + '/api/threads', { headers: { ...headers, cookie } })).json();
+    assert.deepEqual(invalid.nativeUnread, { status: 'unavailable' });
+    assert.equal(invalid.recent[0].unread, undefined);
     await reader.cancel(); await reading;
     await until(() => watcher.timer === null, 'last sidebar disconnect stops the watcher');
   } finally {

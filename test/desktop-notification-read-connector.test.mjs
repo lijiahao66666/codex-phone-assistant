@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import { createPreviewConnector } from '../src/transport/preview-connector.mjs';
 
@@ -13,13 +13,14 @@ async function until(check) {
   const until = Date.now() + 2000;
   while (!check()) { if (Date.now() >= until) throw new Error('Expected connector result not received'); await new Promise(resolve => setTimeout(resolve, 5)); }
 }
-async function fixture({ listThreads = async () => listed(), readOnDesktop = async () => ({ read: true }) } = {}) {
+async function fixture({ listThreads = async () => listed(), readOnDesktop = async () => ({ read: true }), threadListChangesForTests } = {}) {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(server, 'listening');
   const pending = once(server, 'connection'), calls = [], monitors = [], messages = [];
   const connector = createPreviewConnector({ url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId,
-    allowInsecureForTests: true, listThreads,
+    allowInsecureForTests: true, listThreads, threadListChangesForTests,
     createNotificationMonitorForTests: options => {
       const monitor = { options, start() { return this; }, async close() { this.closed = true; },
+        async refreshReadReceipts() { this.refreshes = (this.refreshes || 0) + 1; },
         async readOnDesktop(event, context) { calls.push({ event, context, cancelledAtStart: context.isCancelled() }); return readOnDesktop(event, context); },
       }; monitors.push(monitor); return monitor;
     },
@@ -48,6 +49,26 @@ test('connector advertises desktop-read and authorizes the listed thread before 
     assert.equal(f.calls[0].cancelledAtStart, false);
     assert.equal(f.messages.some(message => message.type === 'task-notification-clear'), false, 'the HTTP response must not synthesize an unread clear');
   } finally { await f.close(); }
+});
+
+test('notification monitoring keeps the shared watcher alive without a phone sidebar and detaches it on disable or disconnect', async () => {
+  const watcher = Object.assign(new EventEmitter(), { running: false, starts: 0, stops: 0,
+    start() { if (!this.running) { this.running = true; this.starts++; } },
+    stop() { if (this.running) { this.running = false; this.stops++; } },
+  });
+  let lists = 0;
+  const f = await fixture({ threadListChangesForTests: watcher, listThreads: async () => { lists++; return listed(); } });
+  try {
+    await f.enable(); assert.equal(watcher.running, true); assert.equal(watcher.listenerCount('change'), 1);
+    watcher.emit('change', { version: 1 }); await flush();
+    assert.equal(f.monitors[0].refreshes, 1); assert.equal(lists, 0, 'watcher signals do not request a full list');
+    f.send({ type: 'notification-settings', enabled: false }); await f.barrier();
+    assert.equal(watcher.running, false); assert.equal(watcher.listenerCount('change'), 0);
+    watcher.emit('change', { version: 2 }); await flush(); assert.equal(f.monitors[0].refreshes, 1);
+    f.send({ type: 'notification-settings', enabled: true }); await until(() => f.monitors.length === 2);
+    assert.equal(watcher.running, true); assert.equal(watcher.listenerCount('change'), 1);
+  } finally { await f.close(); }
+  assert.equal(watcher.running, false); assert.equal(watcher.listenerCount('change'), 0);
 });
 
 test('connector refuses desktop-read without a running monitor or a freshly authorized listed thread', async () => {

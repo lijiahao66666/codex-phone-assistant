@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathKey, sameOrInside } from '../common/path-utils.mjs';
+import { projectDesktopReadState } from './read-state.mjs';
 
 // Check the index version, not the complete list. Keep the same read-only
 // connection: SQLite data_version is only comparable on one connection.
@@ -63,17 +64,6 @@ export class ThreadListChanges extends EventEmitter {
   }
 }
 
-function unreadLocalThreads(state) {
-  const identity = state['electron-persisted-atom-state']?.['local-document-identity'];
-  if (typeof identity?.accountId !== 'string' || !identity.accountId || typeof identity?.userId !== 'string' || !identity.userId) return null;
-  const key = createHash('sha256').update(JSON.stringify(['chatgpt', identity.accountId, identity.userId])).digest('hex');
-  const hosts = state['electron-thread-read-state-v1']?.unreadByIdentity?.[key];
-  if (!hosts || typeof hosts !== 'object' || Array.isArray(hosts)) return null;
-  const localKeys = Object.keys(hosts).filter(host => /^local:[a-f0-9]{64}$/.test(host));
-  if (localKeys.length !== 1 || !Array.isArray(hosts[localKeys[0]])) return null;
-  return new Set(hosts[localKeys[0]].filter(id => typeof id === 'string'));
-}
-
 // This reads desktop-owned indexes; neither file is modified or opened for writing.
 export async function listDesktopThreads({ codexHome = join(homedir(), '.codex'), limit = 200, before = null, includeRecency = false, phoneThreadIds = [] } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new TypeError('invalid limit');
@@ -95,7 +85,16 @@ export async function listDesktopThreads({ codexHome = join(homedir(), '.codex')
   const projects = state['local-projects'] || {};
   const assignments = state['thread-project-assignments'] || {};
   const desktopUi = state['electron-persisted-atom-state'] || {};
-  const unread = unreadLocalThreads(state);
+  const readState = projectDesktopReadState(state);
+  const unread = readState.status === 'available' ? readState.unreadThreadIds : null;
+  // Pagination reads the Desktop file afresh for each page. A digest of the
+  // entire native set lets the aggregator reject a mixed snapshot, even if
+  // its identity scope stayed the same. It is internal to the connector and
+  // is never included in the public aggregate.
+  const nativeUnread = unread
+    ? { status: 'available', scopeKey: readState.scopeKey,
+        snapshotKey: createHash('sha256').update(JSON.stringify([...unread].sort())).digest('hex') }
+    : { status: 'unavailable' };
   const grouped = new Map();
   const recent = [];
   const projectless = new Set(Array.isArray(state['projectless-thread-ids']) ? state['projectless-thread-ids'] : []);
@@ -137,5 +136,5 @@ export async function listDesktopThreads({ codexHome = join(homedir(), '.codex')
     return (ai < 0 ? Infinity : ai) - (bi < 0 ? Infinity : bi);
   });
   const last = rows.at(-1);
-  return { projects: ordered, recent, nextCursor: more && last ? { recency: last.recency, id: last.id } : null };
+  return { projects: ordered, recent, nextCursor: more && last ? { recency: last.recency, id: last.id } : null, nativeUnread };
 }

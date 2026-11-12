@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { TaskNotificationMonitor, taskNotificationSummary } from '../src/notifications/task-monitor.mjs';
+import { ThreadListChanges } from '../src/desktop/thread-list.mjs';
+import { readDesktopReadState } from '../src/desktop/read-state.mjs';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const fakeProbeClient = () => ({ async connect() {}, async discover() { return { ownerId: 'fixture-owner' }; }, async close() {} });
@@ -468,6 +474,99 @@ test('desktop read clears only an emitted completion after a continuous valid sa
   } finally { await f.monitor.close(); }
 });
 
+test('state-change receipt refresh clears an observed desktop read without fetching the task list', async () => {
+  let receipt = nativeRead('scope-a'), lists = 0;
+  const f = fixture({ readState: async () => receipt, listThreads: async () => { lists++; return { recent: [{ id: threadId, recency: 1 }], projects: [] }; } });
+  f.monitor.start(); await flush();
+  try {
+    const s = f.sessions[0]; s.publish(state(threadId, turn('live'))); s.publish(state(threadId, turn('live', 'completed')));
+    const before = lists;
+    receipt = nativeRead('scope-a', [threadId]); await f.monitor.refreshReadReceipts();
+    receipt = nativeRead('scope-a'); await f.monitor.refreshReadReceipts();
+    assert.deepEqual(f.clears.map(event => event.eventId), [f.events[0].eventId]);
+    assert.equal(lists, before, 'a state-change signal never walks the thread list');
+  } finally { await f.monitor.close(); }
+});
+
+test('real file watcher drives same-scope native unread-to-read confirmation without a list scan', { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phone-native-read-watch-'));
+  const db = new DatabaseSync(join(dir, 'state_5.sqlite'));
+  db.exec('CREATE TABLE threads (id TEXT)'); db.close();
+  const identity = { accountId: 'watch-fixture', userId: 'watch-user' };
+  const identityKey = createHash('sha256').update(JSON.stringify(['chatgpt', identity.accountId, identity.userId])).digest('hex');
+  const hostKey = `local:${'a'.repeat(64)}`;
+  const stateFile = join(dir, '.codex-global-state.json');
+  const native = { 'electron-persisted-atom-state': { 'local-document-identity': identity }, 'electron-thread-read-state-v1': { unreadByIdentity: { [identityKey]: { [hostKey]: [] } } } };
+  await writeFile(stateFile, JSON.stringify(native));
+  let lists = 0;
+  const f = fixture({ readState: () => readDesktopReadState({ codexHome: dir }), pollMs: 60000,
+    listThreads: async () => { lists++; return { recent: [{ id: threadId, recency: 1 }], projects: [] }; } });
+  const watcher = new ThreadListChanges({ codexHome: dir, intervalMs: 20 });
+  const changed = () => { void f.monitor.refreshReadReceipts(); };
+  const until = async check => { const deadline = Date.now() + 3000; while (!check()) { if (Date.now() > deadline) throw new Error('Timed out waiting for read-state watcher'); await new Promise(resolve => setTimeout(resolve, 10)); } };
+  watcher.on('change', changed); watcher.start(); f.monitor.start();
+  try {
+    await until(() => watcher.stateStamp && f.sessions.length && f.monitor.nativeReadState);
+    const s = f.sessions[0]; s.publish(state(threadId, turn('live'))); s.publish(state(threadId, turn('live', 'completed')));
+    const before = lists;
+    native['electron-thread-read-state-v1'].unreadByIdentity[identityKey][hostKey] = [threadId];
+    await writeFile(stateFile, JSON.stringify(native));
+    await until(() => f.monitor.records.get(threadId)?.unreadSeen);
+    native['electron-thread-read-state-v1'].unreadByIdentity[identityKey][hostKey] = [];
+    await writeFile(stateFile, JSON.stringify(native));
+    await until(() => f.clears.length === 1);
+    assert.equal(f.clears[0].eventId, f.events[0].eventId); assert.equal(lists, before);
+  } finally { watcher.off('change', changed); watcher.stop(); await f.monitor.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('overlapping change signals and a periodic poll serialize receipt scans and retain one trailing sample', async () => {
+  let receipt = nativeRead('scope-a'), block = false, release, active = 0, maxActive = 0, reads = 0, lists = 0;
+  const f = fixture({ readState: async () => {
+    reads++; active++; maxActive = Math.max(maxActive, active);
+    const captured = receipt;
+    if (block) { block = false; await new Promise(resolve => { release = resolve; }); }
+    active--; return captured;
+  }, listThreads: async () => { lists++; return { recent: [{ id: threadId, recency: 1 }], projects: [] }; } });
+  f.monitor.start(); await flush();
+  try {
+    const s = f.sessions[0]; s.publish(state(threadId, turn('live'))); s.publish(state(threadId, turn('live', 'completed')));
+    receipt = nativeRead('scope-a', [threadId]); block = true;
+    const beforeReads = reads, beforeLists = lists;
+    const first = f.monitor.refreshReadReceipts();
+    const poll = f.monitor.poll();
+    const more = Array.from({ length: 30 }, () => f.monitor.refreshReadReceipts());
+    receipt = nativeRead('scope-a'); release();
+    await Promise.all([first, poll, ...more]);
+    assert.equal(maxActive, 1); assert.equal(reads - beforeReads, 2);
+    assert.equal(lists - beforeLists, 1, 'only the explicit periodic poll fetches the task list');
+    assert.deepEqual(f.clears.map(event => event.eventId), [f.events[0].eventId]);
+  } finally { release?.(); await f.monitor.close(); }
+});
+
+test('a delayed old-scope read cannot overwrite a restarted monitor or clear a new completion', async () => {
+  let receipt = nativeRead('scope-a'), block = false, release;
+  const f = fixture({ readState: async () => {
+    const captured = receipt;
+    if (block) { block = false; await new Promise(resolve => { release = resolve; }); }
+    return captured;
+  } });
+  f.monitor.start(); await flush();
+  try {
+    f.sessions[0].publish(state(threadId, turn('old'))); f.sessions[0].publish(state(threadId, turn('old', 'completed')));
+    receipt = nativeRead('scope-a', [threadId]); block = true;
+    const oldScan = f.monitor.refreshReadReceipts();
+    await f.monitor.close();
+    receipt = nativeRead('scope-b'); f.monitor.start(); await flush();
+    f.sessions[1].publish(state(threadId, turn('new'))); f.sessions[1].publish(state(threadId, turn('new', 'completed')));
+    const currentEvent = f.events.at(-1);
+    release(); await oldScan;
+    assert.equal(f.monitor.nativeReadState.scopeKey, 'scope-b'); assert.equal(f.clears.length, 0);
+    receipt = nativeRead('scope-b', [threadId]); await f.monitor.refreshReadReceipts();
+    receipt = nativeRead('scope-b'); await f.monitor.refreshReadReceipts();
+    assert.deepEqual(f.clears.map(event => event.eventId), [currentEvent.eventId]);
+  } finally { release?.(); await f.monitor.close(); }
+});
+
 test('scope changes, missing native state and initial historical completions cannot infer desktop read', async () => {
   let receipt = nativeRead('scope-a', [threadId]);
   const f = fixture({ readState: async () => receipt }); f.monitor.start(); await flush();
@@ -542,6 +641,9 @@ test('replacement completion resets unread evidence and a new scope false sample
     assert.equal(f.clears.length, 0); assert.equal(f.monitor.records.get(threadId).unreadSeen, null);
     receipt = nativeRead('scope-b', [threadId]); await f.monitor.poll(); await flush();
     receipt = nativeRead('scope-b'); await f.monitor.poll(); await flush();
+    assert.equal(f.clears.length, 0, 'another identity cannot acknowledge the old identity completion');
+    receipt = nativeRead('scope-a', [threadId]); await f.monitor.poll(); await flush();
+    receipt = nativeRead('scope-a'); await f.monitor.poll(); await flush();
     assert.equal(f.clears.length, 1); assert.equal(f.clears[0].eventId, f.events[1].eventId);
   } finally { await f.monitor.close(); }
 });

@@ -602,7 +602,30 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         phonePresence.set(phone.deviceId, now());
         return send(res, 200, { online: Boolean(peer && peer.readyState === WebSocket.OPEN) });
       }
-      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: peers.get(phone.hostId)?.uploadPipeline ? 524288 : 131072, uploadCompression: 'gzip', uploadConcurrency: peers.get(phone.hostId)?.uploadPipeline ? 2 : 1 });
+      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: peers.get(phone.hostId)?.uploadPipeline ? 524288 : 131072, uploadCompression: 'gzip', uploadConcurrency: peers.get(phone.hostId)?.uploadPipeline ? 2 : 1, desktopUnreadOpen: peers.get(phone.hostId)?.readyState === WebSocket.OPEN && peers.get(phone.hostId)?.desktopUnreadOpen === 1 });
+      const desktopRead = /^\/api\/threads\/([0-9a-f-]{36})\/desktop-read$/i.exec(requested);
+      if (desktopRead) {
+        if (!uuid.test(desktopRead[1])) return send(res, 404, { error: 'not-found' });
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 256);
+        if (res.writableEnded || res.destroyed) return;
+        const data = reserved?.data;
+        if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length !== 1
+            || typeof data.scopeKey !== 'string' || !/^[a-f0-9]{64}$/.test(data.scopeKey)) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId);
+        if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (peer.desktopUnreadOpen !== 1) return send(res, 409, { error: 'desktop-read-unavailable' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'desktop-read', id, deviceId: phone.deviceId, conversationId: desktopRead[1], scopeKey: data.scopeKey }));
+        return;
+      }
       const modelCancel = /^\/api\/threads\/([0-9a-f-]{36})\/model-cancel$/i.exec(requested);
       if (modelCancel) {
         if (!uuid.test(modelCancel[1])) return send(res, 404, { error: 'not-found' });
@@ -882,7 +905,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (push && peers.get(hostId) === ws && ws.taskNotifications === 1 && ws.notificationEnabled && monitorReasons.has(msg.health?.reason)) ws.notificationHealth = { reason: msg.health.reason };
         return;
       }
-      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
+      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; ws.desktopUnreadOpen = msg.desktopUnreadOpen === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
       const entry = pending.get(msg.id); if (!entry || entry.hostId !== hostId) return;
       if (entry.historyChunks && msg.type === 'history-chunk' && msg.frame) {
         const frame = msg.frame;

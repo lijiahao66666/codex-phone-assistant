@@ -24,6 +24,7 @@ import { payloadDigest } from '../media/payload-digest.mjs';
 import { createModelService } from '../desktop/model-service.mjs';
 import { TaskNotificationMonitor } from '../notifications/task-monitor.mjs';
 import { createThreadArchive } from '../desktop/thread-archive.mjs';
+import { navigateDesktopUnread } from '../desktop/native-read-navigation.mjs';
 
 export function viewUpdate(previous, conversation, seq, version = 1) {
   const snapshot = { event: 'state', data: { seq, conversation } };
@@ -55,6 +56,7 @@ export function viewUpdate(previous, conversation, seq, version = 1) {
 export async function listAllThreads(listThreads) {
   let cursor = null, nextCursor = null;
   const projects = new Map(), recent = [], seen = new Set();
+  let unreadSnapshot = null, unreadAvailable = true;
   let bytes = 1024, truncated = false;
   const statusCandidates = [];
   const add = (items, thread) => {
@@ -69,6 +71,11 @@ export async function listAllThreads(listThreads) {
   for (let page = 0; page < 20; page++) {
     const data = await listThreads({ ...(cursor ? { before: cursor } : {}), includeRecency: true });
     if (!Array.isArray(data?.projects) || !Array.isArray(data?.recent)) throw new Error('Invalid thread list');
+    const read = data.nativeUnread;
+    if (read?.status !== 'available' || typeof read.scopeKey !== 'string' || !/^[a-f0-9]{64}$/.test(read.scopeKey)
+        || typeof read.snapshotKey !== 'string' || !/^[a-f0-9]{64}$/.test(read.snapshotKey)) unreadAvailable = false;
+    else if (!unreadSnapshot) unreadSnapshot = { scopeKey: read.scopeKey, snapshotKey: read.snapshotKey };
+    else if (unreadSnapshot.scopeKey !== read.scopeKey || unreadSnapshot.snapshotKey !== read.snapshotKey) unreadAvailable = false;
     for (const group of data.projects) {
       if (!group || typeof group.id !== 'string' || !Array.isArray(group.threads)) throw new Error('Invalid project');
       if (!projects.has(group.id)) {
@@ -87,7 +94,10 @@ export async function listAllThreads(listThreads) {
     cursor = nextCursor;
   }
   statusCandidates.sort((a, b) => b.recency - a.recency || b.id.localeCompare(a.id));
-  return { projects: [...projects.values()], recent, truncated: truncated || Boolean(nextCursor), statusCandidates: statusCandidates.slice(0, 4).map(thread => thread.id) };
+  const allProjects = [...projects.values()];
+  if (!unreadAvailable || !unreadSnapshot) for (const thread of [...recent, ...allProjects.flatMap(group => group.threads)]) delete thread.unread;
+  const nativeUnread = unreadAvailable && unreadSnapshot ? { status: 'available', scopeKey: unreadSnapshot.scopeKey } : { status: 'unavailable' };
+  return { projects: allProjects, recent, truncated: truncated || Boolean(nextCursor), statusCandidates: statusCandidates.slice(0, 4).map(thread => thread.id), nativeUnread };
 }
 
 export function createThreadListCache(listThreads, { ttlMs = 2000, now = Date.now } = {}) {
@@ -125,14 +135,46 @@ export async function populateThreadStatuses({ sidebarStatus, statusPriorities, 
 }
 
 // Only one authenticated relay is configured; no arbitrary local HTTP proxying.
-export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
+export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, navigateDesktopUnreadForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
   const target = new URL(url);
   if ((target.protocol !== 'wss:' && !(allowInsecureForTests && target.protocol === 'ws:' && target.hostname === '127.0.0.1')) || target.pathname !== '/connector' || target.search || target.hash || target.username || target.password) throw new Error('WSS connector URL required');
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1) throw new Error('Invalid heartbeat timeout');
-  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
+  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests || navigateDesktopUnreadForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
   const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(), uploadChecks = new Set(); let ws, scheduler, timer, stopped = false, shuttingDown = false, activeMutations = 0;
-  const mutationTypes = new Set(['notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
+  const mutationTypes = new Set(['desktop-read', 'notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
+  let desktopNavigationPending = null, desktopNavigationWaiting = null;
+  // A cancelled navigation can still be inside the OS open call. Reserve at
+  // most one successor and wait for that call to settle before switching the
+  // desktop again. A live, non-cancelled operation is never bypassed.
+  async function acquireDesktopNavigation(cancelled, cancelEvidence) {
+    if (cancelled()) return null;
+    if (!desktopNavigationPending) {
+      const token = { cancelEvidence }; desktopNavigationPending = token; return token;
+    }
+    if (desktopNavigationWaiting) desktopNavigationWaiting.superseded = true;
+    const predecessor = desktopNavigationPending;
+    const waiter = { superseded: false }, deadline = Date.now() + 1500, cancelDeadline = Date.now() + 100;
+    let predecessorCancelled = predecessor.cancelEvidence();
+    desktopNavigationWaiting = waiter;
+    try {
+      while (!waiter.superseded && !cancelled() && Date.now() < deadline) {
+        if (predecessor.cancelEvidence()) predecessorCancelled = true;
+        if (!desktopNavigationPending) {
+          if (!predecessorCancelled) return null;
+          const token = { cancelEvidence }; desktopNavigationPending = token; return token;
+        }
+        if (desktopNavigationPending !== predecessor) return null;
+        // The newer HTTP request can reach the relay before the previous
+        // request's abort. Give that cancellation a short window; a normal
+        // completion alone never grants the waiting request permission.
+        if (!predecessorCancelled && Date.now() >= cancelDeadline) return null;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      return null;
+    } finally { if (desktopNavigationWaiting === waiter) desktopNavigationWaiting = null; }
+  }
+  function releaseDesktopNavigation(token) { if (token && desktopNavigationPending === token) desktopNavigationPending = null; }
   const models = modelRequest ? createModelService({ request: modelRequest, writes, journal: modelJournal, hostId, ...(allowInsecureForTests ? {} : { createObserver: id => createSession({ conversationId: id, hostId: 'local' }) }), sessionFor: (deviceId, id) => [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === deviceId) }) : null;
   const recoveryLocked = id => {
     try { return ownerRouter ? ownerRouter.isRecoveryLocked(id) !== false : false; }
@@ -208,7 +250,16 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       return uploads.size > 0 || staged.size > 0;
     };
     uploadChecks.add(uploadsBusy);
-    const removeSidebarStream = id => { const stream = sidebarStreams.get(id); if (!stream) return; sidebarStreams.delete(id); clearTimeout(stream.timer); clearTimeout(stream.listTimer); sidebarStatus?.off('change', stream.notify); threadListChanges?.off('change', stream.listNotify); connectionScheduler.cancelStream(`sidebar:${id}`); connectionScheduler.cancelStream(`thread-list:${id}`); if (!sidebarStreams.size) threadListChanges?.stop(); };
+    const updateThreadListWatcher = () => { if (sidebarStreams.size || notificationMonitor) threadListChanges?.start(); else threadListChanges?.stop(); };
+    const refreshNativeReadReceipts = () => {
+      if (connection === ws && notificationMonitor) void Promise.resolve(notificationMonitor.refreshReadReceipts?.()).catch(() => {});
+    };
+    const detachNotificationMonitor = () => {
+      const old = notificationMonitor; notificationMonitor = null;
+      threadListChanges?.off('change', refreshNativeReadReceipts); updateThreadListWatcher();
+      return old;
+    };
+    const removeSidebarStream = id => { const stream = sidebarStreams.get(id); if (!stream) return; sidebarStreams.delete(id); clearTimeout(stream.timer); clearTimeout(stream.listTimer); sidebarStatus?.off('change', stream.notify); threadListChanges?.off('change', stream.listNotify); connectionScheduler.cancelStream(`sidebar:${id}`); connectionScheduler.cancelStream(`thread-list:${id}`); updateThreadListWatcher(); };
     const addSidebarStream = (id, deviceId) => {
       const stream = { deviceId, timer: null, notify: null };
       stream.notify = () => {
@@ -228,7 +279,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         }
       };
       sidebarStreams.set(id, stream); sidebarStatus.on('change', stream.notify); stream.notify();
-      threadListChanges?.on('change', stream.listNotify); threadListChanges?.start();
+      threadListChanges?.on('change', stream.listNotify); updateThreadListWatcher();
     };
     function beginClaims() {
       let finish;
@@ -259,6 +310,9 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         send({ type: 'response', id: msg.id, status }, connection, { request, cancellable: true });
       };
       answer.cancelled = cancelled;
+      // A response removes the request too; only explicit cancellation,
+      // revocation or disconnect is evidence for a later navigation.
+      answer.cancelEvidence = () => request.cancelled || revoked.has(request.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN;
       return answer;
     }
     let uploadContext;
@@ -305,7 +359,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       }
       if (mutation) activeMutations++;
       try {
-      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, desktopUnreadOpen: 1, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
       if (msg.type === 'notification-settings') {
         if (msg.enabled === true && !notificationMonitor && connection === ws && !shuttingDown) {
           notificationMonitor = (createNotificationMonitorForTests || (options => new TaskNotificationMonitor(options)))({ createSession, listThreads: listAuthorizedThreads,
@@ -313,7 +367,8 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             onClear: event => { if (connection === ws && !shuttingDown) send({ type: 'task-notification-clear', event }, connection); },
             onHealth: health => { if (connection === ws) send({ type: 'notification-health', health }, connection); },
           }).start();
-        } else if (msg.enabled !== true && notificationMonitor) { const old = notificationMonitor; notificationMonitor = null; await old.close(); }
+          threadListChanges?.on('change', refreshNativeReadReceipts); updateThreadListWatcher();
+        } else if (msg.enabled !== true && notificationMonitor) { const old = detachNotificationMonitor(); await old.close(); }
         return;
       }
       if (msg.type === 'device-restored' && typeof msg.deviceId === 'string') {
@@ -328,6 +383,26 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (typeof msg.deviceId === 'string') await deviceTransitions.get(msg.deviceId);
       if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) return;
       if (connection !== ws || connection.readyState !== WebSocket.OPEN) return;
+      if (msg.type === 'desktop-read') {
+        const id = msg.conversationId, answer = beginWrite(msg);
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id || '')
+            || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(msg.deviceId || '')
+            || !/^[a-f0-9]{64}$/.test(msg.scopeKey || '')
+            || writes.has(id) || models?.isLocked(id) || recoveryLocked(id)) return answer('unavailable');
+        writes.add(id); let navigation;
+        try {
+          const cancelled = () => answer.cancelled() || shuttingDown || recoveryLocked(id) || Boolean(models?.isLocked(id));
+          navigation = await acquireDesktopNavigation(cancelled, () => answer.cancelEvidence() || shuttingDown);
+          if (!navigation || cancelled()) return answer('unavailable');
+          const data = await listAllThreads(listAuthorizedThreads);
+          const allowed = new Set([...data.recent, ...data.projects.flatMap(project => project.threads)].map(thread => thread.id));
+          if (cancelled() || !allowed.has(id) || data.nativeUnread?.status !== 'available' || data.nativeUnread.scopeKey !== msg.scopeKey) return answer('unavailable');
+          const result = await (navigateDesktopUnreadForTests || navigateDesktopUnread)(id, msg.scopeKey, { isCancelled: cancelled });
+          answer(result?.read === true ? 'accepted' : 'unavailable');
+        } catch { answer('unavailable'); }
+        finally { writes.delete(id); releaseDesktopNavigation(navigation); }
+        return;
+      }
       if (msg.type === 'notification-read') {
         const id = msg.conversationId, monitor = notificationMonitor;
         const answer = beginWrite(msg);
@@ -335,16 +410,18 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(msg.deviceId || '')
             || typeof msg.eventId !== 'string' || !msg.eventId || msg.eventId.length > 512
             || typeof monitor?.readOnDesktop !== 'function' || writes.has(id) || models?.isLocked(id) || recoveryLocked(id)) return answer('unavailable');
-        writes.add(id);
+        writes.add(id); let navigation;
         try {
+          const cancelled = () => answer.cancelled() || notificationMonitor !== monitor || shuttingDown || recoveryLocked(id) || Boolean(models?.isLocked(id));
+          navigation = await acquireDesktopNavigation(cancelled, () => answer.cancelEvidence() || shuttingDown || notificationMonitor !== monitor);
+          if (!navigation || cancelled()) return answer('unavailable');
           const data = await listAllThreads(listAuthorizedThreads);
           const allowed = new Set([...data.recent, ...data.projects.flatMap(project => project.threads)].map(thread => thread.id));
-          const cancelled = () => answer.cancelled() || notificationMonitor !== monitor || shuttingDown || recoveryLocked(id) || Boolean(models?.isLocked(id));
           if (cancelled() || !allowed.has(id)) return answer('unavailable');
           const result = await monitor.readOnDesktop({ threadId: id, eventId: msg.eventId }, { isCancelled: cancelled });
           answer(result === true || result?.read === true ? 'accepted' : 'unavailable');
         } catch { answer('unavailable'); }
-        finally { writes.delete(id); }
+        finally { writes.delete(id); releaseDesktopNavigation(navigation); }
         return;
       }
       if (msg.type === 'recover-chat') {
@@ -1016,7 +1093,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       } catch { streams.delete(msg.id); void closeSession(session); send({ type: 'end', id: msg.id }, connection); }
       } finally { if (mutation) activeMutations--; }
     });
-    ws.on('close', () => { void notificationMonitor?.close(); notificationMonitor = null; trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
+    ws.on('close', () => { void detachNotificationMonitor()?.close(); trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
   }
   return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async beginShutdown() { if (shuttingDown || activeMutations || [...uploadChecks].some(check => check())) throw Object.assign(new Error('Connector writes are active'), { code: 'tasks-active' }); shuttingDown = true; try { if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls(); } catch { shuttingDown = false; throw Object.assign(new Error('Connector replies could not be flushed'), { code: 'tasks-active' }); } }, cancelShutdown() { shuttingDown = false; }, async close() { stopped = true; observedOwner?.off?.('threadReleased', onThreadReleased); clearTimeout(timer); closeStreams(); await models?.close(); if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls().catch(() => {}); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
 }

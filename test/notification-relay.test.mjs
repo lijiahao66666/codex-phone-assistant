@@ -681,3 +681,28 @@ test('desktop-read readiness distinguishes unknown capability, explicit legacy a
     assert.equal((await status()).desktopReadSupported, null, 'disconnection loses current capability knowledge without falling back to legacy');
   } finally { pendingPeer?.terminate(); await f.close(); }
 });
+
+test('explicit native unread navigation is scoped to the authenticated pair and requires a current capable connector', { timeout: 10000 }, async () => {
+  const f = await fixture({ enabled: false });
+  try {
+    const a = await f.enroll(), b = await f.enroll(), pa = await f.connector(a), pb = await f.connector(b);
+    const scopeKey = 'a'.repeat(64), threadId = randomUUID(), path = `/api/threads/${threadId}/desktop-read`;
+    const extra = { 'x-codex-expected-device': a.phone.deviceId };
+    assert.equal((await f.request(path, { method: 'POST', data: { scopeKey }, cookie: a.phone.cookie, extra })).status, 409);
+    pa.ws.send(JSON.stringify({ type: 'capabilities', desktopUnreadOpen: 1 }));
+    const pong = once(pa.ws, 'pong'); pa.ws.ping(); await pong;
+    assert.equal((await (await f.request('/api/capabilities', { cookie: a.phone.cookie })).json()).desktopUnreadOpen, true);
+    assert.equal((await f.request(path, { method: 'POST', data: { scopeKey }, cookie: a.phone.cookie })).status, 409);
+    assert.equal((await f.request(path, { method: 'POST', data: { scopeKey }, cookie: a.phone.cookie, extra: { ...extra, origin: 'https://other.test', 'sec-fetch-site': 'cross-site' } })).status, 403);
+    for (const data of [{}, { scopeKey: 'bad' }, { scopeKey, eventId: 'must-not-be-used' }]) assert.equal((await f.request(path, { method: 'POST', data, cookie: a.phone.cookie, extra })).status, 400);
+    const pending = f.request(path, { method: 'POST', data: { scopeKey }, cookie: a.phone.cookie, extra });
+    const forwarded = await pa.wait(message => message.type === 'desktop-read');
+    assert.deepEqual({ deviceId: forwarded.deviceId, conversationId: forwarded.conversationId, scopeKey: forwarded.scopeKey }, { deviceId: a.phone.deviceId, conversationId: threadId, scopeKey });
+    assert.equal(pb.messages.some(message => message.type === 'desktop-read'), false);
+    pb.ws.send(JSON.stringify({ type: 'response', id: forwarded.id, status: 'accepted' }));
+    pa.ws.send(JSON.stringify({ type: 'response', id: forwarded.id, status: 'accepted' }));
+    const response = await pending; assert.equal(response.status, 202); assert.deepEqual(await response.json(), { status: 'accepted' });
+    await f.pair(a);
+    assert.equal((await f.request(path, { method: 'POST', data: { scopeKey }, cookie: a.phone.cookie, extra })).status, 401);
+  } finally { await f.close(); }
+});

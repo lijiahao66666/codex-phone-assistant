@@ -60,10 +60,29 @@ test('only projects unread state for the current identity and unambiguous local 
     const state = { 'electron-persisted-atom-state': { 'local-document-identity': identity }, 'electron-thread-read-state-v1': { unreadByIdentity: { [identityKey]: { [`local:${'a'.repeat(64)}`]: ['a'], [`remote:${'b'.repeat(64)}`]: ['other'] } } } };
     const path = join(dir, '.codex-global-state.json');
     await writeFile(path, JSON.stringify(state));
-    assert.equal((await listDesktopThreads({ codexHome: dir })).recent[0].unread, true);
+    const available = await listDesktopThreads({ codexHome: dir });
+    assert.equal(available.recent[0].unread, true);
+    assert.equal(available.nativeUnread.status, 'available');
+    assert.match(available.nativeUnread.scopeKey, /^[a-f0-9]{64}$/);
+    assert.match(available.nativeUnread.snapshotKey, /^[a-f0-9]{64}$/);
+    assert.equal(JSON.stringify(available.nativeUnread).includes(identity.accountId), false);
+    state['electron-thread-read-state-v1'].unreadByIdentity[identityKey][`local:${'a'.repeat(64)}`] = ['a', null];
+    await writeFile(path, JSON.stringify(state));
+    const invalid = await listDesktopThreads({ codexHome: dir });
+    assert.deepEqual(invalid.nativeUnread, { status: 'unavailable' });
+    assert.equal(invalid.recent[0].unread, undefined, 'invalid members cannot become an authoritative partially filtered set');
+    state['electron-thread-read-state-v1'].unreadByIdentity[identityKey][`local:${'a'.repeat(64)}`] = [];
+    await writeFile(path, JSON.stringify(state));
+    const empty = await listDesktopThreads({ codexHome: dir });
+    assert.equal(empty.nativeUnread.status, 'available');
+    assert.equal(empty.nativeUnread.scopeKey, available.nativeUnread.scopeKey);
+    assert.notEqual(empty.nativeUnread.snapshotKey, available.nativeUnread.snapshotKey);
+    assert.equal(empty.recent[0].unread, undefined);
     state['electron-thread-read-state-v1'].unreadByIdentity[identityKey][`local:${'b'.repeat(64)}`] = ['a'];
     await writeFile(path, JSON.stringify(state));
-    assert.equal((await listDesktopThreads({ codexHome: dir })).recent[0].unread, undefined);
+    const ambiguous = await listDesktopThreads({ codexHome: dir });
+    assert.equal(ambiguous.recent[0].unread, undefined);
+    assert.deepEqual(ambiguous.nativeUnread, { status: 'unavailable' });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

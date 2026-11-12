@@ -43,7 +43,7 @@ async function fixture(options = {}) {
   };
   const context = vm.createContext({ document, window, crypto: webcrypto, AbortController, TextDecoder, TextEncoder, URLSearchParams, Date,
     setTimeout(fn, ms) { const key = { unref() {} }; timers.set(key, { fn, ms }); return key; }, clearTimeout(key) { timers.delete(key); },
-    localStorage: { getItem() { return null; }, removeItem() {}, setItem() {} }, sessionStorage: { removeItem() {} }, store: { read: async () => null },
+    localStorage: options.localStorage ?? { getItem() { return null; }, removeItem() {}, setItem() {} }, sessionStorage: { removeItem() {} }, store: { read: async () => null },
     fetch: options.fetch ?? (async () => { throw new Error('This interaction fixture must not make a network request'); }),
   });
   const source = (await readFile(new URL('../public/desktop.js', import.meta.url), 'utf8')).replace("import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore())", 'Promise.resolve(store)');
@@ -547,4 +547,102 @@ test('old local storage receipts cannot clear an exact completed marker awaiting
   const receipt = f.window.taskNotificationReceipt(event);
   finish({ stale: true }); assert.equal(await receipt, false);
   assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'an older storage receipt cannot replace the desktop clear chain');
+});
+
+test('native unread displays once, clears instantly on click and only returns after a fresh read then unread transition', async () => {
+  const requests = []; let finish;
+  const storage = new Map(), localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
+  const f = await fixture({ localStorage, fetch: (url, request) => { requests.push({ url, request }); return new Promise(resolve => { finish = resolve; }); } });
+  const scopeKey = 'a'.repeat(64);
+  const data = unread => ({ ...f.data, nativeUnread: { status: 'available', scopeKey }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => ({ ...task, ...(task.id === b && unread ? { unread: true } : {}) })) }] });
+  f.render(data(true));
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  assert.equal(f.row(b).querySelector('.task-notification').getAttribute('aria-label'), '有未读消息');
+  const completion = notification(b); f.notify(completion);
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1', 'native and completion reminders count one task');
+  // A generic unread alone uses the native-read route.
+  await f.window.clearTaskNotificationEvent(completion);
+  f.row(b).click();
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  assert.equal(requests.length, 1); assert.equal(requests[0].url, `/api/threads/${b}/desktop-read`);
+  assert.equal(requests[0].request.headers['x-codex-expected-device'], deviceId);
+  assert.deepEqual(JSON.parse(requests[0].request.body), { scopeKey });
+  f.render(data(true)); assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  f.render(data(false)); f.render(data(true)); assert.equal(f.row(b).querySelector('.task-notification').hidden, true, 'a list started before the click cannot undo its suppression');
+  f.run('listRequestGeneration++'); f.render(data(false)); f.render(data(true));
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'a subsequent confirmed read followed by a new unread is visible');
+  finish({ ok: false, status: 503 }); await new Promise(resolve => setImmediate(resolve));
+});
+
+test('a completion and native unread on the same task perform only one desktop navigation', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: (url, request) => { requests.push({ url, request }); return new Promise(() => {}); } });
+  const scopeKey = 'a'.repeat(64);
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent() {} };
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, false, true);
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b ? { ...task, unread: true } : task) }] });
+  f.notify(notification(b)); f.row(b).click();
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  assert.equal(requests.length, 1); assert.equal(requests[0].url, `/api/threads/${b}/desktop-read`);
+});
+
+test('native unread ignores old clients, retains state when unavailable, and isolates scope changes', async () => {
+  const requests = []; const f = await fixture({ fetch: (url, request) => { requests.push({ url, request }); return new Promise(() => {}); } });
+  const tasks = [{ id: a, title: 'Task A', status: 'idle' }, { id: b, title: 'Task B', status: 'idle', unread: true }];
+  const list = nativeUnread => ({ ...f.data, ...(nativeUnread ? { nativeUnread } : {}), projects: [{ ...f.data.projects[0], threads: tasks }] });
+  f.render(list()); assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  f.render(list({ status: 'available', scopeKey: 'a'.repeat(64) })); assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  f.render(list({ status: 'unavailable' })); assert.equal(f.row(b).querySelector('.task-notification').hidden, true, 'unknown native identity is not displayed as the previous account');
+  f.render(list({ status: 'available', scopeKey: 'a'.repeat(64) })); assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'the prior state was not cleared');
+  f.row(b).click(); assert.equal(requests.length, 1); assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  f.render(list({ status: 'available', scopeKey: 'b'.repeat(64) }));
+  assert.equal(requests[0].request.signal.aborted, true, 'identity change cancels old navigation');
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false, 'new identity does not inherit a local read');
+  f.run('invalidateDeviceState()'); assert.equal(f.run('nativeUnread.size'), 0);
+});
+
+test('native local reads survive reload and recover after a confirmed read and later unread', async () => {
+  const storage = new Map();
+  const localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
+  const makeList = (f, unread) => ({ ...f.data, nativeUnread: { status: 'available', scopeKey: 'a'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b && unread ? { ...task, unread: true } : task) }] });
+  const first = await fixture({ localStorage, fetch: async () => ({ ok: false, status: 503 }) });
+  first.render(makeList(first, true)); first.row(b).click();
+  await new Promise(resolve => setImmediate(resolve));
+  const reloaded = await fixture({ localStorage });
+  reloaded.render(makeList(reloaded, true));
+  assert.equal(reloaded.row(b).querySelector('.task-notification').hidden, true);
+  reloaded.render(makeList(reloaded, false)); reloaded.render(makeList(reloaded, true));
+  assert.equal(reloaded.row(b).querySelector('.task-notification').hidden, false);
+});
+
+test('a task being viewed stays quiet when the desktop unread bit changes', async () => {
+  const requests = []; const f = await fixture({ fetch: async url => { requests.push(url); return { ok: true }; } });
+  const scopeKey = 'a'.repeat(64);
+  const list = unread => ({ ...f.data, nativeUnread: { status: 'available', scopeKey }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === a && unread ? { ...task, unread: true } : task) }] });
+  f.run('connected=true'); f.render(list(false)); f.render(list(true));
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').hidden, true);
+  assert.equal(requests.length, 0, 'a passive state update never opens Desktop');
+  f.row(b).click(); f.render(list(true)); assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
+});
+
+test('a connected current task stays quiet when its first native unread snapshot arrives', async () => {
+  const f = await fixture(); f.run('connected=true');
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey: 'a'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === a ? { ...task, unread: true } : task) }] });
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').hidden, true);
+  f.run('connected=false;selectedId=null');
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey: 'b'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === a ? { ...task, unread: true } : task) }] });
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, false, 'a new identity without an active view does not inherit a local read');
+});
+
+test('a later completed event still shows while a previous native unread bit remains locally suppressed', async () => {
+  const f = await fixture({ fetch: async () => ({ ok: false, status: 503 }) });
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent() {} };
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true, true);
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey: 'a'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b ? { ...task, unread: true } : task) }] });
+  f.row(b).click(); await new Promise(resolve => setImmediate(resolve)); f.row(a).click();
+  f.notify(notification(b, 'completed', { createdAt: 200 }));
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  assert.equal(f.row(b).querySelector('.task-notification').getAttribute('aria-label'), '有新提醒，任务已完成');
 });

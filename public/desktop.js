@@ -2717,6 +2717,67 @@ const taskNotificationWatermarks = new Map();
 const taskNotificationReceipts = new Map();
 const desktopNotificationReads = new Map();
 const pendingDesktopNotificationReads = new Map();
+const nativeUnread = new Map(), nativeUnreadReads = new Map();
+const nativeUnreadSuppressedAfter = new Map();
+let nativeUnreadScope = null, nativeUnreadAvailable = false, nativeUnreadSuppressed = new Set();
+function nativeUnreadStorageKey(scope) { return `codex-native-unread-v1:${historyScope.hostId}:${historyScope.deviceId}:${scope}`; }
+function saveNativeUnreadSuppressed() {
+  if (!historyScope || !nativeUnreadScope) return;
+  try { localStorage.setItem(nativeUnreadStorageKey(nativeUnreadScope), JSON.stringify([...nativeUnreadSuppressed].slice(-512))); } catch {}
+}
+function cancelNativeUnreadReads(exceptId = null) { for (const [id, operation] of nativeUnreadReads) if (id !== exceptId) operation.abort(); }
+function clearNativeUnreadState() {
+  cancelNativeUnreadReads();
+  nativeUnreadReads.clear(); nativeUnread.clear(); nativeUnreadSuppressedAfter.clear(); nativeUnreadScope = null; nativeUnreadAvailable = false; nativeUnreadSuppressed = new Set();
+}
+function updateNativeUnread(data, listGeneration) {
+  const scope = data?.nativeUnread?.scopeKey;
+  if (!historyScope || data?.nativeUnread?.status !== 'available' || !/^[a-f0-9]{64}$/.test(scope || '')) { nativeUnreadAvailable = false; cancelNativeUnreadReads(); return; }
+  if (nativeUnreadScope !== scope) {
+    clearNativeUnreadState(); nativeUnreadScope = scope;
+    try { const stored = JSON.parse(localStorage.getItem(nativeUnreadStorageKey(scope)) || '[]'); if (Array.isArray(stored)) nativeUnreadSuppressed = new Set(stored.filter(id => uuid.test(id || '')).slice(-512)); } catch {}
+  }
+  nativeUnreadAvailable = true;
+  const tasks = [...data.recent, ...data.projects.flatMap(project => Array.isArray(project?.threads) ? project.threads : [])];
+  if (data.truncated !== true) {
+    const listed = new Set(tasks.map(task => task?.id));
+    for (const id of nativeUnread.keys()) if (!listed.has(id)) nativeUnread.delete(id);
+  }
+  let changed = false;
+  for (const task of tasks) {
+    if (!uuid.test(task?.id || '')) continue;
+    nativeUnread.set(task.id, task.unread === true);
+    if (task.unread === true && !nativeUnreadSuppressed.has(task.id) && selectedId === task.id && connected && !newDraft && document.hidden !== true && !pageSuspended) {
+      nativeUnreadSuppressed.delete(task.id); nativeUnreadSuppressed.add(task.id);
+      nativeUnreadSuppressedAfter.set(task.id, listGeneration);
+      if (nativeUnreadSuppressed.size > 512) nativeUnreadSuppressed.delete(nativeUnreadSuppressed.values().next().value);
+      changed = true;
+    }
+    if (task.unread !== true && listGeneration > (nativeUnreadSuppressedAfter.get(task.id) ?? -1) && nativeUnreadSuppressed.delete(task.id)) { nativeUnreadSuppressedAfter.delete(task.id); changed = true; }
+  }
+  if (changed) saveNativeUnreadSuppressed();
+}
+function nativeUnreadVisible(id) { return nativeUnreadAvailable && nativeUnread.get(id) === true && !nativeUnreadSuppressed.has(id); }
+function taskReminder(id) { return taskNotifications.get(id) || (nativeUnreadVisible(id) ? { kind: 'completed', native: true } : null); }
+function requestNativeUnreadRead(id, { navigate = true } = {}) {
+  if (!historyScope || !nativeUnreadAvailable || !nativeUnreadScope || nativeUnread.get(id) !== true) return;
+  nativeUnreadSuppressed.delete(id); nativeUnreadSuppressed.add(id);
+  nativeUnreadSuppressedAfter.set(id, listRequestGeneration);
+  if (nativeUnreadSuppressed.size > 512) nativeUnreadSuppressed.delete(nativeUnreadSuppressed.values().next().value);
+  saveNativeUnreadSuppressed(); refreshTaskNotificationIndicators();
+  if (!navigate || document.hidden === true || pageSuspended || nativeUnreadReads.has(id)) return;
+  const controller = new AbortController(), scope = nativeUnreadScope, generation = historyScopeGeneration;
+  nativeUnreadReads.set(id, controller);
+  const timer = setTimeout(() => controller.abort(), 10000);
+  void (async () => {
+    try {
+      const response = await scopedFetch(`/api/threads/${encodeURIComponent(id)}/desktop-read`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scopeKey: scope }) });
+      if (response.ok && !controller.signal.aborted && generation === historyScopeGeneration && scope === nativeUnreadScope) void loadThreads();
+    } catch { /* Local read stays visible as read; a later click can retry. */ }
+    finally { clearTimeout(timer); if (nativeUnreadReads.get(id) === controller) nativeUnreadReads.delete(id); }
+  })();
+}
 let desktopNotificationReadScope = null;
 function desktopNotificationReadRequired() {
   if (!historyScope) return false;
@@ -2736,12 +2797,13 @@ window.setDesktopNotificationReadReady = (pair, ready, supported) => {
 };
 function needsDesktopNotificationRead(id) { return desktopNotificationReadRequired() && taskNotifications.get(id)?.kind === 'completed'; }
 function retainsDesktopNotification(notification) { return needsDesktopNotificationRead(notification.threadId) && taskNotifications.get(notification.threadId)?.eventId === notification.eventId; }
-function requestDesktopNotificationRead(id) {
+function requestDesktopNotificationRead(id, { navigate = true } = {}) {
   const notification = taskNotifications.get(id) || pendingDesktopNotificationReads.get(id);
   if (!historyScope || notification?.kind !== 'completed' || document.hidden === true || pageSuspended) return;
   const pair = { ...historyScope }, generation = historyScopeGeneration;
   // Reading on the phone is immediate; Desktop synchronization runs independently.
   trackTaskNotificationReceipt({ ...notification, ...pair, threadId: id }, window.clearTaskNotificationEvent({ ...notification, ...pair, threadId: id }, { exactOnly: true }));
+  if (!navigate) { pendingDesktopNotificationReads.delete(id); return; }
   pendingDesktopNotificationReads.set(id, notification);
   if (pendingDesktopNotificationReads.size > 512) pendingDesktopNotificationReads.delete(pendingDesktopNotificationReads.keys().next().value);
   const key = JSON.stringify([pair.hostId, pair.deviceId, id, notification.eventId]);
@@ -2807,8 +2869,8 @@ function renderTaskNotification(marker, notification, state = 'idle') {
   marker.hidden = !notification || (notification.kind === 'completed' && (taskStatusIsActive(state) || state === 'checking'));
   marker.dataset.kind = notification?.kind || '';
   marker.textContent = notification ? taskNotificationSymbols[notification.kind] : '';
-  marker.title = notification ? taskNotificationLabels[notification.kind] : '';
-  marker.setAttribute('aria-label', notification ? notification.kind === 'completed' ? '有新提醒，任务已完成' : taskNotificationSymbols[notification.kind] : '');
+  marker.title = notification ? notification.native ? '未读消息' : taskNotificationLabels[notification.kind] : '';
+  marker.setAttribute('aria-label', notification ? notification.native ? '有未读消息' : notification.kind === 'completed' ? '有新提醒，任务已完成' : taskNotificationSymbols[notification.kind] : '');
 }
 function refreshTaskNotificationIndicators(prune = false) {
   const known = new Set([...projectStatusGroups.values()].flatMap(group => group.tasks.map(task => task.id)));
@@ -2817,13 +2879,13 @@ function refreshTaskNotificationIndicators(prune = false) {
     if (historyScope) void window.taskReminderStore?.remove(historyScope, id)?.catch(() => {});
   }
   for (const task of projectList.querySelectorAll('.task')) {
-    const id = task.dataset.id, notification = taskNotifications.get(id);
+    const id = task.dataset.id, notification = taskReminder(id);
     const state = liveTaskStatus.get(id) === 'active' ? 'active' : statusHandovers.has(id) ? 'checking' : sidebarStatusSnapshot?.get(id) ?? task.dataset.status;
     renderTaskNotification(task.querySelector?.('.task-notification'), notification, state);
     setTaskIndicator(task.querySelector?.('.task-active'), notification && notification.kind !== 'completed' ? 'idle' : state);
   }
   for (const [key, group] of projectStatusGroups) {
-    const notices = group.tasks.map(task => taskNotifications.get(task.id)).filter(Boolean);
+    const notices = group.tasks.map(task => taskReminder(task.id)).filter(Boolean);
     const questions = notices.filter(item => item.kind === 'question').length;
     const approvals = notices.filter(item => item.kind === 'approval').length;
     const states = group.tasks.map(task => liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : sidebarStatusSnapshot?.get(task.id) ?? task.status?.type ?? task.status ?? 'unknown');
@@ -2840,7 +2902,7 @@ function refreshTaskNotificationIndicators(prune = false) {
     group.indicator.title = state === 'active' ? '目录内有任务进行中' : state === 'checking' ? '目录任务状态更新中' : '';
     group.indicator.setAttribute('aria-label', group.indicator.title);
   }
-  const count = [...taskNotifications.keys()].filter(id => known.has(id)).length;
+  const count = [...known].filter(id => taskReminder(id)).length;
   const entry = document.querySelector('#open-sidebar');
   if (!entry?.querySelector || !entry?.append) return;
   let marker = entry.querySelector('.sidebar-notification');
@@ -2856,7 +2918,7 @@ function clearTaskNotification(id, force = false) {
   if ((changed || force) && historyScope) void window.taskReminderStore?.remove(historyScope, id)?.catch(() => {});
   if (changed) refreshTaskNotificationIndicators();
 }
-function clearTaskNotifications() { cancelDesktopNotificationReads(); desktopNotificationReadScope = null; pendingDesktopNotificationReads.clear(); taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationWatermarks.clear(); taskNotificationReceipts.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
+function clearTaskNotifications() { cancelDesktopNotificationReads(); clearNativeUnreadState(); desktopNotificationReadScope = null; pendingDesktopNotificationReads.clear(); taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationWatermarks.clear(); taskNotificationReceipts.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
 window.clearTaskNotificationEvent = async (notification, { exactOnly = false } = {}) => {
   if (!notification || !historyScope || historyScope.hostId !== notification.hostId || historyScope.deviceId !== notification.deviceId || !uuid.test(notification.threadId || '') || typeof notification.eventId !== 'string' || !notification.eventId || notification.eventId.length > 512) return false;
   const pair = { ...historyScope }, generation = historyScopeGeneration;
@@ -2975,11 +3037,10 @@ function renderTask(task) {
   const observedStatus = sidebarStatusSnapshot?.get(task.id) ?? button.dataset.status;
   button.append(indicator);
   const notificationIndicator = element('span', 'task-notification');
-  renderTaskNotification(notificationIndicator, taskNotifications.get(task.id));
+  renderTaskNotification(notificationIndicator, taskReminder(task.id));
   button.append(notificationIndicator);
-  // Unread indicators are deferred until H5 can acknowledge desktop read state.
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
-  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } cancelDesktopNotificationReads(task.id); if (needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id)) requestDesktopNotificationRead(task.id); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } cancelDesktopNotificationReads(task.id); cancelNativeUnreadReads(task.id); const completionRead = needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id); const nativeRead = nativeUnreadAvailable && nativeUnread.get(task.id) === true; if (nativeRead) requestNativeUnreadRead(task.id); if (completionRead) requestDesktopNotificationRead(task.id, { navigate: !nativeRead }); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
@@ -3262,7 +3323,8 @@ async function loadThreads() {
   })();
   return request.promise;
 }
-function renderThreadList(data) {
+function renderThreadList(data, generation = listRequestGeneration) {
+  updateNativeUnread(data, generation);
   ++taskNotificationListGeneration;
   projectStatusGroups.clear();
   const fragment = document.createDocumentFragment();
@@ -4617,7 +4679,7 @@ async function checkPairingStatus(pending) {
 if (window.pairingReady) { status('连接中', 'connecting'); showConversationLoading(); void checkPairingStatus(window.pairingReady); }
 else startPairedHome();
 document.addEventListener?.('visibilitychange', () => {
-  if (document.hidden === true) cancelDesktopNotificationReads();
+  if (document.hidden === true) { cancelDesktopNotificationReads(); cancelNativeUnreadReads(); }
   if (document.hidden !== true && !pageSuspended && !newDraft && selectedId) clearTaskNotification(selectedId);
   window.refreshNotificationPresence?.();
   if (document.hidden !== true && !pageSuspended && (pairingAvailable || pairingWasReplaced)) void refreshPairingStatus();
@@ -4625,7 +4687,7 @@ document.addEventListener?.('visibilitychange', () => {
   else if (!pageSuspended && pairingAvailable) { if (!historyScope) void startPairedHome(); else { void loadThreads(); void refreshHostStatus(); } }
   else if (!pageSuspended && window.pairingReady) void checkPairingStatus();
 });
-window.addEventListener('pagehide', () => { cancelDesktopNotificationReads(); discardDeferredListRender(); cancelPendingRender(); pageSuspended = true; stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; pauseBackgroundPolling(); for (const id of statusHandovers.keys()) clearStatusHandover(id); active?.abort(); });
+window.addEventListener('pagehide', () => { cancelDesktopNotificationReads(); cancelNativeUnreadReads(); discardDeferredListRender(); cancelPendingRender(); pageSuspended = true; stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; pauseBackgroundPolling(); for (const id of statusHandovers.keys()) clearStatusHandover(id); active?.abort(); });
 window.addEventListener('pageshow', async event => {
   if (!event.persisted) return;
   pageSuspended = false;
