@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { isIP } from 'node:net';
 import { readFile } from 'node:fs/promises';
@@ -147,7 +147,10 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   const sameOrigin = req => req.headers.origin === base.origin && req.headers['sec-fetch-site'] === 'same-origin';
   const sameOriginRead = req => (!req.headers.origin || req.headers.origin === base.origin) && req.headers['sec-fetch-site'] === 'same-origin';
   const assets = {
-    '/pair': ['desktop.html', 'text/html; charset=utf-8'],
+    '/pair': ['h5-bootstrap.html', 'text/html; charset=utf-8'],
+    '/h5-bootstrap.mjs': ['h5-bootstrap.mjs', 'text/javascript; charset=utf-8'],
+    '/h5-version-entry.mjs': ['h5-version-entry.mjs', 'text/javascript; charset=utf-8'],
+    '/h5-bootstrap.css': ['h5-bootstrap.css', 'text/css; charset=utf-8'],
     '/app-icon.png': ['app-icon.png', 'image/png'],
     '/app-icon-20261104.png': ['app-icon.png', 'image/png'],
     '/app-icon-20261106.png': ['app-icon.png', 'image/png'],
@@ -163,13 +166,17 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     '/state-chunks-prototype.mjs': ['state-chunks.mjs', 'text/javascript; charset=utf-8'],
     '/jsQR.js': ['../node_modules/jsqr/dist/jsQR.js', 'text/javascript; charset=utf-8'],
     '/pair.css': ['pair.css', 'text/css; charset=utf-8'],
-    '/': ['desktop.html', 'text/html; charset=utf-8'],
+    '/': ['h5-bootstrap.html', 'text/html; charset=utf-8'],
     '/desktop.js': ['desktop.js', 'text/javascript; charset=utf-8'],
     '/recovery-attempt-store.js': ['recovery-attempt-store.js', 'text/javascript; charset=utf-8'],
     '/markdown-parser.js': ['../node_modules/marked/lib/marked.umd.js', 'text/javascript; charset=utf-8'],
     '/html-sanitizer.js': ['../node_modules/dompurify/dist/purify.min.js', 'text/javascript; charset=utf-8'],
     '/desktop.css': ['desktop.css', 'text/css; charset=utf-8'],
   };
+  // Versioned bundles are immutable snapshots. Only these names and versions
+  // are routable; a manifest never grants access to an arbitrary path.
+  const versionedNames = new Set(['app-icon.png', 'attachment-preview.mjs', 'desktop.css', 'desktop.html', 'desktop.js', 'device-switch-lock.mjs', 'device-version-switch.mjs', 'html-sanitizer.js', 'install-prompt.js', 'jsQR.js', 'markdown-parser.js', 'notification-presence.js', 'notification-worker.js', 'notifications.js', 'pair.css', 'pair.js', 'pdf-parser.mjs', 'pdf-worker.mjs', 'recovery-attempt-store.js', 'state-chunks.mjs', 'task-reminder-store.js']);
+  const snapshotVersions = new Set(['v1.0.1', 'v1.0.2']);
   const hostSecret = req => req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
   const cookieAttrs = 'Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Strict';
   const cookies = req => (req.headers.cookie || '').split(';').map(part => part.trim()).filter(Boolean);
@@ -241,6 +248,23 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     try {
       if (closed || req.headers.host !== base.host) return send(res, 403, { error: 'forbidden' });
       if (await serveAttachmentPreviewAsset(req, res)) return;
+      const snapshot = /^\/h5\/(v1\.0\.[12])\/([A-Za-z0-9.-]+)$/.exec(req.url || '');
+      if (req.method === 'GET' && snapshot && snapshotVersions.has(snapshot[1]) && versionedNames.has(snapshot[2])) {
+        const [, version, name] = snapshot;
+        const directory = new URL(`../../public/h5/${version}/`, import.meta.url);
+        let content;
+        try {
+          const manifest = JSON.parse(await readFile(new URL('manifest.json', directory), 'utf8'));
+          const metadata = Object.hasOwn(manifest.assets || {}, name) && manifest.assets[name];
+          if (manifest.version !== version || !metadata || !Number.isSafeInteger(metadata.bytes) || metadata.bytes < 0 || !/^[a-f0-9]{64}$/.test(metadata.sha256 || '')) return send(res, 404, { error: 'not-found' });
+          content = await readFile(new URL(name, directory));
+          if (content.length !== metadata.bytes || createHash('sha256').update(content).digest('hex') !== metadata.sha256) return send(res, 503, { error: 'snapshot-invalid' });
+        } catch { return send(res, 503, { error: 'snapshot-unavailable' }); }
+        const type = name.endsWith('.html') ? 'text/html; charset=utf-8' : name.endsWith('.css') ? 'text/css; charset=utf-8' : name.endsWith('.png') ? 'image/png' : 'text/javascript; charset=utf-8';
+        res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+          'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; img-src 'self' blob:; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" });
+        return res.end(content);
+      }
       const assetPath = /^\/(?:desktop\.(?:css|js)|pair\.js|install-prompt\.js)\?v=[A-Za-z0-9._-]{1,80}$/.test(req.url || '') ? req.url.split('?')[0] : req.url;
       if (req.method === 'GET' && Object.hasOwn(assets, assetPath)) {
         const [file, type] = assets[assetPath];
@@ -349,6 +373,16 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         const chosen = devices(req).find(item => item.deviceId === data?.deviceId);
         if (!chosen) return send(res, 403, { error: 'forbidden' });
         const previous = device(req);
+        // New clients bind the switch to the current pair and the exact
+        // connection/profile observed during target preflight. Older clients
+        // retain their existing selection behavior.
+        const guarded = data && ['expectedDeviceId', 'profileEpoch', 'uiProtocol'].some(key => Object.hasOwn(data, key));
+        if (guarded) {
+          if (Object.keys(data).some(key => !['deviceId', 'expectedDeviceId', 'profileEpoch', 'uiProtocol'].includes(key)) || !previous || data.expectedDeviceId !== previous.deviceId || req.headers['x-codex-expected-device'] !== previous.deviceId) return send(res, 409, { error: 'device-changed' });
+          if (!registry.isActiveDevice(previous.hostId, previous.deviceId) || !registry.isActiveDevice(chosen.hostId, chosen.deviceId)) return send(res, 409, { error: 'device-changed' });
+          const peer = peers.get(chosen.hostId);
+          if (!peer || peer.readyState !== WebSocket.OPEN || !peer.capabilitiesReceived || !peer.uiProtocol || peer.uiProfileEpoch !== data.profileEpoch || peer.uiProtocol !== data.uiProtocol) return send(res, 409, { error: 'profile-changed' });
+        }
         if (previous && previous.deviceId !== chosen.deviceId) closeNotificationStreams(previous.hostId, previous.deviceId);
         res.setHeader('set-cookie', `__Host-codex-current=${chosen.deviceId}; ${cookieAttrs}`);
         return send(res, 200, { ok: true });
@@ -641,6 +675,18 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         res.once('close', () => cancel(id));
         peer.send(JSON.stringify({ type: 'thread-search', id, deviceId: phone.deviceId, query: data.query.trim(), ...(data.cursor ? { cursor: data.cursor } : {}) }));
         return;
+      }
+      if (req.method === 'GET' && (requested === '/api/ui-profile' || requested.startsWith('/api/ui-profile?'))) {
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        const params = new URLSearchParams(requested.split('?')[1] || '');
+        if ([...params.keys()].some(key => key !== 'deviceId') || params.getAll('deviceId').length > 1) return send(res, 400, { error: 'invalid' });
+        const targetId = params.get('deviceId');
+        if (targetId !== null && !uuid.test(targetId)) return send(res, 400, { error: 'invalid' });
+        const target = targetId === null ? phone : devices(req).find(item => item.deviceId === targetId);
+        if (!target || !registry.isActiveDevice(target.hostId, target.deviceId)) return send(res, 403, { error: 'forbidden' });
+        const peer = peers.get(target.hostId);
+        const status = !peer || peer.readyState !== WebSocket.OPEN ? 'offline' : !peer.capabilitiesReceived ? 'pending' : peer.uiProtocol === null ? 'unsupported' : 'ready';
+        return send(res, 200, { status, uiProtocol: status === 'ready' ? peer.uiProtocol : null, hostId: target.hostId, deviceId: target.deviceId, ...(targetId !== null ? { currentDeviceId: phone.deviceId, profileEpoch: status === 'ready' ? peer.uiProfileEpoch : null } : {}) });
       }
       if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: peers.get(phone.hostId)?.uploadPipeline ? 524288 : 131072, uploadCompression: 'gzip', uploadConcurrency: peers.get(phone.hostId)?.uploadPipeline ? 2 : 1, desktopUnreadOpen: peers.get(phone.hostId)?.readyState === WebSocket.OPEN && peers.get(phone.hostId)?.desktopUnreadOpen === 1 });
       const desktopRead = /^\/api\/threads\/([0-9a-f-]{36})\/desktop-read$/i.exec(requested);
@@ -945,7 +991,16 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (push && peers.get(hostId) === ws && ws.taskNotifications === 1 && ws.notificationEnabled && monitorReasons.has(msg.health?.reason)) ws.notificationHealth = { reason: msg.health.reason };
         return;
       }
-      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; ws.desktopUnreadOpen = msg.desktopUnreadOpen === 1 ? 1 : 0; ws.activity = msg.activity === 1 ? 1 : 0; ws.threadSearch = msg.threadSearch === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
+      if (msg.type === 'capabilities') {
+        ws.capabilitiesReceived = true;
+        ws.uiProfileEpoch = randomUUID();
+        // The released 1.0.2 predates uiProtocol. Its full advertised feature
+        // set proves compatibility with v1; a partial or older handshake is
+        // unversioned, never guessed to be a specific app version.
+        const releasedV1 = msg.streamFlow === 2 && msg.taskNotifications === 1 && msg.desktopNotificationRead === 1 && msg.desktopUnreadOpen === 1 && msg.activity === 1 && msg.threadSearch === 1;
+        ws.uiProtocol = Object.hasOwn(msg, 'uiProtocol') ? (msg.uiProtocol === 1 ? 'v1' : null) : releasedV1 ? 'v1' : 'unversioned';
+        ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; ws.desktopUnreadOpen = msg.desktopUnreadOpen === 1 ? 1 : 0; ws.activity = msg.activity === 1 ? 1 : 0; ws.threadSearch = msg.threadSearch === 1 ? 1 : 0; updateNotificationSettings(hostId); return;
+      }
       const entry = pending.get(msg.id); if (!entry || entry.hostId !== hostId) return;
       if (entry.historyChunks && msg.type === 'history-chunk' && msg.frame) {
         const frame = msg.frame;

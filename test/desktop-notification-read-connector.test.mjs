@@ -43,6 +43,7 @@ test('connector advertises desktop-read and authorizes the listed thread before 
   try {
     f.send({ type: 'flow-probe' }); await until(() => f.messages.some(message => message.type === 'capabilities'));
     assert.equal(f.messages.find(message => message.type === 'capabilities').desktopNotificationRead, 1);
+    assert.equal(f.messages.find(message => message.type === 'capabilities').uiProtocol, 1);
     await f.enable(); f.request();
     assert.equal((await f.response()).status, 'accepted'); assert.equal(lists, 2);
     assert.deepEqual(f.calls[0].event, { threadId, eventId: 'completed-event' });

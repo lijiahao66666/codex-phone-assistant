@@ -1,0 +1,84 @@
+{
+  "version": "v1.0.1",
+  "sourceRef": "v1.0.1",
+  "assets": {
+    "app-icon.png": {
+      "sha256": "0bbf12f14f23295737d55ad60e3a23ca9389dacb4755ec6e18745ee1aad61bab",
+      "bytes": 12015
+    },
+    "attachment-preview.mjs": {
+      "sha256": "73be0162d64f1285b7cbc022b6d7f2eb5c336b615eb24845b240407f50a0ac8b",
+      "bytes": 6877
+    },
+    "desktop.css": {
+      "sha256": "ef8bea11de71f0562b35e7dfc997d0761bc90f094b4b41ee126a92e577fc86a2",
+      "bytes": 63736
+    },
+    "desktop.html": {
+      "sha256": "ad86cc48c371895247bf6e829565836852291e2ccbfd0173df510cc42d8c3473",
+      "bytes": 10416
+    },
+    "desktop.js": {
+      "sha256": "33ec528edf05bcb6c39e9a57068f5b95043aa6629492786d2b3d33cf381e09ba",
+      "bytes": 303727
+    },
+    "html-sanitizer.js": {
+      "sha256": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31",
+      "bytes": 29828
+    },
+    "install-prompt.js": {
+      "sha256": "e874e12e1d29198b7faecc72fe61da31ff8dee0b41daad0b9b80086098268d9b",
+      "bytes": 1957
+    },
+    "jsQR.js": {
+      "sha256": "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859",
+      "bytes": 256885
+    },
+    "markdown-parser.js": {
+      "sha256": "c34a221dc89e91833a88822e7717b8a0cf27118f8c9a8779dffb48a6be31f97a",
+      "bytes": 50548
+    },
+    "pair.css": {
+      "sha256": "ee34f735dd862cd60a416b2817c93a7367384f2a8b4d3b8b3ec53c6e2a578f57",
+      "bytes": 2084
+    },
+    "pair.js": {
+      "sha256": "04ea30417921fdfa2d219999460b9ae62b24c610f0f5555b69ec23dcb177da5f",
+      "bytes": 10329
+    },
+    "pdf-parser.mjs": {
+      "sha256": "bccc24ea711db8e44503629519904a5292d73b9daaa214bbe7cdcc282b0f4259",
+      "bytes": 523774
+    },
+    "pdf-worker.mjs": {
+      "sha256": "145d2dd3ab0c86151011dba95acfa2d5336e2accd59388ea43dbee0efddaaec6",
+      "bytes": 1321307
+    },
+    "recovery-attempt-store.js": {
+      "sha256": "226dfbe7452673bcfd6bf6d58091657a0559d55bddef7b97ee78cbd13447b8d8",
+      "bytes": 3490
+    },
+    "state-chunks.mjs": {
+      "sha256": "8199934f6e12887a2cb971d5313043af71968eb309bc4da75d259db211e04475",
+      "bytes": 5531
+    },
+    "device-switch-lock.mjs": {
+      "sha256": "3f0123e6dcd10d0d8b1047d79061de07644352f609e7e879536705aa86774641",
+      "bytes": 1396
+    },
+    "device-version-switch.mjs": {
+      "sha256": "1368d5bfce50bbd808a8aa133941b8edec044a569c1ede16eb3b76f1ed828e37",
+      "bytes": 4525
+    }
+  },
+  "sourceCommit": "20004578bb2dc79ef2bdd944ee36ad2d50a1bd7f",
+  "sharedRootAssets": [
+    "/manifest.webmanifest",
+    "/download/home-entry.css",
+    "/download/home-entry.js",
+    "/h5-bootstrap.css",
+    "/h5-bootstrap.mjs",
+    "/h5-version-entry.mjs"
+  ],
+  "adaptation": "Guarded entry and safe cross-version device switching; original shell retained in scripts/h5-shells. Pairing preserves version path and notification fragments."
+}

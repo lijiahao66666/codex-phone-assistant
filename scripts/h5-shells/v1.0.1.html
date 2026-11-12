@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Codex 手机助手">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" href="/h5/v1.0.1/app-icon.png">
+  <link rel="apple-touch-icon" href="/h5/v1.0.1/app-icon.png">
+  <title>Codex 手机助手</title>
+  <link rel="stylesheet" href="/h5/v1.0.1/desktop.css">
+  <link rel="stylesheet" href="/download/home-entry.css?v=20261106-2">
+  <script defer src="/h5/v1.0.1/markdown-parser.js"></script>
+  <script defer src="/h5/v1.0.1/html-sanitizer.js"></script>
+  <script defer src="/h5/v1.0.1/install-prompt.js"></script>
+  <script defer src="/h5/v1.0.1/jsQR.js"></script>
+  <script defer src="/h5/v1.0.1/pair.js"></script>
+  <script defer src="/h5/v1.0.1/desktop.js"></script>
+  <script defer src="/download/home-entry.js?v=20261106-2"></script>
+</head>
+<body>
+  <section id="install-prompt" class="install-prompt" aria-label="添加到主屏幕" hidden>
+    <button id="install-dismiss" class="install-dismiss" type="button" aria-label="关闭">×</button>
+    <strong>添加到主屏幕</strong>
+    <p id="install-message"></p>
+    <button id="install-action" class="install-action" type="button" hidden>添加</button>
+  </section>
+  <div class="app">
+    <button id="device-scrim" class="device-scrim" type="button" aria-label="关闭电脑列表" hidden></button>
+    <button id="scrim" class="scrim" type="button" aria-label="关闭侧栏" hidden></button>
+    <aside id="sidebar" class="sidebar" aria-label="侧栏">
+      <div class="brand"><strong>Codex 手机助手</strong><button id="close-sidebar" class="icon-button close-sidebar" type="button" aria-label="关闭侧栏" title="关闭侧栏">×</button></div>
+      <button id="new-chat" class="new-chat" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新聊天</button><div class="side-label">项目</div><nav id="project-list" class="project-list" aria-label="项目和任务"><p class="list-status">加载中...</p></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar"><button id="open-sidebar" class="icon-button open-sidebar" type="button" aria-label="打开侧栏" title="打开侧栏">☰</button><h1 id="title">尚未选择任务</h1><button id="toggle-summary" class="icon-button summary-toggle" type="button" aria-label="打开任务摘要" aria-expanded="false" title="任务摘要">☷</button></header>
+      <div class="device-bar"><details id="devices" class="devices" hidden><summary id="device-current">电脑</summary><div class="device-menu"><div class="device-menu-header"><strong>已配对电脑</strong></div><div id="device-list" class="device-list"></div><button id="pair-another" class="device-add" type="button">配对其他电脑</button></div></details><button id="unpaired-control" class="unpaired-control" type="button" hidden>未配对 · 去配对</button><select id="current-project" class="current-project" aria-label="当前项目" hidden disabled></select><span id="connection" class="connection" role="status">未连接</span></div>
+      <div id="new-project-bar" class="new-project-bar" hidden><label for="new-project">项目</label><select id="new-project" aria-label="选择项目"></select><select id="new-model" aria-label="选择模型"><option value="">自动</option></select><select id="new-effort" aria-label="选择推理强度" disabled><option value="">自动</option></select></div>
+      <section class="conversation" aria-live="polite">
+        <div class="conversation-inner"><span id="history" class="history"></span><p id="error" class="error" role="alert" hidden></p><div id="turns" class="turns"></div></div>
+      </section>
+      <button id="scroll-bottom" class="scroll-bottom" type="button" aria-label="回到最新消息" title="回到最新消息" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6"/></svg></button>
+      <div id="goal-panel" class="goal-panel" hidden><span id="goal-status" class="goal-status"></span><button id="goal-objective" class="goal-objective" type="button" aria-label="展开或收起目标"></button><span id="goal-duration" class="goal-duration"></span></div>
+      <div id="recovery-control" class="recovery-control" hidden><button id="recover-chat" type="button">继续聊天</button><span id="recovery-status" role="status" aria-live="polite"></span></div>
+      <div class="composer"><div id="image-draft" class="image-draft" hidden></div><form id="composer-form" class="composer-inner"><div id="attachment-control" class="attachment-control" hidden><button id="attachment-toggle" class="voice-button" type="button" title="添加" aria-label="添加" aria-expanded="false" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><span id="plan-badge" class="plan-badge" hidden>计划</span><div id="attachment-menu" class="attachment-menu" hidden><button id="image-choose" type="button" hidden disabled>图片</button><button id="file-choose" type="button" hidden disabled>添加附件</button><button id="mode-choose" type="button" hidden disabled>计划模式</button></div></div><input id="image-file" type="file" multiple accept="image/png,image/jpeg,image/webp" hidden><input id="attachment-file" type="file" multiple hidden><textarea id="message" aria-label="输入消息" placeholder="选择任务后输入消息" rows="1" maxlength="32000" disabled></textarea><button id="voice-input" class="voice-button" type="button" title="语音输入" aria-label="语音输入" aria-pressed="false" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v4M9 22h6"></path></svg></button><button id="stop-turn" class="send-button stop-button" type="button" title="停止任务" aria-label="停止任务" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"></rect></svg></button><button id="send-message" class="send-button" type="submit" title="发送消息" aria-label="发送消息" disabled>↑</button></form><p id="mode-status" class="send-status" role="status" aria-live="polite"></p><p id="voice-status" class="voice-status" role="status" aria-live="polite"></p><p id="stop-status" class="send-status" role="status" aria-live="polite"></p><div class="send-feedback"><p id="send-status" class="send-status" role="status" aria-live="polite"></p><button id="abandon-prepared" class="unlock-send" type="button" hidden>放弃此次发送并打开聊天</button><button id="unlock-send" class="unlock-send" type="button" hidden>确认后允许重发</button></div></div>
+    </main>
+    <button id="summary-scrim" class="summary-scrim" type="button" aria-label="关闭任务摘要" hidden></button><aside id="summary-panel" class="summary-panel" aria-label="任务摘要" hidden><div class="summary-header"><strong>任务摘要</strong></div><div id="summary-content" class="summary-content"></div></aside>
+  </div>
+  <div id="pair-overlay" class="pair-overlay" hidden>
+    <button id="pair-scrim" class="pair-scrim" type="button" aria-label="关闭配对"></button>
+    <section class="pair-dialog" role="dialog" aria-modal="true" aria-labelledby="pair-title">
+      <header><h2 id="pair-title">配对电脑</h2><button id="pair-close" type="button" aria-label="关闭配对">×</button></header>
+      <form id="pair-form">
+        <label for="code">配对码</label><input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+        <button id="scan" class="pair-secondary" type="button">扫描电脑二维码</button>
+        <p id="pair-error" class="pair-error" role="alert" hidden></p>
+        <button id="submit" class="pair-submit" type="submit">配对</button><button id="cancel-pair" class="pair-secondary" type="button" hidden>取消等待</button>
+      </form>
+      <p class="download-entry">还没有安装电脑端？<a href="/download/">下载电脑端</a></p>
+    </section>
+  </div>
+  <section id="scanner" class="scanner" role="dialog" aria-modal="true" aria-labelledby="scanner-title" aria-describedby="scan-status" hidden>
+    <video id="camera" autoplay muted playsinline></video><canvas id="scan-canvas" hidden></canvas>
+    <header class="scanner-header"><button id="stop-scan" class="scanner-close" type="button" aria-label="关闭扫码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button><h2 id="scanner-title">扫描二维码</h2></header>
+    <div class="scanner-guide" aria-hidden="true"></div>
+    <div class="scanner-footer"><p id="scan-status" role="status" aria-live="polite">将电脑端的配对二维码放入框内</p><button id="scan-manual" type="button">输入配对码</button></div>
+  </section>
+  <div id="pairing-conflict" class="pairing-conflict" hidden>
+    <button id="pairing-conflict-scrim" class="pair-scrim" type="button" aria-label="关闭提示"></button>
+    <section class="pair-dialog pairing-conflict-dialog" role="alertdialog" aria-modal="true" aria-labelledby="pairing-conflict-title">
+      <h2 id="pairing-conflict-title">手机配对已切换</h2>
+      <p id="pairing-conflict-message">此电脑已与另一台手机配对。点击“恢复本机”，可切回当前手机。</p>
+      <div class="pairing-conflict-actions"><button id="pairing-conflict-dismiss" class="pair-secondary" type="button">知道了</button><button id="pairing-conflict-restore" class="pair-submit" type="button">恢复本机</button></div>
+      <p id="pairing-conflict-error" class="pair-error" role="alert" hidden></p>
+    </section>
+  </div>
+</body>
+</html>

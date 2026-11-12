@@ -1,0 +1,102 @@
+{
+  "version": "v1.0.2",
+  "sourceRef": "fd0e549",
+  "assets": {
+    "app-icon.png": {
+      "sha256": "0bbf12f14f23295737d55ad60e3a23ca9389dacb4755ec6e18745ee1aad61bab",
+      "bytes": 12015
+    },
+    "attachment-preview.mjs": {
+      "sha256": "73be0162d64f1285b7cbc022b6d7f2eb5c336b615eb24845b240407f50a0ac8b",
+      "bytes": 6877
+    },
+    "desktop.css": {
+      "sha256": "cea1dac5a9a7088b97813c35e44be09eee124d351a9b4a2b4358179bcca8e3b5",
+      "bytes": 69521
+    },
+    "desktop.html": {
+      "sha256": "d08e938209ffcfff4fbb41e0aac60bb067db0012a19f844075f249cd48898cbb",
+      "bytes": 13916
+    },
+    "desktop.js": {
+      "sha256": "61ee8d988f130492d20c11e2dcd0ad829ed2afad99174555f145ae327debaedc",
+      "bytes": 351381
+    },
+    "html-sanitizer.js": {
+      "sha256": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31",
+      "bytes": 29828
+    },
+    "install-prompt.js": {
+      "sha256": "282f1c9223a71dd9ece8bc620282d1642229529483f9541ec84f40bcbb76d704",
+      "bytes": 3807
+    },
+    "jsQR.js": {
+      "sha256": "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859",
+      "bytes": 256885
+    },
+    "markdown-parser.js": {
+      "sha256": "c34a221dc89e91833a88822e7717b8a0cf27118f8c9a8779dffb48a6be31f97a",
+      "bytes": 50548
+    },
+    "notification-presence.js": {
+      "sha256": "40df257fd1d9790c64b54fc1da6f3f261cbd42da1b265893e2a3df49b9563a17",
+      "bytes": 7171
+    },
+    "notification-worker.js": {
+      "sha256": "fb892cfa61f70c5b96ca526d6d9b726b3987d6daaf9242f8fe41dc54feecf5c9",
+      "bytes": 5233
+    },
+    "notifications.js": {
+      "sha256": "fb103b20b14e398e6eeedc5c8b55c7d80c0fcb381ce1ee5b69deca2b4b773c09",
+      "bytes": 13108
+    },
+    "pair.css": {
+      "sha256": "ee34f735dd862cd60a416b2817c93a7367384f2a8b4d3b8b3ec53c6e2a578f57",
+      "bytes": 2084
+    },
+    "pair.js": {
+      "sha256": "04ea30417921fdfa2d219999460b9ae62b24c610f0f5555b69ec23dcb177da5f",
+      "bytes": 10329
+    },
+    "pdf-parser.mjs": {
+      "sha256": "bccc24ea711db8e44503629519904a5292d73b9daaa214bbe7cdcc282b0f4259",
+      "bytes": 523774
+    },
+    "pdf-worker.mjs": {
+      "sha256": "145d2dd3ab0c86151011dba95acfa2d5336e2accd59388ea43dbee0efddaaec6",
+      "bytes": 1321307
+    },
+    "recovery-attempt-store.js": {
+      "sha256": "226dfbe7452673bcfd6bf6d58091657a0559d55bddef7b97ee78cbd13447b8d8",
+      "bytes": 3490
+    },
+    "state-chunks.mjs": {
+      "sha256": "8199934f6e12887a2cb971d5313043af71968eb309bc4da75d259db211e04475",
+      "bytes": 5531
+    },
+    "task-reminder-store.js": {
+      "sha256": "ff16fff621d428822083cbd8f8f51ace0d19034724df160f6f0682cf8923d51b",
+      "bytes": 11540
+    },
+    "device-switch-lock.mjs": {
+      "sha256": "3f0123e6dcd10d0d8b1047d79061de07644352f609e7e879536705aa86774641",
+      "bytes": 1396
+    },
+    "device-version-switch.mjs": {
+      "sha256": "1368d5bfce50bbd808a8aa133941b8edec044a569c1ede16eb3b76f1ed828e37",
+      "bytes": 4525
+    }
+  },
+  "sourceCommit": "fd0e549f6096ed31e936946ba69fc8222ece2fad",
+  "sharedRootAssets": [
+    "/manifest.webmanifest",
+    "/download/home-entry.css",
+    "/download/home-entry.js",
+    "/notification-worker.js",
+    "/task-reminder-store.js",
+    "/h5-bootstrap.css",
+    "/h5-bootstrap.mjs",
+    "/h5-version-entry.mjs"
+  ],
+  "adaptation": "Guarded entry and safe cross-version device switching; original shell retained in scripts/h5-shells. Pairing preserves version path and notification fragments."
+}

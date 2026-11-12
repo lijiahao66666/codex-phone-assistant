@@ -382,7 +382,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       }
       if (mutation) activeMutations++;
       try {
-      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, desktopUnreadOpen: 1, activity: 1, ...(threadSearch ? { threadSearch: 1 } : {}), ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'flow-probe') { send({ type: 'capabilities', uiProtocol: 1, streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, desktopUnreadOpen: 1, activity: 1, ...(threadSearch ? { threadSearch: 1 } : {}), ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
       if (msg.type === 'notification-settings') {
         if (msg.enabled === true && !notificationMonitor && connection === ws && !shuttingDown) {
           notificationMonitor = (createNotificationMonitorForTests || (options => new TaskNotificationMonitor(options)))({ createSession, listThreads: listAuthorizedThreads,

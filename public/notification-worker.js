@@ -64,6 +64,9 @@ self.addEventListener('notificationclick', event => {
     const url = new URL('/', self.location.origin);
     url.hash = new URLSearchParams({ notificationHost: data.hostId, notificationDevice: data.deviceId, notificationThread: data.threadId }).toString();
     const pages = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    // Versioned pages can be starting up, and the legacy page has no message
+    // listener. Open the scoped entry instead of dropping a notification or
+    // navigating an existing page that may contain an unsent draft.
     const page = pages.find(client => { const current = new URL(client.url); return current.origin === url.origin && current.pathname === '/'; });
     if (page) {
       // Preserve the current draft and connection. The page checks the pair

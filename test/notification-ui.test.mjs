@@ -474,6 +474,13 @@ test('notification click reuses only the actual H5 page and otherwise opens a sc
   await active.dispatch('notificationclick', { ...pairA, threadId });
   assert.equal(focused, true); assert.equal(active.opened.length, 0);
   assert.deepEqual(JSON.parse(JSON.stringify(messages[0])), { type: 'open-notification-task', ...pairA, threadId });
+  for (const version of ['v1.0.1', 'v1.0.2']) {
+    let selected = false;
+    const versioned = await workerFixture([{ url: `https://assistant.example/h5/${version}/desktop.html`, postMessage() { selected = true; }, async focus() {} }]);
+    await versioned.dispatch('notificationclick', { ...pairA, threadId });
+    assert.equal(selected, false); assert.equal(versioned.opened.length, 1);
+    assert.equal(new URL(versioned.opened[0]).pathname, '/');
+  }
 });
 
 test('worker suppresses already-cleared and duplicate push events but displays a new event for the same task', async () => {
