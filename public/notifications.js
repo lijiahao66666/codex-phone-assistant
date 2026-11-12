@@ -64,8 +64,8 @@
       if (!fresh()) return;
       if (iphone() && !standalone()) {
         enable.hidden = disable.hidden = true;
-        onboardingText = '想在后台收到任务提醒？先在 Safari 中添加到主屏幕，再打开并开启通知。';
-        message.textContent = '先在 Safari 中添加到主屏幕，再从主屏幕打开并开启通知。'; return render();
+        onboardingText = '想在后台收到任务提醒？先在浏览器中添加到主屏幕，再打开并开启通知。';
+        message.textContent = '先在浏览器中添加到主屏幕，再从主屏幕打开并开启通知。'; return render();
       }
       if (!supported()) { enable.hidden = disable.hidden = true; onboardingText = null; message.textContent = '当前浏览器不支持任务通知。'; return render(); }
       const registration = await navigator.serviceWorker.getRegistration('/');
