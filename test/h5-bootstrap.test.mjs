@@ -26,7 +26,7 @@ test('the bootstrap shell tracks the pairing page while delaying app scripts', a
 test('chooses the authorized desktop version and preserves notification fragments', async () => {
   assert.deepEqual(await run('unversioned'), { status: 'navigate', path: '/h5/v1.0.1/desktop.html' });
   const hash = '#notificationHost=x&notificationDevice=y&notificationThread=z';
-  assert.deepEqual(await run('v1', hash), { status: 'navigate', path: '/h5/v1.0.2/desktop.html' + hash });
+  assert.deepEqual(await run('v1', hash), { status: 'navigate', path: '/h5/v1.0.2-activity1/desktop.html' + hash });
 });
 
 test('pair links and an unpaired browser load the pairing flow without consuming fragments', async () => {
@@ -54,7 +54,7 @@ test('offline fallback requires a previously verified protocol for the exact pai
   const fetchImpl = async url => url === '/api/devices' ? ok(changed && ++reads > 1 ? { devices: [{ hostId, deviceId: hostId }], currentDeviceId: hostId } : devices) : ok({ status, uiProtocol: status === 'ready' ? 'v1' : null, hostId, deviceId });
   assert.equal((await chooseBootstrap({ fetchImpl, storage })).status, 'navigate');
   status = 'offline';
-  assert.deepEqual(await chooseBootstrap({ fetchImpl, storage }), { status: 'navigate', path: '/h5/v1.0.2/desktop.html', offline: true, scope: { hostId, deviceId } });
+  assert.deepEqual(await chooseBootstrap({ fetchImpl, storage }), { status: 'navigate', path: '/h5/v1.0.2-activity1/desktop.html', offline: true, scope: { hostId, deviceId } });
   assert.deepEqual(await chooseBootstrap({ fetchImpl, storage: { getItem: () => null } }), { status: 'offline' });
   const foreignHost = '33333333-3333-4333-8333-333333333333';
   assert.deepEqual(await chooseBootstrap({ storage, fetchImpl: async url => url === '/api/devices' ? ok({ devices: [{ hostId: foreignHost, deviceId }], currentDeviceId: deviceId }) : ok({ status: 'offline', uiProtocol: null, hostId: foreignHost, deviceId }) }), { status: 'offline' });

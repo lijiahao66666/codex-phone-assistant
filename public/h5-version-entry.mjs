@@ -6,6 +6,7 @@ const common = version => [`/h5/${version}/markdown-parser.js`, `/h5/${version}/
 const scripts = Object.freeze({
   '/h5/v1.0.1/desktop.html': [...common('v1.0.1'), '/h5/v1.0.1/jsQR.js', '/h5/v1.0.1/pair.js', '/h5/v1.0.1/desktop.js', '/download/home-entry.js?v=20261106-2'],
   '/h5/v1.0.2/desktop.html': [...common('v1.0.2'), '/h5/v1.0.2/task-reminder-store.js', '/h5/v1.0.2/notification-presence.js', '/h5/v1.0.2/notifications.js', '/h5/v1.0.2/jsQR.js', '/h5/v1.0.2/pair.js', '/h5/v1.0.2/desktop.js', '/download/home-entry.js?v=20261106-2'],
+  '/h5/v1.0.2-activity1/desktop.html': [...common('v1.0.2-activity1'), '/h5/v1.0.2-activity1/task-reminder-store.js', '/h5/v1.0.2-activity1/notification-presence.js', '/h5/v1.0.2-activity1/notifications.js', '/h5/v1.0.2-activity1/jsQR.js', '/h5/v1.0.2-activity1/pair.js', '/h5/v1.0.2-activity1/desktop.js', '/download/home-entry.js?v=20261106-2'],
 });
 
 export async function decideVersionEntry({ pathname, hash = '', fetchImpl, storage, signal } = {}) {

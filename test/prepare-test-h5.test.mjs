@@ -13,13 +13,13 @@ test('test deployment brands the bootstrap and both pinned versions without touc
   try {
     const result = spawnSync(process.execPath, [fileURLToPath(script), '--output', root, '--origin', 'https://test.example.com'], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
-    for (const path of ['desktop.html', 'h5-bootstrap.html', 'h5/v1.0.1/desktop.html', 'h5/v1.0.2/desktop.html']) {
+    for (const path of ['desktop.html', 'h5-bootstrap.html', 'h5/v1.0.1/desktop.html', 'h5/v1.0.2/desktop.html', 'h5/v1.0.2-activity1/desktop.html']) {
       const html = await readFile(join(root, path), 'utf8');
       assert.match(html, /Codex 手机助手 · 测试版/); assert.match(html, /测试环境/); assert.match(html, /title="https:\/\/test\.example\.com"/);
       if (path.includes('/')) assert.match(html, /h5-version-entry\.mjs/);
       if (path === 'h5-bootstrap.html') assert.match(html, /h5-bootstrap\.mjs/);
     }
-    for (const version of ['v1.0.1', 'v1.0.2']) {
+    for (const version of ['v1.0.1', 'v1.0.2', 'v1.0.2-activity1']) {
       const dir = join(root, 'h5', version), manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'));
       assert.equal(manifest.testOverlayOrigin, 'https://test.example.com');
       for (const name of ['desktop.html', 'desktop.css']) { const bytes = await readFile(join(dir, name)); assert.deepEqual(manifest.assets[name], { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length }); }

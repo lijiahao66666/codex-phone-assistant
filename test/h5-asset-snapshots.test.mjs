@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
-for (const [version, commit] of [['v1.0.1','20004578bb2dc79ef2bdd944ee36ad2d50a1bd7f'], ['v1.0.2','fd0e549f6096ed31e936946ba69fc8222ece2fad']]) {
+for (const [version, commit] of [['v1.0.1','20004578bb2dc79ef2bdd944ee36ad2d50a1bd7f'], ['v1.0.2','fd0e549f6096ed31e936946ba69fc8222ece2fad'], ['v1.0.2-activity1','fd0e549f6096ed31e936946ba69fc8222ece2fad']]) {
   test(`${version} immutable H5 snapshot matches manifest and keeps application assets in its version`, async () => {
     const dir = new URL(`../public/h5/${version}/`, import.meta.url);
     const manifest = JSON.parse(await readFile(new URL('manifest.json', dir), 'utf8'));

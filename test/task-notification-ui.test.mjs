@@ -46,7 +46,7 @@ async function fixture(options = {}) {
     localStorage: options.localStorage ?? { getItem() { return null; }, removeItem() {}, setItem() {} }, sessionStorage: { removeItem() {} }, store: { read: async () => null },
     fetch: options.fetch ?? (async () => { throw new Error('This interaction fixture must not make a network request'); }),
   });
-  const source = (await readFile(new URL('../public/desktop.js', import.meta.url), 'utf8')).replace("import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore())", 'Promise.resolve(store)');
+  const source = (await readFile(new URL(options.snapshot ? '../public/h5/v1.0.2-activity1/desktop.js' : '../public/desktop.js', import.meta.url), 'utf8')).replace(/import\('(?:\/h5\/v1\.0\.2-activity1)?\/recovery-attempt-store\.js'\)\.then\(module => module\.createRecoveryAttemptStore\(\)\)/, 'Promise.resolve(store)');
   const run = code => vm.runInContext(code, context);
   run(source);
   const settingsPanel = nodes.get('#settings-panel'), settingsOverlay = nodes.get('#settings-overlay');
@@ -176,7 +176,7 @@ test('local reminder persistence follows the exact pair and viewing a task clear
   f.run(`selectedId='${a}'`); f.document.hidden = true;
   f.notify(notification(a, 'question')); assert.equal(f.row(a).querySelector('.task-notification').hidden, false);
   f.document.hidden = false; f.run('updateComposer()');
-  assert.equal(f.row(a).querySelector('.task-notification').hidden, true); assert.equal(removes.at(-1).threadId, a);
+  assert.equal(f.row(a).querySelector('.task-notification').textContent, '待回答', 'returning must not dismiss an unanswered question');
 });
 
 test('restoring persisted task reminders uses the authoritative current list and ignores a late previous-pair read', async () => {
@@ -184,8 +184,8 @@ test('restoring persisted task reminders uses the authoritative current list and
   f.window.taskReminderStore = { async list() { return [notification(b), notification(hostId), notification(a, 'question')]; }, async put() {}, async remove() {} };
   await f.window.restoreTaskReminders();
   assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
-  assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1');
+  assert.equal(f.row(a).querySelector('.task-notification').textContent, '待回答');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '2');
   let release;
   f.window.taskReminderStore.list = () => new Promise(resolve => { release = resolve; });
   const pending = f.window.restoreTaskReminders(); f.run('invalidateDeviceState()');
@@ -656,10 +656,31 @@ test('activity snapshot displays incomplete and unknown state without calling it
   f.nodes.get('#sidebar').classList.contains = name => name === 'open';
   await f.run('refreshActivityView()');
   const view = f.nodes.get('#activity-view');
-  assert.equal(view.querySelector('.activity-row').textContent, 'Waiting');
-  assert.equal(view.querySelector('.activity-label').textContent, '待回答 · 待审批');
+  assert.equal(view.querySelector('.activity-row').querySelector('.task-title').textContent, 'Waiting');
+  assert.equal(view.querySelector('.task-notification').textContent, '待回答 · 待审批');
   assert.match(view.querySelector('.activity-note').textContent, /检查中/);
   assert.doesNotMatch(view.querySelector('.activity-note').textContent, /没有活动/);
+});
+
+for (const snapshot of [false, true]) test(`activity rows use the same spinner, blue dot and waiting priority as project tasks (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const f = await fixture({ snapshot, fetch: async () => ({ ok: true, json: async () => ({ complete: true, scopeKey: 'a'.repeat(64), items: [
+    { id: b, title: 'Running', unread: true, active: true, statusKnown: true },
+    { id: c, title: 'Unread', unread: true, active: false, statusKnown: true },
+  ] }) }) });
+  f.run(`nativeUnreadAvailable=true;nativeUnreadScope='${'a'.repeat(64)}'`);
+  f.nodes.get('#activity-view').hidden = false; f.nodes.get('#sidebar').classList.contains = name => name === 'open';
+  await f.run('refreshActivityView()');
+  let rows = f.nodes.get('#activity-view').querySelectorAll('.activity-row');
+  const byTitle = title => rows.find(row => row.querySelector('.task-title').textContent === title);
+  assert.equal(byTitle('Running').querySelector('.task-active').hidden, false);
+  assert.equal(byTitle('Running').querySelector('.task-notification').hidden, true);
+  assert.equal(byTitle('Unread').querySelector('.task-active').hidden, true);
+  assert.equal(byTitle('Unread').querySelector('.task-notification').dataset.kind, 'completed');
+  assert.equal(byTitle('Unread').querySelector('.task-notification').hidden, false);
+  f.notify(notification(b, 'approval'));
+  rows = f.nodes.get('#activity-view').querySelectorAll('.activity-row');
+  assert.equal(byTitle('Running').querySelector('.task-active').hidden, true);
+  assert.equal(byTitle('Running').querySelector('.task-notification').textContent, '待审批');
 });
 
 test('search ignores stale responses and paginates distinct results', async () => {
@@ -730,4 +751,59 @@ test('an old search unread snapshot cannot overwrite a newer list read or a diff
   f.run('++listRequestGeneration');
   resolve({ ok: true, json: async () => ({ scopeKey: 'a'.repeat(64), results: [{ id: b, title: 'Older', unread: true }] }) });
   await pending; assert.equal(f.run(`nativeUnread.get('${b}')`), false);
+});
+
+for (const snapshot of [false, true]) test(`returning to a selected task clears its completed reminder locally, including late hydration (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const requests = [], removals = [];
+  const f = await fixture({ snapshot, fetch: async (url, request) => { requests.push({ url, request }); return { ok: true }; } });
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  const current = notification(a, 'completed', { createdAt: 100 });
+  const other = notification(b, 'completed', { createdAt: 101 });
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent(pair, event) { removals.push(event); }, async list() { return [current, other]; } };
+  f.visibility(true); f.notify(current); f.notify(other);
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '2');
+  f.visibility(false); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1');
+  assert.equal(removals.filter(event => event.eventId === current.eventId).length, 1);
+  assert.equal(requests.filter(item => item.url === '/api/notifications/read').length, 1);
+  await f.window.restoreTaskReminders();
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, true, 'late storage replay must not restore the current reminder');
+
+  const late = await fixture({ snapshot, fetch: async () => ({ ok: true }) });
+  late.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  let resolveList; const lateRemovals = [];
+  late.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent(pair, event) { lateRemovals.push(event); }, list: () => new Promise(resolve => { resolveList = resolve; }) };
+  late.visibility(true); const hydration = late.window.restoreTaskReminders(); late.visibility(false);
+  const lateCompletion = notification(a, 'completed', { createdAt: 200 });
+  resolveList([lateCompletion, notification(b, 'approval', { createdAt: 201 })]);
+  await hydration;
+  assert.equal(lateRemovals.filter(item => item.eventId === lateCompletion.eventId).length, 1, 'late completion receives an exact durable read receipt and updates the app badge');
+  assert.equal(late.row(a).querySelector('.task-notification').hidden, true);
+  assert.equal(late.row(b).querySelector('.task-notification').textContent, '待审批');
+});
+
+for (const snapshot of [false, true]) test(`foreground return preserves pending action and clears a late native unread for the viewed pair (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const f = await fixture({ snapshot });
+  f.visibility(true); f.notify(notification(a, 'question')); f.visibility(false);
+  assert.equal(f.row(a).querySelector('.task-notification').textContent, '待回答');
+  f.run('updateComposer()');
+  assert.equal(f.row(a).querySelector('.task-notification').textContent, '待回答');
+  f.run(`taskNotifications.delete('${a}');connected=false`);
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey: 'a'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === a ? { ...task, unread: true } : task) }] });
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
+  f.run(`historyScopeGeneration++; selectedId='${b}'`);
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey: 'b'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === a ? { ...task, unread: true } : task) }] });
+  assert.equal(f.row(a).querySelector('.task-notification').hidden, false, 'the foreground receipt cannot cross pair generations or tasks');
+});
+
+for (const snapshot of [false, true]) test(`opening a notification target before persisted reminders load keeps it read (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const f = await fixture({ snapshot, fetch: async () => ({ ok: true }) });
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  const viewed = notification(b, 'completed', { createdAt: 200 });
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent() {}, async list() { return [viewed]; } };
+  f.row(b).click(); await f.window.restoreTaskReminders();
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').hidden, true);
 });

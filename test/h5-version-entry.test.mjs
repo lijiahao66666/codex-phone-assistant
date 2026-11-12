@@ -16,11 +16,13 @@ test('both fixed versions delay application scripts until the entry guard succee
   }
 });
 test('a direct version page starts only after the current desktop proves the matching protocol', async () => {
-  const pathname = '/h5/v1.0.2/desktop.html';
+  const pathname = '/h5/v1.0.2-activity1/desktop.html';
   const result = await decideVersionEntry({ pathname, hash: '#notificationThread=abc', fetchImpl: fetchFor('ready', 'v1') });
-  assert.equal(result.status, 'load'); assert.ok(result.scripts.includes('/h5/v1.0.2/notifications.js'));
-  assert.ok(result.scripts.every(src => src.startsWith('/h5/v1.0.2/') || src.startsWith('/download/')));
+  assert.equal(result.status, 'load'); assert.ok(result.scripts.includes('/h5/v1.0.2-activity1/notifications.js'));
+  assert.ok(result.scripts.every(src => src.startsWith('/h5/v1.0.2-activity1/') || src.startsWith('/download/')));
   assert.deepEqual(await decideVersionEntry({ pathname, hash: '#new', fetchImpl: fetchFor('ready', 'unversioned') }), { status: 'navigate', path: '/#new' });
+  assert.deepEqual(await decideVersionEntry({ pathname: '/h5/v1.0.2/desktop.html', hash: '#thread=example', fetchImpl: fetchFor('ready', 'v1') }), { status: 'navigate', path: '/h5/v1.0.2-activity1/desktop.html#thread=example' });
+  assert.equal((await decideVersionEntry({ pathname: '/h5/v1.0.1/desktop.html', fetchImpl: fetchFor('ready', 'unversioned') })).status, 'load');
 });
 test('offline and unsupported direct pages do not load scripts or guess a version', async () => {
   for (const status of ['offline', 'pending', 'unsupported']) assert.deepEqual(await decideVersionEntry({ pathname: '/h5/v1.0.1/desktop.html', fetchImpl: fetchFor(status, null) }), { status });

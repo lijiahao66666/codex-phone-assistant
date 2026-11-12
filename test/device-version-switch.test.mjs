@@ -30,7 +30,7 @@ test('cross-version selection keeps drafts in the existing page and never change
 test('empty cross-version selection binds the exact profile and rechecks the device before navigating', async () => {
   const f = fixture();
   assert.equal((await switchDeviceVersion(f.options)).status, 'navigating');
-  assert.equal(f.state().navigation, '/h5/v1.0.2/desktop.html#thread=example'); assert.equal(f.state().changed, 1);
+  assert.equal(f.state().navigation, '/h5/v1.0.2-activity1/desktop.html#thread=example'); assert.equal(f.state().changed, 1);
   const selection = f.state().requests.find(item => item.url === '/api/devices/select');
   assert.deepEqual(JSON.parse(selection.options.body), { deviceId: f.options.target.deviceId, expectedDeviceId: f.options.current.deviceId, uiProtocol: 'v1', profileEpoch: f.options.testEpoch });
   assert.equal(selection.options.headers['x-codex-expected-device'], f.options.current.deviceId);
