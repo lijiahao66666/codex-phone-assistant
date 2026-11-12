@@ -2716,7 +2716,7 @@ const pendingTaskNotifications = new Map();
 const taskNotificationWatermarks = new Map();
 const taskNotificationReceipts = new Map();
 const desktopNotificationReads = new Map();
-const desktopNotificationReadFailures = new Set();
+const pendingDesktopNotificationReads = new Map();
 let desktopNotificationReadScope = null;
 function desktopNotificationReadRequired() {
   if (!historyScope) return false;
@@ -2737,16 +2737,18 @@ window.setDesktopNotificationReadReady = (pair, ready, supported) => {
 function needsDesktopNotificationRead(id) { return desktopNotificationReadRequired() && taskNotifications.get(id)?.kind === 'completed'; }
 function retainsDesktopNotification(notification) { return needsDesktopNotificationRead(notification.threadId) && taskNotifications.get(notification.threadId)?.eventId === notification.eventId; }
 function requestDesktopNotificationRead(id) {
-  const notification = taskNotifications.get(id);
-  if (!needsDesktopNotificationRead(id) || document.hidden === true || pageSuspended) return;
+  const notification = taskNotifications.get(id) || pendingDesktopNotificationReads.get(id);
+  if (!historyScope || notification?.kind !== 'completed' || document.hidden === true || pageSuspended) return;
   const pair = { ...historyScope }, generation = historyScopeGeneration;
+  // Reading on the phone is immediate; Desktop synchronization runs independently.
+  trackTaskNotificationReceipt({ ...notification, ...pair, threadId: id }, window.clearTaskNotificationEvent({ ...notification, ...pair, threadId: id }, { exactOnly: true }));
+  pendingDesktopNotificationReads.set(id, notification);
+  if (pendingDesktopNotificationReads.size > 512) pendingDesktopNotificationReads.delete(pendingDesktopNotificationReads.keys().next().value);
   const key = JSON.stringify([pair.hostId, pair.deviceId, id, notification.eventId]);
   if (desktopNotificationReads.has(key)) return;
-  if (desktopNotificationReadScope?.ready !== true) {
-    desktopNotificationReadFailures.add(notification.eventId); refreshTaskNotificationIndicators(); return;
-  }
+  if (desktopNotificationReadScope?.ready !== true) return;
   const controller = new AbortController(), operation = { threadId: id, controller };
-  desktopNotificationReads.set(key, operation); desktopNotificationReadFailures.delete(notification.eventId);
+  desktopNotificationReads.set(key, operation);
   const isCurrent = () => !controller.signal.aborted && historyScopeGeneration === generation && historyScope?.hostId === pair.hostId && historyScope?.deviceId === pair.deviceId;
   const timeout = setTimeout(() => controller.abort(), 10000);
   void (async () => {
@@ -2755,14 +2757,10 @@ function requestDesktopNotificationRead(id) {
         headers: { 'content-type': 'application/json', 'x-codex-expected-device': pair.deviceId }, body: JSON.stringify({ threadId: id, eventId: notification.eventId }) });
       if (!isCurrent()) return;
       if (!response.ok) throw new Error('desktop-read-unconfirmed');
-      // Only the desktop clear event (or its authenticated catch-up) clears the marker.
+      if (pendingDesktopNotificationReads.get(id)?.eventId === notification.eventId) pendingDesktopNotificationReads.delete(id);
       await window.syncClearedTaskNotifications?.();
     } catch {
-      if (isCurrent() && taskNotifications.get(id)?.eventId === notification.eventId) {
-        desktopNotificationReadFailures.add(notification.eventId);
-        if (desktopNotificationReadFailures.size > 512) desktopNotificationReadFailures.delete(desktopNotificationReadFailures.values().next().value);
-        refreshTaskNotificationIndicators();
-      }
+      // Keep the phone read receipt; another user click may retry Desktop sync.
     } finally { clearTimeout(timeout); if (desktopNotificationReads.get(key) === operation) desktopNotificationReads.delete(key); }
   })();
 }
@@ -2809,7 +2807,7 @@ function renderTaskNotification(marker, notification, state = 'idle') {
   marker.hidden = !notification || (notification.kind === 'completed' && (taskStatusIsActive(state) || state === 'checking'));
   marker.dataset.kind = notification?.kind || '';
   marker.textContent = notification ? taskNotificationSymbols[notification.kind] : '';
-  marker.title = notification ? desktopNotificationReadFailures.has(notification.eventId) ? '未能同步已读，点按任务重试' : taskNotificationLabels[notification.kind] : '';
+  marker.title = notification ? taskNotificationLabels[notification.kind] : '';
   marker.setAttribute('aria-label', notification ? notification.kind === 'completed' ? '有新提醒，任务已完成' : taskNotificationSymbols[notification.kind] : '');
 }
 function refreshTaskNotificationIndicators(prune = false) {
@@ -2858,7 +2856,7 @@ function clearTaskNotification(id, force = false) {
   if ((changed || force) && historyScope) void window.taskReminderStore?.remove(historyScope, id)?.catch(() => {});
   if (changed) refreshTaskNotificationIndicators();
 }
-function clearTaskNotifications() { cancelDesktopNotificationReads(); desktopNotificationReadScope = null; desktopNotificationReadFailures.clear(); taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationWatermarks.clear(); taskNotificationReceipts.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
+function clearTaskNotifications() { cancelDesktopNotificationReads(); desktopNotificationReadScope = null; pendingDesktopNotificationReads.clear(); taskNotifications.clear(); taskNotificationEvents.clear(); clearedTaskNotificationEvents.clear(); pendingTaskNotifications.clear(); taskNotificationWatermarks.clear(); taskNotificationReceipts.clear(); taskNotificationVersions.clear(); lastTaskNotificationListComplete = false; refreshTaskNotificationIndicators(); }
 window.clearTaskNotificationEvent = async (notification, { exactOnly = false } = {}) => {
   if (!notification || !historyScope || historyScope.hostId !== notification.hostId || historyScope.deviceId !== notification.deviceId || !uuid.test(notification.threadId || '') || typeof notification.eventId !== 'string' || !notification.eventId || notification.eventId.length > 512) return false;
   const pair = { ...historyScope }, generation = historyScopeGeneration;
@@ -2981,7 +2979,7 @@ function renderTask(task) {
   button.append(notificationIndicator);
   // Unread indicators are deferred until H5 can acknowledge desktop read state.
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
-  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } cancelDesktopNotificationReads(task.id); if (needsDesktopNotificationRead(task.id)) requestDesktopNotificationRead(task.id); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } cancelDesktopNotificationReads(task.id); if (needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id)) requestDesktopNotificationRead(task.id); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {

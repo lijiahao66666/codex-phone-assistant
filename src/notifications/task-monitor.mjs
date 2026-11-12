@@ -148,8 +148,8 @@ export class TaskNotificationMonitor {
   }
 
   // A phone click may use Desktop's normal navigation to mark one completion
-  // read. Opening is a side effect, never a heartbeat or a permission to clear
-  // locally: only a same-identity native receipt authorizes the clear event.
+  // read. Opening is a side effect, never a native read receipt: only a
+  // same-identity native receipt authorizes the desktop clear event.
   async readOnDesktop({ threadId, eventId } = {}, { isCancelled = () => false } = {}) {
     const fail = code => { throw Object.assign(new Error('Desktop read was not confirmed'), { code }); };
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId || '') || typeof eventId !== 'string' || !eventId || eventId.length > 512 || typeof isCancelled !== 'function') fail('invalid');
