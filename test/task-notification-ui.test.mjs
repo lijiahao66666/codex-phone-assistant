@@ -646,3 +646,88 @@ test('a later completed event still shows while a previous native unread bit rem
   assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
   assert.equal(f.row(b).querySelector('.task-notification').getAttribute('aria-label'), '有新提醒，任务已完成');
 });
+
+test('activity snapshot displays incomplete and unknown state without calling it empty', async () => {
+  const f = await fixture({ fetch: async url => {
+    assert.equal(url, '/api/activity');
+    return { ok: true, json: async () => ({ complete: false, items: [{ id: b, title: 'Waiting', waiting: 'both', statusKnown: true }, { id: c, title: 'Unknown', statusKnown: false }] }) };
+  } });
+  f.nodes.get('#activity-view').hidden = false;
+  f.nodes.get('#sidebar').classList.contains = name => name === 'open';
+  await f.run('refreshActivityView()');
+  const view = f.nodes.get('#activity-view');
+  assert.equal(view.querySelector('.activity-row').textContent, 'Waiting');
+  assert.equal(view.querySelector('.activity-label').textContent, '待回答 · 待审批');
+  assert.match(view.querySelector('.activity-note').textContent, /检查中/);
+  assert.doesNotMatch(view.querySelector('.activity-note').textContent, /没有活动/);
+});
+
+test('search ignores stale responses and paginates distinct results', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: async (url, options) => new Promise(resolve => requests.push({ url, options, resolve })) });
+  const input = f.nodes.get('#thread-search');
+  input.value = 'old'; const old = f.run('searchThreads()');
+  input.value = 'new'; const current = f.run('searchThreads()');
+  requests[1].resolve({ ok: true, json: async () => ({ results: [{ id: b, title: 'New', snippet: 'match' }], nextCursor: 'next' }) });
+  await current;
+  requests[0].resolve({ ok: true, json: async () => ({ results: [{ id: a, title: 'Old' }] }) });
+  await old;
+  assert.deepEqual(f.nodes.get('#search-results').querySelectorAll('.search-row').map(row => row.textContent), ['New']);
+  const more = f.run('searchThreads(true)');
+  assert.equal(JSON.parse(requests[2].options.body).cursor, 'next');
+  requests[2].resolve({ ok: true, json: async () => ({ results: [{ id: b, title: 'Duplicate' }, { id: c, title: 'Next' }], nextCursor: null }) });
+  await more;
+  assert.deepEqual(f.nodes.get('#search-results').querySelectorAll('.search-row').map(row => row.textContent), ['New', 'Next']);
+});
+
+test('search only navigates Desktop after opening an unread result, never while browsing or searching', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: async (url, options) => {
+    requests.push(url);
+    if (url === '/api/threads/search') return { ok: true, json: async () => ({ results: [{ id: b, title: 'Unread result' }], nextCursor: null }) };
+    return { ok: true, json: async () => ({}) };
+  } });
+  f.run(`nativeUnreadAvailable=true; nativeUnreadScope='${'a'.repeat(64)}'; nativeUnread.set('${b}',true);`);
+  f.nodes.get('#view-search').click();
+  f.nodes.get('#thread-search').value = 'Unread';
+  await f.run('searchThreads()');
+  assert.deepEqual(requests, ['/api/threads/search']);
+  f.nodes.get('#search-results').querySelector('.search-row').click();
+  assert.ok(requests.some(url => url === `/api/threads/${b}/desktop-read`));
+});
+
+test('activity only navigates Desktop after opening an unread task', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: async url => { requests.push(url); return { ok: true, json: async () => ({ complete: true, scopeKey: 'a'.repeat(64), items: [{ id: b, title: 'Unread activity', unread: true, statusKnown: true }] }) }; } });
+  f.run(`nativeUnreadAvailable=true; nativeUnreadScope='${'a'.repeat(64)}'; nativeUnread.set('${b}',false);`);
+  f.nodes.get('#activity-view').hidden = false;
+  f.nodes.get('#sidebar').classList.contains = name => name === 'open';
+  await f.run('refreshActivityView()');
+  assert.deepEqual(requests, ['/api/activity']);
+  f.nodes.get('#activity-view').querySelector('.activity-row').click();
+  assert.ok(requests.some(url => url === `/api/threads/${b}/desktop-read`));
+  f.run('renderActivityView()');
+  assert.equal(f.nodes.get('#activity-view').querySelector('.activity-row'), null, 'locally read activity stays cleared while Desktop catches up');
+});
+
+test('search can locally clear and synchronize an unread result outside the sidebar list', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: async url => {
+    requests.push(url);
+    return { ok: true, json: async () => url === '/api/threads/search' ? { scopeKey: 'a'.repeat(64), results: [{ id: b, title: 'Older', unread: true }], nextCursor: null } : {} };
+  } });
+  f.run(`nativeUnreadAvailable=true; nativeUnreadScope='${'a'.repeat(64)}';`);
+  f.nodes.get('#thread-search').value = 'Older'; await f.run('searchThreads()');
+  f.nodes.get('#search-results').querySelector('.search-row').click();
+  assert.ok(requests.includes(`/api/threads/${b}/desktop-read`));
+  assert.equal(f.run(`nativeUnreadSuppressed.has('${b}')`), true);
+});
+
+test('an old search unread snapshot cannot overwrite a newer list read or a different identity', async () => {
+  let resolve; const f = await fixture({ fetch: async () => new Promise(done => { resolve = done; }) });
+  f.run(`nativeUnreadAvailable=true; nativeUnreadScope='${'a'.repeat(64)}'; nativeUnread.set('${b}',false);`);
+  f.nodes.get('#thread-search').value = 'Older'; const pending = f.run('searchThreads()');
+  f.run('++listRequestGeneration');
+  resolve({ ok: true, json: async () => ({ scopeKey: 'a'.repeat(64), results: [{ id: b, title: 'Older', unread: true }] }) });
+  await pending; assert.equal(f.run(`nativeUnread.get('${b}')`), false);
+});

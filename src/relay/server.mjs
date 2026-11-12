@@ -602,6 +602,46 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         phonePresence.set(phone.deviceId, now());
         return send(res, 200, { online: Boolean(peer && peer.readyState === WebSocket.OPEN) });
       }
+      if (requested === '/api/activity') {
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 256);
+        if (res.writableEnded || res.destroyed) return;
+        if (!reserved?.data || Object.keys(reserved.data).length) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId);
+        if (!peer || peer.readyState !== WebSocket.OPEN || peer.activity !== 1) return send(res, 503, { error: 'unavailable' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: false, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'activity', id, deviceId: phone.deviceId }));
+        return;
+      }
+      if (requested === '/api/threads/search') {
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 8192);
+        if (res.writableEnded || res.destroyed) return;
+        const data = reserved?.data;
+        if (!data || Object.keys(data).some(key => !['query', 'cursor'].includes(key)) || typeof data.query !== 'string' || !data.query.trim()
+            || Buffer.byteLength(data.query) > 512 || /[\u0000-\u001f\u007f-\u009f]/.test(data.query)
+            || (data.cursor !== undefined && (typeof data.cursor !== 'string' || !data.cursor || data.cursor.length > 4096))) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId);
+        if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (peer.threadSearch !== 1) return send(res, 503, { error: 'search-unavailable' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: false, search: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'thread-search', id, deviceId: phone.deviceId, query: data.query.trim(), ...(data.cursor ? { cursor: data.cursor } : {}) }));
+        return;
+      }
       if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: peers.get(phone.hostId)?.uploadPipeline ? 524288 : 131072, uploadCompression: 'gzip', uploadConcurrency: peers.get(phone.hostId)?.uploadPipeline ? 2 : 1, desktopUnreadOpen: peers.get(phone.hostId)?.readyState === WebSocket.OPEN && peers.get(phone.hostId)?.desktopUnreadOpen === 1 });
       const desktopRead = /^\/api\/threads\/([0-9a-f-]{36})\/desktop-read$/i.exec(requested);
       if (desktopRead) {
@@ -905,7 +945,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         if (push && peers.get(hostId) === ws && ws.taskNotifications === 1 && ws.notificationEnabled && monitorReasons.has(msg.health?.reason)) ws.notificationHealth = { reason: msg.health.reason };
         return;
       }
-      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; ws.desktopUnreadOpen = msg.desktopUnreadOpen === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
+      if (msg.type === 'capabilities') { ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; ws.desktopUnreadOpen = msg.desktopUnreadOpen === 1 ? 1 : 0; ws.activity = msg.activity === 1 ? 1 : 0; ws.threadSearch = msg.threadSearch === 1 ? 1 : 0; updateNotificationSettings(hostId); return; }
       const entry = pending.get(msg.id); if (!entry || entry.hostId !== hostId) return;
       if (entry.historyChunks && msg.type === 'history-chunk' && msg.frame) {
         const frame = msg.frame;
@@ -1012,6 +1052,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
           else if (msg.status === 'not-dispatched') send(entry.res, 409, { error: 'not-dispatched' });
           else send(entry.res, msg.status === 'invalid-project' ? 400 : 504, { error: msg.status === 'invalid-project' ? 'invalid-project' : 'outcome-unknown' });
         }
+        else if (entry.search && !msg.ok && msg.error === 'invalid-cursor') send(entry.res, 400, { error: 'invalid-cursor' });
         else if (entry.recordedHistory && !msg.ok && ['history-changed', 'history-item-too-large'].includes(msg.error)) send(entry.res, msg.error === 'history-changed' ? 409 : 413, { error: msg.error });
         else if (entry.threadAction && msg.status === 'not-supported-desktop-owner') send(entry.res, 409, { error: 'not-supported-desktop-owner' });
         else if (entry.writing) { const partial = entry.stop && msg.status === 'stopped-goal-pause-failed'; const status = msg.status === 'accepted' || partial ? 202 : msg.status === 'unavailable' ? 409 : 504; send(entry.res, status, status === 202 ? { status: partial ? 'stopped-goal-pause-failed' : 'accepted' } : { error: status === 409 ? 'unavailable' : 'outcome-unknown' }); }

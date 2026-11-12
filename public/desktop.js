@@ -2180,9 +2180,10 @@ composerForm.addEventListener('submit', async event => {
   return runOutgoingQueue(id);
 });
 function closeDevices() { deviceMenu.open = false; deviceScrim.hidden = true; }
-function showSidebar(show) { if (show) { closeDevices(); showSummary(false); } sidebar.classList.toggle('open', show); scrim.hidden = !show; scheduleVisibleStatusRefresh(); }
+function showSidebar(show) { if (show) { closeDevices(); showSummary(false); } sidebar.classList.toggle('open', show); scrim.hidden = !show; if (show) { if (activityView && !activityView.hidden) void refreshActivityView(); } else stopActivityRefresh(); scheduleVisibleStatusRefresh(); }
 document.querySelector('#open-sidebar').addEventListener('click', () => showSidebar(true));
 document.querySelector('#close-sidebar').addEventListener('click', () => showSidebar(false));
+document.addEventListener?.('keydown', event => { if (event.key === 'Escape' && sidebar.classList.contains('open')) { event.preventDefault(); showSidebar(false); document.querySelector('#open-sidebar')?.focus?.(); } });
 scrim.addEventListener('click', () => showSidebar(false));
 function showSummary(show) { if (show) { closeDevices(); showSidebar(false); } summaryPanel.hidden = !show; summaryScrim.hidden = !show; summaryToggle.setAttribute('aria-expanded', String(show)); }
 summaryToggle.addEventListener('click', () => showSummary(summaryPanel.hidden));
@@ -2605,6 +2606,7 @@ function acceptSidebarStatuses(value) {
   }
   for (const group of projectStatusGroups.values()) for (const task of group.tasks) task.status = value[task.id] ?? (liveTaskStatus.get(task.id) === 'active' ? 'active' : 'unknown');
   applySidebarStatuses();
+  renderActivityView();
 }
 function stopSidebarStatuses() {
   ++sidebarEventGeneration; clearTimeout(sidebarWatchdog); sidebarEvents?.abort(); sidebarEvents = undefined;
@@ -2873,6 +2875,7 @@ function renderTaskNotification(marker, notification, state = 'idle') {
   marker.setAttribute('aria-label', notification ? notification.native ? '有未读消息' : notification.kind === 'completed' ? '有新提醒，任务已完成' : taskNotificationSymbols[notification.kind] : '');
 }
 function refreshTaskNotificationIndicators(prune = false) {
+  renderActivityView();
   const known = new Set([...projectStatusGroups.values()].flatMap(group => group.tasks.map(task => task.id)));
   if (prune) for (const id of taskNotifications.keys()) if (!known.has(id) && !pendingTaskNotifications.has(id)) {
     taskNotifications.delete(id); touchTaskNotification(id);
@@ -3022,7 +3025,7 @@ window.restoreTaskReminders = async () => {
     } else applyTaskNotification({ ...notification, ...pair }, true);
   }
 };
-function renderTask(task) {
+function renderTask(task, { navigateDesktop = true } = {}) {
   if (!task || !uuid.test(task.id)) return null;
   const button = element('button', 'task', '');
   button.type = 'button';
@@ -3040,7 +3043,7 @@ function renderTask(task) {
   renderTaskNotification(notificationIndicator, taskReminder(task.id));
   button.append(notificationIndicator);
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
-  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } cancelDesktopNotificationReads(task.id); cancelNativeUnreadReads(task.id); const completionRead = needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id); const nativeRead = nativeUnreadAvailable && nativeUnread.get(task.id) === true; if (nativeRead) requestNativeUnreadRead(task.id); if (completionRead) requestDesktopNotificationRead(task.id, { navigate: !nativeRead }); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } cancelDesktopNotificationReads(task.id); cancelNativeUnreadReads(task.id); const completionRead = needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id); const nativeRead = nativeUnreadAvailable && nativeUnread.get(task.id) === true; if (nativeRead) requestNativeUnreadRead(task.id, { navigate: navigateDesktop }); if (completionRead) requestDesktopNotificationRead(task.id, { navigate: navigateDesktop && !nativeRead }); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
@@ -3101,12 +3104,117 @@ function renderGroup(key, name, tasks, recent = false, initialExpanded = recent)
   else { const row = element('div', 'project-heading-row'); const add = element('button', 'project-new-chat'); add.type = 'button'; add.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>'; add.title = '在此项目中新聊天'; add.setAttribute('aria-label', `在${name}中新聊天`); add.addEventListener('click', () => openNewChat(key.slice('project:'.length))); row.append(heading, add); group.append(row, contents); }
   return group;
 }
+
+// Activity uses a separate read-only snapshot, independent of push notifications.
+const activityView = document.querySelector('#activity-view');
+const searchView = document.querySelector('#search-view');
+const searchInput = document.querySelector('#thread-search');
+const searchResults = document.querySelector('#search-results');
+let activityListLoaded = false, activityListTruncated = false;
+let activitySnapshot = null, activityFailed = false, activityGeneration = 0, activityController, activityTimer;
+let searchGeneration = 0, searchTimer, searchController, searchCursor = null, searchItems = [];
+function renderActivityView() {
+  if (!activityView || activityView.hidden) return;
+  const nodes = [];
+  if (!activitySnapshot) nodes.push(element('p', 'activity-note', activityFailed ? '活动状态暂不可用，正在重试。' : '正在检查活动状态…'));
+  else {
+    const all = activitySnapshot.items.map(item => ({ ...item, unread: item.unread && !nativeUnreadSuppressed.has(item.id) }));
+    const items = all.filter(item => item.waiting || item.unread || item.active);
+    const time = value => Number(value) || Date.parse(value) || 0;
+    items.sort((a, b) => (a.waiting ? 0 : a.unread ? 1 : 2) - (b.waiting ? 0 : b.unread ? 1 : 2) || time(b.recency) - time(a.recency));
+    for (const item of items) {
+      const label = item.waiting === 'both' ? '待回答 · 待审批' : item.waiting === 'question' ? '待回答' : item.waiting === 'approval' ? '待审批' : item.unread ? '未读' : '进行中';
+      const button = element('button', 'activity-row', item.title || '未命名任务'); button.type = 'button';
+      button.append(element('span', 'activity-label', label));
+      button.addEventListener('click', () => renderTask(item).click()); nodes.push(button);
+    }
+    const recent = all.filter(item => !item.waiting && !item.unread && !item.active && item.recency).sort((a, b) => time(b.recency) - time(a.recency)).slice(0, 10);
+    if (recent.length) nodes.push(element('p', 'activity-note', '最近'));
+    for (const item of recent) { const button = element('button', 'activity-row', item.title || '未命名任务'); button.type = 'button'; button.addEventListener('click', () => renderTask(item).click()); nodes.push(button); }
+    const unknown = activitySnapshot.items.some(item => item.statusKnown !== true);
+    if (!activitySnapshot.complete || unknown) nodes.push(element('p', 'activity-note', '部分任务状态检查中，活动列表可能不完整。'));
+    else if (!items.length && !recent.length) nodes.push(element('p', 'activity-note', '当前没有活动'));
+  }
+  activityView.replaceChildren(...nodes);
+}
+async function refreshActivityView() {
+  if (!activityView || activityView.hidden || !sidebar.classList.contains('open') || !historyScope || document.hidden || pageSuspended) return;
+  const generation = ++activityGeneration, scopeGeneration = historyScopeGeneration, unreadListGeneration = listRequestGeneration;
+  clearTimeout(activityTimer); activityController?.abort(); const controller = activityController = new AbortController();
+  try {
+    const response = await scopedFetch('/api/activity', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: '{}' });
+    if (!response.ok) throw new Error('unavailable');
+    const data = await response.json();
+    if (generation !== activityGeneration || scopeGeneration !== historyScopeGeneration || controller.signal.aborted) return;
+    if (!Array.isArray(data.items) || typeof data.complete !== 'boolean') throw new Error('invalid');
+    activityFailed = false; activitySnapshot = { complete: data.complete, items: data.items.filter(item => uuid.test(item?.id || '')).map(item => ({ id: item.id, title: typeof item.title === 'string' ? item.title : '', recency: item.recency, unread: item.unread === true, active: item.active === true, waiting: ['question', 'approval', 'both'].includes(item.waiting) ? item.waiting : null, statusKnown: item.statusKnown === true })) };
+    if (nativeUnreadAvailable && data.scopeKey === nativeUnreadScope && unreadListGeneration === listRequestGeneration) for (const item of activitySnapshot.items) if (item.unread) nativeUnread.set(item.id, true);
+    renderActivityView();
+  } catch {
+    if (generation !== activityGeneration || scopeGeneration !== historyScopeGeneration || controller.signal.aborted) return;
+    activityFailed = true; activitySnapshot = null; renderActivityView();
+  }
+  if (generation === activityGeneration && !activityView.hidden) { activityTimer = setTimeout(() => void refreshActivityView(), 10000); activityTimer?.unref?.(); }
+}
+function stopActivityRefresh() { ++activityGeneration; activityController?.abort(); clearTimeout(activityTimer); }
+function resetThreadSearch() {
+  ++searchGeneration; clearTimeout(searchTimer); searchController?.abort(); searchController = null; searchCursor = null; searchItems = [];
+  if (searchInput) searchInput.value = '';
+  if (searchResults) searchResults.replaceChildren(element('p', 'search-status', '输入关键词搜索聊天'));
+}
+function renderSearchResults(message = '') {
+  const nodes = [];
+  for (const task of searchItems) {
+    const button = element('button', 'search-row', task.title || '未命名任务'); button.type = 'button';
+    if (task.snippet) button.append(element('span', 'search-snippet', task.snippet));
+    button.addEventListener('click', () => renderTask(task).click()); nodes.push(button);
+  }
+  if (message) nodes.push(element('p', 'search-status', message));
+  if (message === '搜索暂不可用，请重试') { const retry = element('button', 'search-more', '重试'); retry.type = 'button'; retry.addEventListener('click', () => void searchThreads(Boolean(searchCursor))); nodes.push(retry); }
+  if (searchCursor) { const more = element('button', 'search-more', '加载更多'); more.type = 'button'; more.addEventListener('click', () => void searchThreads(true)); nodes.push(more); }
+  searchResults.replaceChildren(...nodes);
+}
+async function searchThreads(more = false) {
+  const query = searchInput.value.trim();
+  if (!query || !historyScope) { resetThreadSearch(); return; }
+  const generation = ++searchGeneration, scopeGeneration = historyScopeGeneration, unreadListGeneration = listRequestGeneration;
+  searchController?.abort(); const controller = searchController = new AbortController();
+  const cursor = more ? searchCursor : null;
+  if (!more) { searchItems = []; searchCursor = null; }
+  renderSearchResults('正在搜索…');
+  try {
+    const response = await scopedFetch('/api/threads/search', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, ...(cursor ? { cursor } : {}) }) });
+    if (!response.ok) throw new Error('搜索暂不可用，请重试');
+    const data = await response.json();
+    if (generation !== searchGeneration || scopeGeneration !== historyScopeGeneration || controller.signal.aborted) return;
+    if (!Array.isArray(data.results)) throw new Error('搜索结果不可用，请重试');
+    if (nativeUnreadAvailable && data.scopeKey === nativeUnreadScope && unreadListGeneration === listRequestGeneration) for (const item of data.results) if (uuid.test(item?.id || '') && item.unread === true) nativeUnread.set(item.id, true);
+    const seen = new Set(searchItems.map(item => item.id));
+    for (const item of data.results) if (uuid.test(item?.id || '') && !seen.has(item.id)) { seen.add(item.id); searchItems.push({ id: item.id, title: typeof item.title === 'string' ? item.title : '', snippet: typeof item.snippet === 'string' ? item.snippet : '' }); }
+    searchCursor = typeof data.nextCursor === 'string' && data.nextCursor && data.nextCursor !== cursor ? data.nextCursor : null;
+    renderSearchResults(searchItems.length ? '' : searchCursor ? '当前页没有匹配结果，可继续加载。' : '没有找到匹配的聊天');
+  } catch (error) { if (generation === searchGeneration && scopeGeneration === historyScopeGeneration && !controller.signal.aborted) { searchCursor = cursor; renderSearchResults('搜索暂不可用，请重试'); } }
+}
+for (const [id, view] of [['#view-projects', 'projects'], ['#view-activity', 'activity'], ['#view-search', 'search']]) {
+  document.querySelector(id)?.addEventListener('click', () => {
+    projectList.hidden = view !== 'projects'; activityView.hidden = view !== 'activity'; searchView.hidden = view !== 'search';
+    for (const [buttonId, name] of [['#view-projects', 'projects'], ['#view-activity', 'activity'], ['#view-search', 'search']]) document.querySelector(buttonId)?.setAttribute('aria-pressed', String(view === name));
+    if (view === 'activity') { renderActivityView(); void refreshActivityView(); } else { ++activityGeneration; activityController?.abort(); clearTimeout(activityTimer); }
+    if (view === 'search') { if (!searchInput.value) renderSearchResults('输入关键词搜索聊天'); searchInput.focus?.(); }
+  });
+}
+searchInput?.addEventListener('input', () => {
+  ++searchGeneration; clearTimeout(searchTimer); searchController?.abort(); searchCursor = null; searchItems = [];
+  if (!searchInput.value.trim()) { renderSearchResults('输入关键词搜索聊天'); return; }
+  renderSearchResults('等待搜索…'); searchTimer = setTimeout(() => void searchThreads(), 300);
+});
 let listRetryTimer;
 let visibleStatusTimer;
 let lastVisibleStatusKey = '';
 let pendingStatusRefreshes = 0;
 let pageSuspended = false;
 function pauseBackgroundPolling({ includePairing = true } = {}) {
+  stopActivityRefresh();
   if (includePairing) { clearTimeout(pairingStatusTimer); pairingStatusTimer = undefined; ++pairingStatusGeneration; }
   clearTimeout(listRetryTimer); listRetryTimer = undefined;
   clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined;
@@ -3298,6 +3406,7 @@ function invalidateThreadList() {
   lastVisibleStatusKey = '';
   pendingStatusRefreshes = 0;
   projectStatusGroups.clear(); projectStatusCursor = 0;
+  activityListLoaded = false; activityFailed = false; activitySnapshot = null; ++activityGeneration; activityController?.abort(); clearTimeout(activityTimer); resetThreadSearch(); renderActivityView();
   liveTaskStatus.clear();
   for (const id of statusHandovers.keys()) clearStatusHandover(id);
   projectList.replaceChildren(element('p', 'list-status', '正在加载任务'));
@@ -3325,6 +3434,7 @@ async function loadThreads() {
 }
 function renderThreadList(data, generation = listRequestGeneration) {
   updateNativeUnread(data, generation);
+  activityListLoaded = true; activityListTruncated = data.truncated === true;
   ++taskNotificationListGeneration;
   projectStatusGroups.clear();
   const fragment = document.createDocumentFragment();
@@ -4684,7 +4794,7 @@ document.addEventListener?.('visibilitychange', () => {
   window.refreshNotificationPresence?.();
   if (document.hidden !== true && !pageSuspended && (pairingAvailable || pairingWasReplaced)) void refreshPairingStatus();
   if (document.hidden === true) { discardDeferredListRender(); pauseBackgroundPolling(); }
-  else if (!pageSuspended && pairingAvailable) { if (!historyScope) void startPairedHome(); else { void loadThreads(); void refreshHostStatus(); } }
+  else if (!pageSuspended && pairingAvailable) { if (!historyScope) void startPairedHome(); else { void loadThreads(); void refreshHostStatus(); void refreshActivityView(); } }
   else if (!pageSuspended && window.pairingReady) void checkPairingStatus();
 });
 window.addEventListener('pagehide', () => { cancelDesktopNotificationReads(); cancelNativeUnreadReads(); discardDeferredListRender(); cancelPendingRender(); pageSuspended = true; stopSidebarStatuses(); stopGoalClock(); clearRecentViews(); stopVoice(); clearImagePreviews(); voiceStatus.textContent = ''; clearTimeout(reconnectTimer); reconnectTimer = undefined; pauseBackgroundPolling(); for (const id of statusHandovers.keys()) clearStatusHandover(id); active?.abort(); });
@@ -4698,6 +4808,7 @@ window.addEventListener('pageshow', async event => {
   if (!historyScope) { if (pairingAvailable) void startPairedHome(); return; }
   if (!selectedId) connectSidebarStatuses();
   void loadThreads();
+  void refreshActivityView();
   void loadModels();
   void loadCapabilities();
   void refreshHostStatus();

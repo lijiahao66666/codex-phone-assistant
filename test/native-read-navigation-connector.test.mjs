@@ -10,11 +10,12 @@ const scope = 'a'.repeat(64);
 const otherThread = '44444444-4444-4444-8444-444444444444', thirdThread = '55555555-5555-4555-8555-555555555555';
 const listed = () => ({ projects: [], recent: [{ id: threadId, title: 'Fixture', recency: 1 }], nativeUnread: { status: 'available', scopeKey: scope, snapshotKey: 'b'.repeat(64) } });
 async function until(check) { const deadline = Date.now() + 2000; while (!check()) { if (Date.now() > deadline) throw new Error('Expected message'); await new Promise(resolve => setTimeout(resolve, 5)); } }
-async function fixture({ listThreads = async () => listed(), navigate = async () => ({ read: true }), notificationMonitor } = {}) {
+async function fixture({ listThreads = async () => listed(), navigate = async () => ({ read: true }), notificationMonitor, authorize } = {}) {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(server, 'listening');
   const incoming = once(server, 'connection'), messages = [], calls = [];
   const connector = createPreviewConnector({ url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId, allowInsecureForTests: true, listThreads,
     navigateDesktopUnreadForTests: async (...args) => { calls.push(args); return navigate(...args); },
+    ...(authorize ? { searchAuthorizeForTests: authorize } : {}),
     ...(notificationMonitor ? { createNotificationMonitorForTests: () => notificationMonitor } : {}),
   });
   connector.start(); const [socket] = await incoming; socket.on('message', raw => messages.push(JSON.parse(raw)));
@@ -35,6 +36,14 @@ test('fresh authorized desktop unread uses the requested scope without synthetic
     assert.equal(lists, 1); assert.equal(f.calls[0][0], threadId); assert.equal(f.calls[0][1], scope);
     assert.equal(f.messages.some(m => m.type === 'task-notification-clear'), false);
   } finally { await f.close(); }
+});
+
+test('truncated sidebar permits only a separately authorized search result to sync its unread state', async () => {
+  for (const allow of [true, false]) {
+    const f = await fixture({ listThreads: async ({ before } = {}) => ({ ...listed(), recent: [], nextCursor: { id: otherThread, recency: (before?.recency ?? 100) - 1 } }), authorize: async ids => new Map(allow ? ids.map(id => [id, 'Allowed']) : []) });
+    try { f.request('older'); assert.equal((await f.response('older')).status, allow ? 'accepted' : 'unavailable'); assert.equal(f.calls.length, allow ? 1 : 0); }
+    finally { await f.close(); }
+  }
 });
 
 test('connector acknowledges only after the native state really changes from unread to read', async () => {

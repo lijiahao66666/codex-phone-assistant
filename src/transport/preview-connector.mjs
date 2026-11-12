@@ -25,6 +25,9 @@ import { createModelService } from '../desktop/model-service.mjs';
 import { TaskNotificationMonitor } from '../notifications/task-monitor.mjs';
 import { createThreadArchive } from '../desktop/thread-archive.mjs';
 import { navigateDesktopUnread } from '../desktop/native-read-navigation.mjs';
+import { createThreadSearch, authorizedSearchThreads } from '../desktop/thread-search.mjs';
+import { readDesktopReadState } from '../desktop/read-state.mjs';
+import { createActivityObserver } from '../desktop/activity-observer.mjs';
 
 export function viewUpdate(previous, conversation, seq, version = 1) {
   const snapshot = { event: 'state', data: { seq, conversation } };
@@ -135,15 +138,34 @@ export async function populateThreadStatuses({ sidebarStatus, statusPriorities, 
 }
 
 // Only one authenticated relay is configured; no arbitrary local HTTP proxying.
-export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, navigateDesktopUnreadForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
+export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, navigateDesktopUnreadForTests, searchAuthorizeForTests, readSearchUnreadForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
   const target = new URL(url);
   if ((target.protocol !== 'wss:' && !(allowInsecureForTests && target.protocol === 'ws:' && target.hostname === '127.0.0.1')) || target.pathname !== '/connector' || target.search || target.hash || target.username || target.password) throw new Error('WSS connector URL required');
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1) throw new Error('Invalid heartbeat timeout');
-  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests || navigateDesktopUnreadForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
+  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests || navigateDesktopUnreadForTests || searchAuthorizeForTests || readSearchUnreadForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
   const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(), uploadChecks = new Set(); let ws, scheduler, timer, stopped = false, shuttingDown = false, activeMutations = 0;
   const mutationTypes = new Set(['desktop-read', 'notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
   let desktopNavigationPending = null, desktopNavigationWaiting = null;
+  let activeSearch = null, waitingSearch = null;
+  const threadSearch = typeof modelRequest === 'function' ? createThreadSearch({ hostId, request: modelRequest, ...(searchAuthorizeForTests ? { authorize: searchAuthorizeForTests } : {}) }) : null;
+  // Native search may take several seconds on large histories and cannot be
+  // cancelled after dispatch. Keep one in flight and at most one newest waiter.
+  async function acquireSearch(cancelled) {
+    if (cancelled()) return null;
+    if (!activeSearch) { const token = {}; activeSearch = token; return token; }
+    if (waitingSearch) waitingSearch.superseded = true;
+    const waiter = { superseded: false }, deadline = Date.now() + 9000;
+    waitingSearch = waiter;
+    try {
+      while (!waiter.superseded && !cancelled() && Date.now() < deadline) {
+        if (!activeSearch) { const token = {}; activeSearch = token; return token; }
+        await new Promise(resolve => setTimeout(resolve, 30));
+      }
+      return null;
+    } finally { if (waitingSearch === waiter) waitingSearch = null; }
+  }
+  function releaseSearch(token) { if (token && activeSearch === token) activeSearch = null; }
   // A cancelled navigation can still be inside the OS open call. Reserve at
   // most one successor and wait for that call to settle before switching the
   // desktop again. A live, non-cancelled operation is never bypassed.
@@ -242,6 +264,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
     const deviceCleanups = new Map(), deviceTransitions = new Map(), deviceEpochs = new Map();
     const uploads = new Map(), staged = new Map(), revoked = new Set(), inflightUploads = new Map(), readRequests = new Map(), writeReplies = new Map(), pendingClaims = new Set(), sidebarStreams = new Map();
     let notificationMonitor;
+    const activityObserver = createActivityObserver({ list: () => listAllThreads(listAuthorizedThreads), listThreads: listAuthorizedThreads, createSession, sharedMonitor: () => notificationMonitor });
     let currentUploadContext;
     const uploadsBusy = () => {
       if (!currentUploadContext) return uploads.size > 0 || staged.size > 0;
@@ -359,7 +382,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       }
       if (mutation) activeMutations++;
       try {
-      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, desktopUnreadOpen: 1, ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'flow-probe') { send({ type: 'capabilities', streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, desktopUnreadOpen: 1, activity: 1, ...(threadSearch ? { threadSearch: 1 } : {}), ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
       if (msg.type === 'notification-settings') {
         if (msg.enabled === true && !notificationMonitor && connection === ws && !shuttingDown) {
           notificationMonitor = (createNotificationMonitorForTests || (options => new TaskNotificationMonitor(options)))({ createSession, listThreads: listAuthorizedThreads,
@@ -383,6 +406,11 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (typeof msg.deviceId === 'string') await deviceTransitions.get(msg.deviceId);
       if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) return;
       if (connection !== ws || connection.readyState !== WebSocket.OPEN) return;
+      if (msg.type === 'activity') {
+        const answer = beginRead(msg);
+        try { const data = await activityObserver.snapshot(); answer(true, data); } catch { answer(false); }
+        return;
+      }
       if (msg.type === 'desktop-read') {
         const id = msg.conversationId, answer = beginWrite(msg);
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id || '')
@@ -396,7 +424,13 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           if (!navigation || cancelled()) return answer('unavailable');
           const data = await listAllThreads(listAuthorizedThreads);
           const allowed = new Set([...data.recent, ...data.projects.flatMap(project => project.threads)].map(thread => thread.id));
-          if (cancelled() || !allowed.has(id) || data.nativeUnread?.status !== 'available' || data.nativeUnread.scopeKey !== msg.scopeKey) return answer('unavailable');
+          if (cancelled() || data.nativeUnread?.status !== 'available' || data.nativeUnread.scopeKey !== msg.scopeKey) return answer('unavailable');
+          if (!allowed.has(id)) {
+            if (!data.truncated) return answer('unavailable');
+            const authorize = searchAuthorizeForTests || authorizedSearchThreads;
+            const extra = await authorize([id], { phoneThreadIds: phoneOptions({}).phoneThreadIds || [] });
+            if (cancelled() || !(extra instanceof Map) || !extra.has(id)) return answer('unavailable');
+          }
           const result = await (navigateDesktopUnreadForTests || navigateDesktopUnread)(id, msg.scopeKey, { isCancelled: cancelled });
           answer(result?.read === true ? 'accepted' : 'unavailable');
         } catch { answer('unavailable'); }
@@ -848,6 +882,26 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         finally { finishClaims?.(); writes.delete(id); }
         return;
       }
+      if (msg.type === 'thread-search') {
+        const answer = beginRead(msg);
+        const cancelled = () => answer.cancelled() || shuttingDown || connection !== ws || connection.readyState !== WebSocket.OPEN;
+        let token;
+        try {
+          if (!threadSearch || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(msg.deviceId || '')) return answer(false, undefined, 'search-unavailable');
+          token = await acquireSearch(cancelled);
+          if (!token || cancelled()) return answer(false, undefined, 'busy');
+          const phoneThreadIds = phoneOptions({}).phoneThreadIds || [];
+          const result = await threadSearch.search({ query: msg.query, cursor: msg.cursor, deviceId: msg.deviceId, phoneThreadIds, isCancelled: cancelled });
+          const unread = await (readSearchUnreadForTests || (allowInsecureForTests ? async () => null : readDesktopReadState))();
+          if (unread?.status === 'available' && unread.canReadUnread === true && /^[a-f0-9]{64}$/.test(unread.scopeKey || '') && unread.unreadThreadIds instanceof Set) {
+            result.scopeKey = unread.scopeKey;
+            result.results = result.results.map(item => ({ ...item, unread: unread.unreadThreadIds.has(item.id) }));
+          }
+          if (!cancelled()) answer(true, result);
+        } catch (error) { if (!cancelled()) answer(false, undefined, error?.code === 'invalid-cursor' ? 'invalid-cursor' : 'search-unavailable'); }
+        finally { releaseSearch(token); }
+        return;
+      }
       if (msg.type !== 'request') return;
       if (msg.path === '/api/models') {
         const answer = beginRead(msg);
@@ -1093,7 +1147,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       } catch { streams.delete(msg.id); void closeSession(session); send({ type: 'end', id: msg.id }, connection); }
       } finally { if (mutation) activeMutations--; }
     });
-    ws.on('close', () => { void detachNotificationMonitor()?.close(); trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
+    ws.on('close', () => { activityObserver.close(); void detachNotificationMonitor()?.close(); trace('relay', 'close', {}); for (const id of sidebarStreams.keys()) removeSidebarStream(id); connectionScheduler.close(); for (const requests of [readRequests, writeReplies]) { for (const request of requests.values()) { request.cancelled = true; request.chunkStop?.(); } requests.clear(); } clearTimeout(heartbeat); statusPriorities.clear(); void sidebarStatus?.close(); imagePreview?.clear(); for (const operation of inflightUploads.values()) { operation.cancelled = true; clearTimeout(operation.timer); } inflightUploads.clear(); closeStreams(); void cleanupDevice().then(async () => { await Promise.all([...pendingClaims]); const ctx = await uploadContext?.catch(() => null); await ctx?.receiver.close(); await ctx?.store.close(); }).finally(() => uploadChecks.delete(uploadsBusy)); if (!stopped) timer = setTimeout(connect, retryMs); });
   }
   return { start() { if (ws || stopped) throw new Error('Connector already started'); connect(); }, async beginShutdown() { if (shuttingDown || activeMutations || [...uploadChecks].some(check => check())) throw Object.assign(new Error('Connector writes are active'), { code: 'tasks-active' }); shuttingDown = true; try { if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls(); } catch { shuttingDown = false; throw Object.assign(new Error('Connector replies could not be flushed'), { code: 'tasks-active' }); } }, cancelShutdown() { shuttingDown = false; }, async close() { stopped = true; observedOwner?.off?.('threadReleased', onThreadReleased); clearTimeout(timer); closeStreams(); await models?.close(); if (ws?.readyState === WebSocket.OPEN) await scheduler?.drainControls().catch(() => {}); if (ws && ws.readyState !== WebSocket.CLOSED) { await new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }); } } };
 }
