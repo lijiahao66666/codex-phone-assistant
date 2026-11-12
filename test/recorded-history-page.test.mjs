@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRecordedHistoryPager } from '../src/desktop/recorded-history-page.mjs';
@@ -45,6 +45,27 @@ async function fixture() {
   return { home, state, history, register, turn, item, update, pager: createRecordedHistoryPager({ codexHome: home }),
     async close() { history.close(); state.close(); await rm(home, { recursive: true, force: true }); } };
 }
+
+test('an index left behind after rollout migration cannot supply the latest preview', async () => {
+  const f = await fixture();
+  try {
+    f.turn('old-interrupted', id, 'interrupted'); f.item('old-interrupted', 'old-answer'); f.item('old-interrupted', 'old-followup');
+    await mkdir(join(f.home, 'sessions'));
+    const path = join(f.home, 'sessions', 'current.jsonl');
+    f.state.exec('ALTER TABLE threads ADD COLUMN rollout_path TEXT');
+    f.state.prepare('UPDATE threads SET rollout_path=? WHERE id=?').run(path, id);
+    const offset = f.history.prepare('SELECT next_rollout_byte_offset AS offset FROM thread_history_projection_state WHERE thread_id=?').get(id).offset;
+    await writeFile(path, ' '.repeat(offset));
+    assert.equal(f.pager.read(id, { scope }).turns.at(-1).status, 'interrupted');
+    const cursor = f.pager.read(id, { scope, maxItems: 1 }).nextCursor;
+    assert.ok(cursor);
+    await writeFile(path, ' '.repeat(offset + 100));
+    assert.throws(() => f.pager.read(id, { scope }), error => error.code === 'history-unavailable');
+    assert.equal(f.pager.read(id, { scope, cursor }).turns[0].items[0].id, 'old-answer');
+    await writeFile(path, ' '.repeat(offset - 100));
+    assert.throws(() => f.pager.read(id, { scope }), error => error.code === 'history-unavailable');
+  } finally { await f.close(); }
+});
 
 test('reads recent content first and retrieves every item of large turns without OFFSET or silent limits', async () => {
   const f = await fixture();
