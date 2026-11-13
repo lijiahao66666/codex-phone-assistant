@@ -956,3 +956,44 @@ for (const snapshot of [false, true]) test(`opening a notification target before
   assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
   assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').hidden, true);
 });
+
+test('opening a visible completed dot uses the paired desktop-open once without native identity', async () => {
+  const calls = [], resolves = [];
+  const f = await fixture({ fetch: (url, options) => { calls.push({ url, options }); return new Promise(resolve => resolves.push(resolve)); } });
+  f.run('desktopOpenAvailable=true');
+  f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent() {} };
+  f.notify(notification(b, 'completed'));
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  f.row(b).click(); f.row(b).click();
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `/api/threads/${b}/desktop-open`);
+  assert.equal(calls[0].options.headers['x-codex-expected-device'], deviceId);
+  assert.equal(calls[0].options.body, '{}');
+  f.row(c).click(); assert.equal(calls[0].options.signal.aborted, true);
+  resolves[0]({ ok: true }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1, 'a cancelled or uncertain open is never retried');
+});
+
+test('desktop-open is limited to user clicks on visible completed dots and cancelled by pairing change', async () => {
+  const calls = [];
+  const f = await fixture({ fetch: (url, options) => { calls.push({ url, options }); return new Promise(() => {}); } });
+  f.run('desktopOpenAvailable=true');
+  f.row(b).click(); assert.equal(calls.length, 0, 'ordinary selection does not navigate Desktop');
+  f.run(`selectedId='${a}'`); f.notify(notification(b, 'question')); f.row(b).click();
+  assert.equal(calls.length, 0, 'questions remain their own action');
+  f.run(`selectedId='${a}'`); f.notify(notification(c, 'completed')); f.row(c).click();
+  assert.equal(calls.length, 1);
+  f.run('invalidateDeviceState()'); assert.equal(calls[0].options.signal.aborted, true);
+});
+
+test('a cancelled old-pair desktop open cannot block the same thread after a new pairing', async () => {
+  const calls = [];
+  const f = await fixture({ fetch: (url, options) => { calls.push({ url, options }); return new Promise(() => {}); } });
+  f.run('desktopOpenAvailable=true'); f.notify(notification(b, 'completed')); f.row(b).click();
+  assert.equal(calls.length, 1);
+  f.run(`clearTaskNotifications(); historyScopeGeneration++; historyScope={hostId:'${hostId}',deviceId:'${deviceId}'}; selectedId='${a}'; desktopOpenAvailable=true`);
+  assert.equal(calls[0].options.signal.aborted, true);
+  f.notify(notification(b, 'completed', {eventId:'new-completion'})); f.row(b).click();
+  assert.equal(calls.length, 2);
+});

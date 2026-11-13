@@ -176,7 +176,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   // Versioned bundles are immutable snapshots. Only these names and versions
   // are routable; a manifest never grants access to an arbitrary path.
   const versionedNames = new Set(['app-icon.png', 'attachment-preview.mjs', 'desktop.css', 'desktop.html', 'desktop.js', 'device-switch-lock.mjs', 'device-version-switch.mjs', 'html-sanitizer.js', 'install-prompt.js', 'jsQR.js', 'markdown-parser.js', 'notification-presence.js', 'notification-worker.js', 'notifications.js', 'pair.css', 'pair.js', 'pdf-parser.mjs', 'pdf-worker.mjs', 'recovery-attempt-store.js', 'state-chunks.mjs', 'task-reminder-store.js']);
-  const snapshotVersions = new Set(['v1.0.1', 'v1.0.2', 'v1.0.2-activity1', 'v1.0.2-unread1', 'v1.0.2-readsync1', 'v1.0.2-readsync2']);
+  const snapshotVersions = new Set(['v1.0.1', 'v1.0.2', 'v1.0.2-activity1', 'v1.0.2-unread1', 'v1.0.2-readsync1', 'v1.0.2-readsync2', 'v1.0.2-open1']);
   const hostSecret = req => req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
   const cookieAttrs = 'Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Strict';
   const cookies = req => (req.headers.cookie || '').split(';').map(part => part.trim()).filter(Boolean);
@@ -248,7 +248,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     try {
       if (closed || req.headers.host !== base.host) return send(res, 403, { error: 'forbidden' });
       if (await serveAttachmentPreviewAsset(req, res)) return;
-      const snapshot = /^\/h5\/(v1\.0\.[12](?:-activity1|-unread1|-readsync1|-readsync2)?)\/([A-Za-z0-9.-]+)$/.exec(req.url || '');
+      const snapshot = /^\/h5\/(v1\.0\.[12](?:-activity1|-unread1|-readsync1|-readsync2|-open1)?)\/([A-Za-z0-9.-]+)$/.exec(req.url || '');
       if (req.method === 'GET' && snapshot && snapshotVersions.has(snapshot[1]) && versionedNames.has(snapshot[2])) {
         const [, version, name] = snapshot;
         const directory = new URL(`../../public/h5/${version}/`, import.meta.url);
@@ -688,7 +688,29 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         const status = !peer || peer.readyState !== WebSocket.OPEN ? 'offline' : !peer.capabilitiesReceived ? 'pending' : peer.uiProtocol === null ? 'unsupported' : 'ready';
         return send(res, 200, { status, uiProtocol: status === 'ready' ? peer.uiProtocol : null, hostId: target.hostId, deviceId: target.deviceId, ...(targetId !== null ? { currentDeviceId: phone.deviceId, profileEpoch: status === 'ready' ? peer.uiProfileEpoch : null } : {}) });
       }
-      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: peers.get(phone.hostId)?.uploadPipeline ? 524288 : 131072, uploadCompression: 'gzip', uploadConcurrency: peers.get(phone.hostId)?.uploadPipeline ? 2 : 1, desktopUnreadOpen: peers.get(phone.hostId)?.readyState === WebSocket.OPEN && peers.get(phone.hostId)?.desktopUnreadOpen === 1 });
+      if (req.method === 'GET' && requested === '/api/capabilities') return send(res, 200, { imageUpload, maxImageBytes: 20971520, imageChunkBytes: peers.get(phone.hostId)?.uploadPipeline ? 524288 : 131072, uploadCompression: 'gzip', uploadConcurrency: peers.get(phone.hostId)?.uploadPipeline ? 2 : 1, desktopUnreadOpen: peers.get(phone.hostId)?.readyState === WebSocket.OPEN && peers.get(phone.hostId)?.desktopUnreadOpen === 1, desktopOpen: peers.get(phone.hostId)?.readyState === WebSocket.OPEN && peers.get(phone.hostId)?.desktopOpen === 1 });
+      const desktopOpen = /^\/api\/threads\/([0-9a-f-]{36})\/desktop-open$/i.exec(requested);
+      if (desktopOpen) {
+        if (!uuid.test(desktopOpen[1])) return send(res, 404, { error: 'not-found' });
+        if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' });
+        if (req.headers['x-codex-expected-device'] !== phone.deviceId) return send(res, 409, { error: 'device-changed' });
+        if (req.headers['content-type'] !== 'application/json') return send(res, 400, { error: 'invalid' });
+        const reserved = await reservedBody(req, res, phone, 256);
+        if (res.writableEnded || res.destroyed) return;
+        const data = reserved?.data;
+        if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length) return send(res, 400, { error: 'invalid' });
+        if (!registry.isActiveDevice(phone.hostId, phone.deviceId)) return send(res, 401, { error: 'device-replaced' });
+        const peer = peers.get(phone.hostId);
+        if (!peer || peer.readyState !== WebSocket.OPEN) return send(res, 503, { error: 'host-offline' });
+        if (peer.desktopOpen !== 1) return send(res, 409, { error: 'desktop-open-unavailable' });
+        if (pairPendingCount([...pending.values()], phone) - Number(Boolean(reserved.reservation)) >= maxPairPending) return send(res, 503, { error: 'busy' });
+        const id = randomUUID(), timer = setTimeout(() => cancel(id), requestTimeoutMs);
+        pending.set(id, { res, timer, streaming: false, writing: true, hostId: phone.hostId, deviceId: phone.deviceId });
+        if (reserved.reservation) bodyReads.delete(reserved.reservation);
+        res.once('close', () => cancel(id));
+        peer.send(JSON.stringify({ type: 'desktop-open', id, deviceId: phone.deviceId, conversationId: desktopOpen[1] }));
+        return;
+      }
       const desktopRead = /^\/api\/threads\/([0-9a-f-]{36})\/desktop-read$/i.exec(requested);
       if (desktopRead) {
         if (!uuid.test(desktopRead[1])) return send(res, 404, { error: 'not-found' });
@@ -999,7 +1021,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
         // unversioned, never guessed to be a specific app version.
         const releasedV1 = msg.streamFlow === 2 && msg.taskNotifications === 1 && msg.desktopNotificationRead === 1 && msg.desktopUnreadOpen === 1 && msg.activity === 1 && msg.threadSearch === 1;
         ws.uiProtocol = Object.hasOwn(msg, 'uiProtocol') ? (msg.uiProtocol === 1 ? 'v1' : null) : releasedV1 ? 'v1' : 'unversioned';
-        ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; ws.desktopUnreadOpen = msg.desktopUnreadOpen === 1 ? 1 : 0; ws.activity = msg.activity === 1 ? 1 : 0; ws.threadSearch = msg.threadSearch === 1 ? 1 : 0; updateNotificationSettings(hostId); return;
+        ws.uploadPipeline = msg.uploadChunkBytes === 524288 && msg.uploadConcurrency === 2; streamFlow = msg.streamFlow === 2 ? 2 : msg.streamFlow === 1 ? 1 : false; ws.taskNotifications = msg.taskNotifications === 1 ? 1 : 0; ws.desktopNotificationRead = msg.desktopNotificationRead === 1 ? 1 : 0; ws.desktopUnreadOpen = msg.desktopUnreadOpen === 1 ? 1 : 0; ws.desktopOpen = msg.desktopOpen === 1 ? 1 : 0; ws.activity = msg.activity === 1 ? 1 : 0; ws.threadSearch = msg.threadSearch === 1 ? 1 : 0; updateNotificationSettings(hostId); return;
       }
       const entry = pending.get(msg.id); if (!entry || entry.hostId !== hostId) return;
       if (entry.historyChunks && msg.type === 'history-chunk' && msg.frame) {

@@ -27,6 +27,7 @@ import { createModelService } from '../desktop/model-service.mjs';
 import { TaskNotificationMonitor } from '../notifications/task-monitor.mjs';
 import { createThreadArchive } from '../desktop/thread-archive.mjs';
 import { navigateDesktopUnread } from '../desktop/native-read-navigation.mjs';
+import { openDesktopThread } from '../desktop/open-thread.mjs';
 import { createThreadSearch, authorizedSearchThreads } from '../desktop/thread-search.mjs';
 import { readDesktopReadState } from '../desktop/read-state.mjs';
 import { createActivityObserver } from '../desktop/activity-observer.mjs';
@@ -140,17 +141,17 @@ export async function populateThreadStatuses({ sidebarStatus, statusPriorities, 
 }
 
 // Only one authenticated relay is configured; no arbitrary local HTTP proxying.
-export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, navigateDesktopUnreadForTests, searchAuthorizeForTests, readSearchUnreadForTests, traceForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
+export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, navigateDesktopUnreadForTests, searchAuthorizeForTests, readSearchUnreadForTests, openDesktopThreadForTests, traceForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
   const target = new URL(url);
   if ((target.protocol !== 'wss:' && !(allowInsecureForTests && target.protocol === 'ws:' && target.hostname === '127.0.0.1')) || target.pathname !== '/connector' || target.search || target.hash || target.username || target.password) throw new Error('WSS connector URL required');
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1) throw new Error('Invalid heartbeat timeout');
-  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests || navigateDesktopUnreadForTests || searchAuthorizeForTests || readSearchUnreadForTests || traceForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
+  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests || navigateDesktopUnreadForTests || searchAuthorizeForTests || readSearchUnreadForTests || openDesktopThreadForTests || traceForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
   if (traceForTests !== undefined && typeof traceForTests !== 'function') throw new TypeError('invalid trace override');
   const trace = traceForTests || productionTrace;
   const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(), uploadChecks = new Set(); let ws, scheduler, timer, stopped = false, shuttingDown = false, activeMutations = 0;
   const activeRecoveries = new Set();
-  const mutationTypes = new Set(['desktop-read', 'notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
+  const mutationTypes = new Set(['desktop-open', 'desktop-read', 'notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
   let desktopNavigationPending = null, desktopNavigationWaiting = null;
   let activeSearch = null, waitingSearch = null;
   const threadSearch = typeof modelRequest === 'function' ? createThreadSearch({ hostId, request: modelRequest, ...(searchAuthorizeForTests ? { authorize: searchAuthorizeForTests } : {}) }) : null;
@@ -388,7 +389,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       }
       if (mutation) activeMutations++;
       try {
-      if (msg.type === 'flow-probe') { send({ type: 'capabilities', uiProtocol: 1, streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, desktopUnreadOpen: 1, activity: 1, ...(threadSearch ? { threadSearch: 1 } : {}), ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
+      if (msg.type === 'flow-probe') { send({ type: 'capabilities', uiProtocol: 1, streamFlow: 2, taskNotifications: 1, desktopNotificationRead: 1, desktopUnreadOpen: 1, desktopOpen: 1, activity: 1, ...(threadSearch ? { threadSearch: 1 } : {}), ...(imageUpload ? { uploadChunkBytes: 524288, uploadConcurrency: 2 } : {}) }, connection); return; }
       if (msg.type === 'notification-settings') {
         if (msg.enabled === true && !notificationMonitor && connection === ws && !shuttingDown) {
           notificationMonitor = (createNotificationMonitorForTests || (options => new TaskNotificationMonitor(options)))({ createSession, listThreads: listAuthorizedThreads,
@@ -410,7 +411,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { deviceEpochs.set(msg.deviceId, (deviceEpochs.get(msg.deviceId) || 0) + 1); revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void closeSession(session).catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); const cleanup = Promise.resolve(deviceCleanups.get(msg.deviceId)).then(() => cleanupDevice(msg.deviceId)).catch(() => {}); deviceCleanups.set(msg.deviceId, cleanup); await cleanup; if (deviceCleanups.get(msg.deviceId) === cleanup) deviceCleanups.delete(msg.deviceId); return; }
       // Reserve the exact read request before awaiting device transitions, so a
       // following cancel-reply cannot overtake registration and be lost.
-      const earlyDesktopRead = msg.type === 'desktop-read' && typeof msg.id === 'string' && msg.id.length <= 100 ? beginWrite(msg) : null;
+      const earlyDesktopRead = ['desktop-read', 'desktop-open'].includes(msg.type) && typeof msg.id === 'string' && msg.id.length <= 100 ? beginWrite(msg) : null;
       const discardEarlyRead = () => { if (earlyDesktopRead && writeReplies.get(msg.id) === earlyDesktopRead.request) writeReplies.delete(msg.id); };
       const deviceEpoch = deviceEpochs.get(msg.deviceId);
       if (typeof msg.deviceId === 'string') await deviceTransitions.get(msg.deviceId);
@@ -419,6 +420,39 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
       if (msg.type === 'activity') {
         const answer = beginRead(msg);
         try { const data = await activityObserver.snapshot(); answer(true, data); } catch { answer(false); }
+        return;
+      }
+      if (msg.type === 'desktop-open') {
+        const id = msg.conversationId, answer = earlyDesktopRead || beginWrite(msg);
+        const valid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+        if (!valid(id) || !valid(msg.deviceId)) return answer('unavailable');
+        // A selection may start history recovery concurrently. Wait for it to
+        // settle before opening; never replay an already dispatched OS open.
+        const deadline = Date.now() + 7000;
+        while ((activeRecoveries.has(id) || recoveryLocked(id)) && !answer.cancelled() && !shuttingDown && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+        if (answer.cancelled() || shuttingDown) return;
+        if (activeRecoveries.has(id) || recoveryLocked(id) || writes.has(id) || models?.isLocked(id)) return answer('unavailable');
+        writes.add(id); let navigation;
+        try {
+          const cancelled = () => answer.cancelled() || shuttingDown || recoveryLocked(id) || Boolean(models?.isLocked(id));
+          navigation = await acquireDesktopNavigation(cancelled, () => answer.cancelEvidence() || shuttingDown);
+          if (!navigation || cancelled()) return answer('unavailable');
+          const data = await listAllThreads(listAuthorizedThreads);
+          const allowed = new Set([...data.recent, ...data.projects.flatMap(project => project.threads)].map(thread => thread.id));
+          if (cancelled()) return;
+          if (!allowed.has(id)) {
+            if (!data.truncated) return answer('unavailable');
+            const authorize = searchAuthorizeForTests || authorizedSearchThreads;
+            const extra = await authorize([id], { phoneThreadIds: phoneOptions({}).phoneThreadIds || [] });
+            if (cancelled()) return;
+            if (!(extra instanceof Map) || !extra.has(id)) return answer('unavailable');
+          }
+          if (cancelled()) return;
+          await (openDesktopThreadForTests || openDesktopThread)(id);
+          trace('desktop-open', 'outcome', { thread: id, result: 'opened' });
+          answer('accepted');
+        } catch { trace('desktop-open', 'outcome', { thread: id, result: 'unavailable' }); answer('unavailable'); }
+        finally { writes.delete(id); releaseDesktopNavigation(navigation); }
         return;
       }
       if (msg.type === 'desktop-read') {

@@ -10,6 +10,7 @@ const scripts = Object.freeze({
   '/h5/v1.0.2-unread1/desktop.html': [...common('v1.0.2-unread1'), '/h5/v1.0.2-unread1/task-reminder-store.js', '/h5/v1.0.2-unread1/notification-presence.js', '/h5/v1.0.2-unread1/notifications.js', '/h5/v1.0.2-unread1/jsQR.js', '/h5/v1.0.2-unread1/pair.js', '/h5/v1.0.2-unread1/desktop.js', '/download/home-entry.js?v=20261106-2'],
   '/h5/v1.0.2-readsync1/desktop.html': [...common('v1.0.2-readsync1'), '/h5/v1.0.2-readsync1/task-reminder-store.js', '/h5/v1.0.2-readsync1/notification-presence.js', '/h5/v1.0.2-readsync1/notifications.js', '/h5/v1.0.2-readsync1/jsQR.js', '/h5/v1.0.2-readsync1/pair.js', '/h5/v1.0.2-readsync1/desktop.js', '/download/home-entry.js?v=20261106-2'],
   '/h5/v1.0.2-readsync2/desktop.html': [...common('v1.0.2-readsync2'), '/h5/v1.0.2-readsync2/task-reminder-store.js', '/h5/v1.0.2-readsync2/notification-presence.js', '/h5/v1.0.2-readsync2/notifications.js', '/h5/v1.0.2-readsync2/jsQR.js', '/h5/v1.0.2-readsync2/pair.js', '/h5/v1.0.2-readsync2/desktop.js', '/download/home-entry.js?v=20261106-2'],
+  '/h5/v1.0.2-open1/desktop.html': [...common('v1.0.2-open1'), '/h5/v1.0.2-open1/task-reminder-store.js', '/h5/v1.0.2-open1/notification-presence.js', '/h5/v1.0.2-open1/notifications.js', '/h5/v1.0.2-open1/jsQR.js', '/h5/v1.0.2-open1/pair.js', '/h5/v1.0.2-open1/desktop.js', '/download/home-entry.js?v=20261106-2'],
 });
 
 export async function decideVersionEntry({ pathname, hash = '', fetchImpl, storage, signal } = {}) {

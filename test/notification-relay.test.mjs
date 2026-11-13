@@ -706,3 +706,21 @@ test('explicit native unread navigation is scoped to the authenticated pair and 
     assert.equal((await f.request(path, { method: 'POST', data: { scopeKey }, cookie: a.phone.cookie, extra })).status, 401);
   } finally { await f.close(); }
 });
+
+test('explicit desktop open is pair-scoped and capability-gated without notification or unread prerequisites', { timeout: 10000 }, async () => {
+  const f = await fixture({ enabled: false });
+  try {
+    const a = await f.enroll(), b = await f.enroll(), pa = await f.connector(a), pb = await f.connector(b);
+    const threadId = randomUUID(), path = `/api/threads/${threadId}/desktop-open`, extra = { 'x-codex-expected-device': a.phone.deviceId };
+    assert.equal((await f.request(path, { method: 'POST', data: {}, cookie: a.phone.cookie, extra })).status, 409);
+    pa.ws.send(JSON.stringify({ type: 'capabilities', desktopOpen: 1 })); const pong=once(pa.ws,'pong'); pa.ws.ping(); await pong;
+    assert.equal((await (await f.request('/api/capabilities', { cookie: a.phone.cookie })).json()).desktopOpen, true);
+    assert.equal((await f.request(path, { method: 'POST', data: {}, cookie: a.phone.cookie })).status, 409);
+    assert.equal((await f.request(path, { method: 'POST', data: { scopeKey: 'no' }, cookie: a.phone.cookie, extra })).status, 400);
+    assert.equal((await f.request(path, { method: 'POST', data: {}, cookie: a.phone.cookie, extra: { ...extra, origin: 'https://other.test', 'sec-fetch-site': 'cross-site' } })).status, 403);
+    const pending=f.request(path,{method:'POST',data:{},cookie:a.phone.cookie,extra});const forwarded=await pa.wait(m=>m.type==='desktop-open');
+    assert.equal(forwarded.deviceId,a.phone.deviceId);assert.equal(forwarded.conversationId,threadId);assert.equal(pb.messages.some(m=>m.type==='desktop-open'),false);
+    pa.ws.send(JSON.stringify({type:'response',id:forwarded.id,status:'accepted'}));const response=await pending;assert.equal(response.status,202);
+    await f.pair(a);assert.equal((await f.request(path,{method:'POST',data:{},cookie:a.phone.cookie,extra})).status,401);
+  } finally { await f.close(); }
+});

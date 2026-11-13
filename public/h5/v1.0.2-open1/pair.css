@@ -1,0 +1,20 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #f7f7f7; color: #202020; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.pair { width: min(100% - 32px, 400px); margin: 0 auto; }
+header { height: 64px; display: flex; align-items: center; border-bottom: 1px solid #dedede; font-size: 17px; }
+h1 { font-size: 24px; margin: 36px 0 28px; letter-spacing: 0; }
+form { display: grid; gap: 10px; }
+label { font-size: 14px; font-weight: 600; margin-top: 8px; }
+input { width: 100%; height: 46px; border: 1px solid #bdbdbd; border-radius: 6px; background: white; padding: 0 12px; color: inherit; font: inherit; }
+input:focus-visible, button:focus-visible { outline: 2px solid #16746a; outline-offset: 2px; }
+button { height: 46px; margin-top: 16px; border: 0; border-radius: 6px; background: #202020; color: white; font: inherit; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: .55; cursor: default; }
+.error { color: #ad302b; font-size: 14px; margin: 4px 0 0; }
+.secondary { margin-top: 0; background: #fff; color: #202020; border: 1px solid #bdbdbd; }
+#scanner:not([hidden]) { display: grid; gap: 10px; }
+#camera { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #111; border-radius: 6px; }
+.install-prompt:not([hidden]) { position: fixed; z-index: 12; bottom: calc(16px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); width: min(360px, calc(100% - 32px)); padding: 16px 44px 16px 16px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 8px 28px #0002; color: #242624; }
+.install-prompt strong { font-size: 14px; }
+.install-prompt p { font-size: 13px; color: #636b66; line-height: 1.5; margin: 6px 0; }
+.install-prompt .install-dismiss { position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; margin: 0; border: 0; background: transparent; color: #616761; font-size: 22px; }
+.install-prompt .install-action { height: auto; margin-top: 5px; padding: 7px 14px; border: 0; border-radius: 5px; background: #202320; color: #fff; font: inherit; }
