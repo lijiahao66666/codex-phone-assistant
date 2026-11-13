@@ -1,7 +1,7 @@
 // The entry point does not start either version until the selected pairing's
 // live connector has declared which protocol it understands.
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const paths = Object.freeze({ unversioned: '/h5/v1.0.1/desktop.html', v1: '/h5/v1.0.2-readsync1/desktop.html' });
+const paths = Object.freeze({ unversioned: '/h5/v1.0.1/desktop.html', v1: '/h5/v1.0.2-readsync2/desktop.html' });
 const deviceRequest = { method: 'GET', credentials: 'same-origin', cache: 'no-store' };
 const scopeFrom = data => {
   if (!data || !Array.isArray(data.devices)) return null;

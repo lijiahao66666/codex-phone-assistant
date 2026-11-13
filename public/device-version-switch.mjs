@@ -32,7 +32,7 @@ export async function switchDeviceVersion({ current, target, protocol, getCurren
       const finalProfile = await verified.json();
       if (finalProfile.status !== 'ready' || finalProfile.hostId !== target.hostId || finalProfile.deviceId !== target.deviceId || finalProfile.currentDeviceId !== target.deviceId || finalProfile.profileEpoch !== profile.profileEpoch || finalProfile.uiProtocol !== profile.uiProtocol || !currentMatches()) throw new Error('Selection outcome unknown');
       changed();
-      if (crossing) navigate((profile.uiProtocol === 'v1' ? '/h5/v1.0.2-readsync1/desktop.html' : '/h5/v1.0.1/desktop.html') + fragment);
+      if (crossing) navigate((profile.uiProtocol === 'v1' ? '/h5/v1.0.2-readsync2/desktop.html' : '/h5/v1.0.1/desktop.html') + fragment);
       return { status: crossing ? 'navigating' : 'selected' };
     } catch {
       if (dispatched) { freeze(); return { status: 'outcome-unknown' }; }

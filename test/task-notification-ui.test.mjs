@@ -41,7 +41,7 @@ async function fixture(options = {}) {
     refreshNotificationPresence() { presence.push(window.getNotificationThreadId?.()); },
     addEventListener(type, fn) { windowListeners.set(type, fn); },
   };
-  const context = vm.createContext({ document, window, crypto: webcrypto, AbortController, TextDecoder, TextEncoder, URLSearchParams, Date,
+  const context = vm.createContext({ document, window, crypto: webcrypto, AbortController, TextDecoder, TextEncoder, URLSearchParams, Date, queueMicrotask,
     setTimeout(fn, ms) { const key = { unref() {} }; timers.set(key, { fn, ms }); return key; }, clearTimeout(key) { timers.delete(key); },
     localStorage: options.localStorage ?? { getItem() { return null; }, removeItem() {}, setItem() {} }, sessionStorage: { removeItem() {} }, store: { read: async () => null },
     fetch: options.fetch ?? (async () => { throw new Error('This interaction fixture must not make a network request'); }),
@@ -544,7 +544,7 @@ test('opening a completed reminder clears locally before Desktop responds and pe
 
 test('failed Desktop sync never restores locally read reminders, and another click retries in the background', async () => {
   const requests = [];
-  const f = await fixture({ fetch: async (url, request) => { requests.push(request); return { ok: false }; } });
+  const f = await fixture({ fetch: async (url, request) => { if (url === '/api/notifications/read') requests.push(request); return { ok: false }; } });
   const event = notification(b);
   f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent() {}, async list() { return [event]; } };
   f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
@@ -603,6 +603,59 @@ test('capability becoming ready synchronizes only the still-open user selection'
   assert.equal(requests.length, 1, 'capability discovery resumes the user selection without another click');
   f.row(a).click(); await f.window.restoreTaskReminders();
   assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+});
+
+test('completion-only unread silently skips desktop navigation when notification support is unavailable', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: async url => { requests.push(url); return { ok: true }; } });
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, false, false);
+  f.notify(notification(b));
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
+  f.row(b).click();
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  assert.equal(requests.length, 0, 'no native unread bit and unsupported notification read leave Desktop untouched');
+});
+
+test('opening completion reminder refreshes native state and navigates only if Desktop is truly unread', async () => {
+  for (const unread of [false, true]) {
+    const requests = [], scopeKey = 'a'.repeat(64);
+    let f;
+    f = await fixture({ fetch: async (url) => {
+      requests.push(url);
+      if (url === '/api/threads') return { ok: true, json: async () => ({ ...f.data, nativeUnread: { status: 'available', scopeKey }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b ? { ...task, unread } : task) }] }) };
+      return { ok: true };
+    } });
+    f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey } });
+    f.notify(notification(b)); f.row(b).click();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(requests.includes('/api/threads'));
+    assert.equal(requests.includes(`/api/threads/${b}/desktop-read`), unread);
+  }
+});
+
+test('a fresh native unread result cannot navigate after the user selects another task', async () => {
+  const requests = [], scopeKey = 'a'.repeat(64); let finishList;
+  const f = await fixture({ fetch: url => { requests.push(url); if (url === '/api/threads') return new Promise(resolve => { finishList = resolve; }); return Promise.resolve({ ok: true }); } });
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey } });
+  f.notify(notification(b)); f.row(b).click();
+  await new Promise(resolve => setImmediate(resolve));
+  f.row(c).click();
+  finishList({ ok: true, json: async () => ({ ...f.data, nativeUnread: { status: 'available', scopeKey }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b ? { ...task, unread: true } : task) }] }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.includes(`/api/threads/${b}/desktop-read`), false);
+});
+
+test('a completion read already dispatched cannot trigger a second native navigation on a late list', async () => {
+  const requests = [], scopeKey = 'a'.repeat(64);
+  const f = await fixture({ fetch: (url) => { requests.push(url); return new Promise(() => {}); } });
+  f.window.taskReminderStore = { async put() {}, async removeEvent() {} };
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  f.render({ ...f.data, nativeUnread: { status: 'available', scopeKey } });
+  f.notify(notification(b)); f.row(b).click();
+  const list = { ...f.data, nativeUnread: { status: 'available', scopeKey }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b ? { ...task, unread: true } : task) }] };
+  f.render(list);
+  assert.equal(requests.filter(url => url === '/api/notifications/read').length, 1);
+  assert.equal(requests.filter(url => url === `/api/threads/${b}/desktop-read`).length, 0);
 });
 
 test('late capability and native unread updates do not navigate after switching tasks', async () => {
