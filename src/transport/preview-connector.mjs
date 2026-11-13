@@ -149,6 +149,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
   if (traceForTests !== undefined && typeof traceForTests !== 'function') throw new TypeError('invalid trace override');
   const trace = traceForTests || productionTrace;
   const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(), uploadChecks = new Set(); let ws, scheduler, timer, stopped = false, shuttingDown = false, activeMutations = 0;
+  const activeRecoveries = new Set();
   const mutationTypes = new Set(['desktop-read', 'notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
   let desktopNavigationPending = null, desktopNavigationWaiting = null;
   let activeSearch = null, waitingSearch = null;
@@ -337,6 +338,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         send({ type: 'response', id: msg.id, status }, connection, { request, cancellable: true });
       };
       answer.cancelled = cancelled;
+      answer.request = request;
       // A response removes the request too; only explicit cancellation,
       // revocation or disconnect is evidence for a later navigation.
       answer.cancelEvidence = () => request.cancelled || revoked.has(request.deviceId) || connection !== ws || connection.readyState !== WebSocket.OPEN;
@@ -406,38 +408,51 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         return;
       }
       if (msg.type === 'device-revoked' && typeof msg.deviceId === 'string') { deviceEpochs.set(msg.deviceId, (deviceEpochs.get(msg.deviceId) || 0) + 1); revoked.add(msg.deviceId); for (const [id, stream] of sidebarStreams) if (stream.deviceId === msg.deviceId) removeSidebarStream(id); connectionScheduler.cancelDevice(msg.deviceId); for (const requests of [readRequests, writeReplies]) for (const [id, request] of requests) if (request.deviceId === msg.deviceId) { request.cancelled = true; request.chunkStop?.(); requests.delete(id); } for (const operation of inflightUploads.values()) if (operation.scope.deviceId === msg.deviceId) operation.cancelled = true; statusPriorities.remove(msg.deviceId); if (!statusPriorities.devices.size) void sidebarStatus?.close(); for (const [id, session] of streams) if (session.uploadDeviceId === msg.deviceId) { session.chunkStop?.(); connectionScheduler.cancelStream(id); clearImageTimer(id); streams.delete(id); void closeSession(session).catch(() => {}); } imagePreview?.revokeDevice(msg.deviceId); const cleanup = Promise.resolve(deviceCleanups.get(msg.deviceId)).then(() => cleanupDevice(msg.deviceId)).catch(() => {}); deviceCleanups.set(msg.deviceId, cleanup); await cleanup; if (deviceCleanups.get(msg.deviceId) === cleanup) deviceCleanups.delete(msg.deviceId); return; }
+      // Reserve the exact read request before awaiting device transitions, so a
+      // following cancel-reply cannot overtake registration and be lost.
+      const earlyDesktopRead = msg.type === 'desktop-read' && typeof msg.id === 'string' && msg.id.length <= 100 ? beginWrite(msg) : null;
+      const discardEarlyRead = () => { if (earlyDesktopRead && writeReplies.get(msg.id) === earlyDesktopRead.request) writeReplies.delete(msg.id); };
       const deviceEpoch = deviceEpochs.get(msg.deviceId);
       if (typeof msg.deviceId === 'string') await deviceTransitions.get(msg.deviceId);
-      if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) return;
-      if (connection !== ws || connection.readyState !== WebSocket.OPEN) return;
+      if (revoked.has(msg.deviceId) || deviceEpochs.get(msg.deviceId) !== deviceEpoch) { discardEarlyRead(); return; }
+      if (connection !== ws || connection.readyState !== WebSocket.OPEN) { discardEarlyRead(); return; }
       if (msg.type === 'activity') {
         const answer = beginRead(msg);
         try { const data = await activityObserver.snapshot(); answer(true, data); } catch { answer(false); }
         return;
       }
       if (msg.type === 'desktop-read') {
-        const id = msg.conversationId, answer = beginWrite(msg);
+        const id = msg.conversationId, answer = earlyDesktopRead || beginWrite(msg);
+        const rejectRead = reason => { trace('desktop-read', 'rejected', { thread: id, reason }); return answer('unavailable'); };
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id || '')
             || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(msg.deviceId || '')
-            || !/^[a-f0-9]{64}$/.test(msg.scopeKey || '')
-            || writes.has(id) || models?.isLocked(id) || recoveryLocked(id)) return answer('unavailable');
+            || !/^[a-f0-9]{64}$/.test(msg.scopeKey || '')) return answer('unavailable');
+        // Recovery and a user-opened read can arrive together. Wait only while
+        // the actual recovery is executing or remains reserved; never retry an
+        // OS navigation, and honour cancellation before acquiring the lock.
+        const deadline = Date.now() + 7000;
+        while ((activeRecoveries.has(id) || recoveryLocked(id)) && !answer.cancelled() && !shuttingDown && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+        if (answer.cancelled() || shuttingDown) return;
+        if (recoveryLocked(id) || activeRecoveries.has(id)) return rejectRead('recovery-pending');
+        if (writes.has(id) || models?.isLocked(id)) return rejectRead('write-pending');
         writes.add(id); let navigation;
         try {
           const cancelled = () => answer.cancelled() || shuttingDown || recoveryLocked(id) || Boolean(models?.isLocked(id));
           navigation = await acquireDesktopNavigation(cancelled, () => answer.cancelEvidence() || shuttingDown);
-          if (!navigation || cancelled()) return answer('unavailable');
+          if (!navigation || cancelled()) return rejectRead('navigation-busy');
           const data = await listAllThreads(listAuthorizedThreads);
           const allowed = new Set([...data.recent, ...data.projects.flatMap(project => project.threads)].map(thread => thread.id));
-          if (cancelled() || data.nativeUnread?.status !== 'available' || data.nativeUnread.scopeKey !== msg.scopeKey) return answer('unavailable');
+          if (cancelled() || data.nativeUnread?.status !== 'available' || data.nativeUnread.scopeKey !== msg.scopeKey) return rejectRead('scope-unavailable');
           if (!allowed.has(id)) {
-            if (!data.truncated) return answer('unavailable');
+            if (!data.truncated) return rejectRead('thread-not-listed');
             const authorize = searchAuthorizeForTests || authorizedSearchThreads;
             const extra = await authorize([id], { phoneThreadIds: phoneOptions({}).phoneThreadIds || [] });
-            if (cancelled() || !(extra instanceof Map) || !extra.has(id)) return answer('unavailable');
+            if (cancelled() || !(extra instanceof Map) || !extra.has(id)) return rejectRead('thread-not-authorized');
           }
           const result = await (navigateDesktopUnreadForTests || navigateDesktopUnread)(id, msg.scopeKey, { isCancelled: cancelled });
+          trace('desktop-read', 'outcome', { thread: id, result: result?.read === true ? 'confirmed' : 'unavailable' });
           answer(result?.read === true ? 'accepted' : 'unavailable');
-        } catch { answer('unavailable'); }
+        } catch { rejectRead('navigation-unconfirmed'); }
         finally { writes.delete(id); releaseDesktopNavigation(navigation); }
         return;
       }
@@ -488,7 +503,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
           registered = true;
           const session = [...streams.values()].find(s => s.conversationId === msg.conversationId && s.uploadDeviceId === msg.deviceId);
           if (!session || writes.has(msg.conversationId)) throw new Error('unavailable');
-          writes.add(msg.conversationId); locked = true;
+          writes.add(msg.conversationId); activeRecoveries.add(msg.conversationId); locked = true;
           const permitted = await canRecoverHistory(msg.conversationId, phoneOptions());
           if (cancelled() || ![...streams.values()].includes(session) || permitted !== true) throw new Error('unavailable');
           trace('recover', 'authorized', { thread: msg.conversationId, elapsedMs: Math.round(performance.now() - recoveryStarted) });
@@ -512,7 +527,7 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
             } catch { noRecoveryWrite = false; dispatched = true; }
           }
           if (!cancelled()) send({ type: 'response', id: msg.id, status: !dispatched || noRecoveryWrite ? 'unavailable' : 'unknown' }, connection, { request, cancellable: true });
-        } finally { if (locked) writes.delete(msg.conversationId); writeReplies.delete(msg.id); }
+        } finally { if (locked) { activeRecoveries.delete(msg.conversationId); writes.delete(msg.conversationId); } writeReplies.delete(msg.id); }
         return;
       }
       if (msg.type === 'cancel-unseen-recovery') {

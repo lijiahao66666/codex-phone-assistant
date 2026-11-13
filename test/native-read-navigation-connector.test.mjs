@@ -10,10 +10,10 @@ const scope = 'a'.repeat(64);
 const otherThread = '44444444-4444-4444-8444-444444444444', thirdThread = '55555555-5555-4555-8555-555555555555';
 const listed = () => ({ projects: [], recent: [{ id: threadId, title: 'Fixture', recency: 1 }], nativeUnread: { status: 'available', scopeKey: scope, snapshotKey: 'b'.repeat(64) } });
 async function until(check) { const deadline = Date.now() + 2000; while (!check()) { if (Date.now() > deadline) throw new Error('Expected message'); await new Promise(resolve => setTimeout(resolve, 5)); } }
-async function fixture({ listThreads = async () => listed(), navigate = async () => ({ read: true }), notificationMonitor, authorize } = {}) {
+async function fixture({ listThreads = async () => listed(), navigate = async () => ({ read: true }), notificationMonitor, authorize, ownerRouter } = {}) {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(server, 'listening');
   const incoming = once(server, 'connection'), messages = [], calls = [];
-  const connector = createPreviewConnector({ url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId, allowInsecureForTests: true, listThreads,
+  const connector = createPreviewConnector({ url: `ws://127.0.0.1:${server.address().port}/connector`, secret: 's'.repeat(43), hostId, ownerRouter, allowInsecureForTests: true, listThreads,
     navigateDesktopUnreadForTests: async (...args) => { calls.push(args); return navigate(...args); },
     ...(authorize ? { searchAuthorizeForTests: authorize } : {}),
     ...(notificationMonitor ? { createNotificationMonitorForTests: () => notificationMonitor } : {}),
@@ -27,6 +27,39 @@ async function fixture({ listThreads = async () => listed(), navigate = async ()
     async close() { await connector.close(); await new Promise(resolve => server.close(resolve)); },
   };
 }
+
+test('a read waits for a concurrent recovery before navigating, and cancellation prevents a late open', async () => {
+  for (const cancel of [false, true]) {
+    let locked = true, observed = false;
+    const f = await fixture({ ownerRouter: { isRecoveryLocked: () => { observed = true; return locked; } } });
+    try {
+      f.request('during-recovery');
+      await until(() => observed);
+      assert.equal(f.calls.length, 0);
+      assert.equal(f.messages.some(m => m.id === 'during-recovery'), false);
+      if (cancel) { f.send({ type: 'cancel-reply', id: 'during-recovery' }); await new Promise(resolve => setTimeout(resolve, 30)); }
+      locked = false;
+      if (cancel) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(f.calls.length, 0, 'cancelled selection cannot open Desktop later');
+      } else {
+        assert.equal((await f.response('during-recovery')).status, 'accepted');
+        assert.equal(f.calls.length, 1);
+      }
+    } finally { await f.close(); }
+  }
+});
+
+test('an immediate cancellation cannot overtake desktop-read registration', async () => {
+  const f = await fixture({ ownerRouter: { isRecoveryLocked: () => false } });
+  try {
+    f.request('immediate');
+    f.send({ type: 'cancel-reply', id: 'immediate' });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(f.calls.length, 0, 'cancelled request must never navigate');
+    assert.equal(f.messages.some(m => m.id === 'immediate' && m.type === 'response'), false);
+  } finally { await f.close(); }
+});
 
 test('fresh authorized desktop unread uses the requested scope without synthetic notification clears', async () => {
   let lists = 0; const f = await fixture({ listThreads: async () => { lists++; return listed(); } });
