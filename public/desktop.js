@@ -2599,6 +2599,7 @@ function acceptSidebarStatuses(value) {
   // The observer also retains running tasks outside the visible slots.
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 1024 || Object.entries(value).some(([id, state]) => !uuid.test(id) || !['active', 'idle', 'unknown'].includes(state))) return;
   sidebarStatusSnapshot = new Map(Object.entries(value));
+  for (const [id, state] of sidebarStatusSnapshot) if (state === 'active' || state === 'idle') initialReminderUnresolved.delete(id);
   for (const [id, state] of sidebarStatusSnapshot) if (state === 'active') clearCompletedWhenRunning(id);
   for (const [id, state] of sidebarStatusSnapshot) if (state === 'active' || state === 'idle') clearStatusHandover(id);
   for (const task of projectList.querySelectorAll?.('.task') || []) {
@@ -2700,6 +2701,7 @@ function chevronIcon() {
 }
 function updateLiveTaskStatus(id, status) {
   if (!id) return;
+  if (taskStatusIsActive(status) || status === 'idle') initialReminderUnresolved.delete(id);
   if (taskStatusIsActive(status)) clearCompletedWhenRunning(id);
   clearStatusHandover(id);
   if (taskStatusIsActive(status)) liveTaskStatus.set(id, 'active'); else liveTaskStatus.delete(id);
@@ -2724,6 +2726,31 @@ const pendingDesktopNotificationReads = new Map();
 const nativeUnread = new Map(), nativeUnreadReads = new Map();
 const nativeUnreadSuppressedAfter = new Map();
 let nativeUnreadScope = null, nativeUnreadAvailable = false, nativeUnreadSuppressed = new Set();
+// Hold unresolved completion markers briefly while the first status query runs.
+// A timeout preserves access to reminders when the desktop is offline.
+let initialReminderStatusGeneration = -1, initialReminderStatusPending = false, initialReminderStatusTimer;
+const initialReminderUnresolved = new Set();
+function beginInitialReminderStatusCheck() {
+  if (!historyScope || initialReminderStatusGeneration === historyScopeGeneration) return;
+  initialReminderStatusGeneration = historyScopeGeneration;
+  initialReminderStatusPending = true;
+  initialReminderUnresolved.clear();
+  const generation = historyScopeGeneration;
+  clearTimeout(initialReminderStatusTimer);
+  initialReminderStatusTimer = setTimeout(() => {
+    if (generation !== historyScopeGeneration) return;
+    initialReminderStatusPending = false;
+    refreshTaskNotificationIndicators();
+  }, 4000);
+  initialReminderStatusTimer?.unref?.();
+}
+function reminderStatus(id, fallback = 'unknown') {
+  const observed = sidebarStatusSnapshot?.get(id);
+  return liveTaskStatus.get(id) === 'active' ? 'active' : statusHandovers.has(id) ? 'checking' : observed && observed !== 'unknown' ? observed : fallback;
+}
+function reminderVisible(notification, state, id) {
+  return Boolean(notification) && (notification.kind !== 'completed' || (!taskStatusIsActive(state) && state !== 'checking' && !(initialReminderStatusPending && initialReminderUnresolved.has(id))));
+}
 // A foreground return is a user viewing the selected task, scoped to the pair.
 let foregroundTaskRead = null;
 function nativeUnreadStorageKey(scope) { return `codex-native-unread-v1:${historyScope.hostId}:${historyScope.deviceId}:${scope}`; }
@@ -2870,9 +2897,9 @@ function persistTaskNotification(notification) {
 }
 const taskNotificationLabels = { completed: '任务已完成', question: '任务需要回答', approval: '任务等待审批' };
 const taskNotificationSymbols = { completed: '', question: '待回答', approval: '待审批' };
-function renderTaskNotification(marker, notification, state = 'idle') {
+function renderTaskNotification(marker, notification, state = 'idle', id = null) {
   if (!marker) return;
-  marker.hidden = !notification || (notification.kind === 'completed' && (taskStatusIsActive(state) || state === 'checking'));
+  marker.hidden = !reminderVisible(notification, state, id);
   marker.dataset.kind = notification?.kind || '';
   marker.textContent = notification ? taskNotificationSymbols[notification.kind] : '';
   marker.title = notification ? notification.native ? '未读消息' : taskNotificationLabels[notification.kind] : '';
@@ -2888,11 +2915,11 @@ function refreshTaskNotificationIndicators(prune = false) {
   for (const task of projectList.querySelectorAll('.task')) {
     const id = task.dataset.id, notification = taskReminder(id);
     const state = liveTaskStatus.get(id) === 'active' ? 'active' : statusHandovers.has(id) ? 'checking' : sidebarStatusSnapshot?.get(id) ?? task.dataset.status;
-    renderTaskNotification(task.querySelector?.('.task-notification'), notification, state);
+    renderTaskNotification(task.querySelector?.('.task-notification'), notification, state, id);
     setTaskIndicator(task.querySelector?.('.task-active'), notification && notification.kind !== 'completed' ? 'idle' : state);
   }
   for (const [key, group] of projectStatusGroups) {
-    const notices = group.tasks.map(task => taskReminder(task.id)).filter(Boolean);
+    const notices = group.tasks.map(task => { const notification = taskReminder(task.id); return reminderVisible(notification, reminderStatus(task.id, task.status?.type ?? task.status ?? 'unknown'), task.id) ? notification : null; }).filter(Boolean);
     const questions = notices.filter(item => item.kind === 'question').length;
     const approvals = notices.filter(item => item.kind === 'approval').length;
     const states = group.tasks.map(task => liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : sidebarStatusSnapshot?.get(task.id) ?? task.status?.type ?? task.status ?? 'unknown');
@@ -2900,7 +2927,8 @@ function refreshTaskNotificationIndicators(prune = false) {
     const count = notices.length;
     if (!group.notificationIndicator) continue;
     group.notificationIndicator.hidden = !count || !folded || (busy && !questions && !approvals);
-    group.notificationIndicator.textContent = questions || approvals ? [questions ? `待回答${questions > 1 ? ` ${questions}` : ''}` : '', approvals ? `待审批${approvals > 1 ? ` ${approvals}` : ''}` : ''].filter(Boolean).join(' · ') : count ? String(count) : '';
+    group.notificationIndicator.textContent = questions || approvals ? [questions ? `待回答${questions > 1 ? ` ${questions}` : ''}` : '', approvals ? `待审批${approvals > 1 ? ` ${approvals}` : ''}` : ''].filter(Boolean).join(' · ') : '';
+    group.notificationIndicator.dataset.kind = count && !questions && !approvals ? 'completed' : '';
     group.notificationIndicator.title = questions || approvals ? '目录内有待处理提醒' : `${count} 个任务有提醒`;
     group.notificationIndicator.setAttribute('aria-label', group.notificationIndicator.title);
     const state = folded && busy && !questions && !approvals ? states.some(taskStatusIsActive) ? 'active' : 'checking' : 'idle';
@@ -2909,12 +2937,12 @@ function refreshTaskNotificationIndicators(prune = false) {
     group.indicator.title = state === 'active' ? '目录内有任务进行中' : state === 'checking' ? '目录任务状态更新中' : '';
     group.indicator.setAttribute('aria-label', group.indicator.title);
   }
-  const count = [...known].filter(id => taskReminder(id)).length;
+  const count = new Set([...projectStatusGroups.values()].flatMap(group => group.tasks).filter(task => reminderVisible(taskReminder(task.id), reminderStatus(task.id, task.status?.type ?? task.status ?? 'unknown'), task.id)).map(task => task.id)).size;
   const entry = document.querySelector('#open-sidebar');
   if (!entry?.querySelector || !entry?.append) return;
   let marker = entry.querySelector('.sidebar-notification');
   if (!marker) { marker = element('span', 'task-notification sidebar-notification'); marker.setAttribute('aria-hidden', 'true'); entry.append(marker); }
-  marker.hidden = !count; marker.textContent = count > 9 ? '9+' : String(count);
+  marker.hidden = !count; marker.textContent = ''; marker.dataset.kind = 'completed';
   entry.setAttribute('aria-label', count ? `打开侧栏，${count} 个任务有提醒` : '打开侧栏');
   entry.title = count ? `${count} 个任务有提醒` : '打开侧栏';
 }
@@ -2993,6 +3021,9 @@ function applyTaskNotification(notification, restored = false) {
   if (seen) return true;
   if (!restored) touchTaskNotification(notification.threadId);
   taskNotifications.set(notification.threadId, { kind: notification.kind, eventId: notification.eventId, ...(validNotificationTime(notification.createdAt) ? { createdAt: notification.createdAt } : {}) });
+  const knownTask = [...projectStatusGroups.values()].flatMap(group => group.tasks).find(task => task.id === notification.threadId);
+  if (restored && notification.kind === 'completed' && taskStatusIsActive(reminderStatus(notification.threadId, knownTask?.status?.type ?? knownTask?.status ?? 'unknown'))) { clearCompletedWhenRunning(notification.threadId); return true; }
+  else if (initialReminderStatusPending && notification.kind === 'completed') scheduleVisibleStatusRefresh();
   if (restored && notification.kind === 'completed' && foregroundTaskRead?.threadId === notification.threadId && foregroundTaskRead.generation === historyScopeGeneration && selectedId === notification.threadId && !newDraft && document.hidden !== true && !pageSuspended) {
     requestDesktopNotificationRead(notification.threadId);
     return true;
@@ -3062,7 +3093,7 @@ function renderTask(task, { navigateDesktop = true } = {}) {
   const observedStatus = sidebarStatusSnapshot?.get(task.id) ?? button.dataset.status;
   button.append(indicator);
   const notificationIndicator = element('span', 'task-notification');
-  renderTaskNotification(notificationIndicator, taskReminder(task.id));
+  renderTaskNotification(notificationIndicator, taskReminder(task.id), reminderStatus(task.id, observedStatus), task.id);
   button.append(notificationIndicator);
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
   button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (historyScope && document.hidden !== true && !pageSuspended) foregroundTaskRead = { threadId: task.id, generation: historyScopeGeneration, source: 'selection' }; cancelDesktopNotificationReads(task.id); cancelNativeUnreadReads(task.id); const completionRead = needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id); const nativeRead = nativeUnreadAvailable && nativeUnread.get(task.id) === true; if (nativeRead) requestNativeUnreadRead(task.id, { navigate: navigateDesktop }); if (completionRead) requestDesktopNotificationRead(task.id, { navigate: navigateDesktop && !nativeRead }); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
@@ -3156,7 +3187,7 @@ function renderActivityView() {
       const indicator = element('span', 'task-active');
       setTaskIndicator(indicator, reminder && reminder.kind !== 'completed' ? 'idle' : item.state);
       const marker = element('span', 'task-notification');
-      renderTaskNotification(marker, reminder, item.state);
+      renderTaskNotification(marker, reminder, item.state, item.id);
       if (item.waiting === 'both') { marker.textContent = '待回答 · 待审批'; marker.title = marker.textContent; marker.setAttribute('aria-label', marker.textContent); }
       button.append(indicator, marker);
       button.addEventListener('click', () => renderTask(item).click()); return button;
@@ -3281,7 +3312,8 @@ function visibleStatusIds() {
   const grouped = [...new Set(visibleGroups.flatMap(group => group.tasks.map(task => task.id)))];
   const knownRunning = new Set(visibleGroups.flatMap(group => group.tasks.filter(task => taskStatusIsActive(task.status?.type ?? task.status)).map(task => task.id)));
   const running = grouped.filter(id => liveTaskStatus.get(id) === 'active' || sidebarStatusSnapshot?.get(id) === 'active' || knownRunning.has(id));
-  const priority = [...new Set([...statusHandovers.keys(), ...running, ...(uuid.test(selectedId || '') ? [selectedId] : [])])];
+  const unread = initialReminderStatusPending ? [...projectStatusGroups.values()].flatMap(group => group.tasks).map(task => task.id).filter(id => taskReminder(id)) : [];
+  const priority = [...new Set([...statusHandovers.keys(), ...running, ...(uuid.test(selectedId || '') ? [selectedId] : []), ...unread])];
   const visible = [...new Set(ids)].filter(id => !priority.includes(id));
   const hidden = grouped.filter(id => !priority.includes(id) && !visible.includes(id));
   // Folded directories must keep observing their children. Reserve a bounded
@@ -3469,6 +3501,14 @@ async function loadThreads() {
   return request.promise;
 }
 function renderThreadList(data, generation = listRequestGeneration) {
+  const firstStatusCheck = initialReminderStatusGeneration !== historyScopeGeneration;
+  beginInitialReminderStatusCheck();
+  const initialTasks = [...data.recent, ...data.projects.flatMap(project => Array.isArray(project?.threads) ? project.threads : [])];
+  for (const task of initialTasks) {
+    const state = reminderStatus(task.id, task.status?.type ?? task.status ?? 'unknown');
+    if (firstStatusCheck && state !== 'idle' && !taskStatusIsActive(state)) initialReminderUnresolved.add(task.id);
+    else if (state === 'idle' || taskStatusIsActive(state)) initialReminderUnresolved.delete(task.id);
+  }
   updateNativeUnread(data, generation);
   activityListLoaded = true; activityListTruncated = data.truncated === true;
   ++taskNotificationListGeneration;
@@ -3479,6 +3519,7 @@ function renderThreadList(data, generation = listRequestGeneration) {
     fragment.append(renderGroup(`project:${project.id}`, project.name || '未命名项目', project.threads, false, project.expanded));
   }
   if (data.recent.length) fragment.append(renderGroup('recent', '最近', data.recent, true));
+  for (const group of projectStatusGroups.values()) for (const task of group.tasks) if (taskStatusIsActive(task.status?.type ?? task.status)) clearCompletedWhenRunning(task.id);
   if (data.truncated === true) fragment.append(element('p', 'list-status', '任务较多，仅显示最近的部分任务'));
   if (!fragment.childNodes.length) fragment.append(element('p', 'list-status', '暂无任务'));
   const previousScroll = projectList.scrollTop;
@@ -3488,6 +3529,7 @@ function renderThreadList(data, generation = listRequestGeneration) {
   refreshTaskNotificationIndicators(lastTaskNotificationListComplete);
   drainPendingTaskNotifications();
   void window.restoreTaskReminders?.();
+  if (firstStatusCheck && initialReminderStatusPending && [...initialReminderUnresolved].some(id => taskReminder(id))) void loadThreads();
   const notification = window.takeNotificationTarget?.(historyScope);
   if (notification) window.openNotificationTask?.(notification);
 }

@@ -176,7 +176,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
   // Versioned bundles are immutable snapshots. Only these names and versions
   // are routable; a manifest never grants access to an arbitrary path.
   const versionedNames = new Set(['app-icon.png', 'attachment-preview.mjs', 'desktop.css', 'desktop.html', 'desktop.js', 'device-switch-lock.mjs', 'device-version-switch.mjs', 'html-sanitizer.js', 'install-prompt.js', 'jsQR.js', 'markdown-parser.js', 'notification-presence.js', 'notification-worker.js', 'notifications.js', 'pair.css', 'pair.js', 'pdf-parser.mjs', 'pdf-worker.mjs', 'recovery-attempt-store.js', 'state-chunks.mjs', 'task-reminder-store.js']);
-  const snapshotVersions = new Set(['v1.0.1', 'v1.0.2', 'v1.0.2-activity1']);
+  const snapshotVersions = new Set(['v1.0.1', 'v1.0.2', 'v1.0.2-activity1', 'v1.0.2-unread1']);
   const hostSecret = req => req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
   const cookieAttrs = 'Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Strict';
   const cookies = req => (req.headers.cookie || '').split(';').map(part => part.trim()).filter(Boolean);
@@ -248,7 +248,7 @@ export function createPairRelay({ origin, database = ':memory:', production = fa
     try {
       if (closed || req.headers.host !== base.host) return send(res, 403, { error: 'forbidden' });
       if (await serveAttachmentPreviewAsset(req, res)) return;
-      const snapshot = /^\/h5\/(v1\.0\.[12](?:-activity1)?)\/([A-Za-z0-9.-]+)$/.exec(req.url || '');
+      const snapshot = /^\/h5\/(v1\.0\.[12](?:-activity1|-unread1)?)\/([A-Za-z0-9.-]+)$/.exec(req.url || '');
       if (req.method === 'GET' && snapshot && snapshotVersions.has(snapshot[1]) && versionedNames.has(snapshot[2])) {
         const [, version, name] = snapshot;
         const directory = new URL(`../../public/h5/${version}/`, import.meta.url);

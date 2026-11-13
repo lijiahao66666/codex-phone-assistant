@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
+import { confirmedUserOperation } from '../desktop/confirmed-user-operation.mjs';
 import { WebSocket } from 'ws';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DesktopSession } from '../desktop/session.mjs';
-import { trace } from '../desktop/diagnostics.mjs';
+import { trace as productionTrace } from '../desktop/diagnostics.mjs';
 import { createStreamDiagnostics } from '../common/stream-diagnostics.mjs';
 import { desktopView } from '../desktop/view.mjs';
 import { listDesktopThreads, ThreadListChanges } from '../desktop/thread-list.mjs';
@@ -138,12 +140,14 @@ export async function populateThreadStatuses({ sidebarStatus, statusPriorities, 
 }
 
 // Only one authenticated relay is configured; no arbitrary local HTTP proxying.
-export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, navigateDesktopUnreadForTests, searchAuthorizeForTests, readSearchUnreadForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
+export function createPreviewConnector({ url, secret, hostId, ownerRouter, modelRequest, modelJournal, imageUpload = false, imagePreview = null, uploadRoot = join(homedir(), '.codex', 'phone-uploads'), createUploadContext, imageValidator, filePreviewHelper, sidebarStatusForTests, threadListChangesForTests, schedulerLimitForTests, onSidebarRetryForTests, yieldAfterClaimsForTests, createNotificationMonitorForTests, navigateDesktopUnreadForTests, searchAuthorizeForTests, readSearchUnreadForTests, traceForTests, createSession = o => new DesktopSession(o), listThreads = listDesktopThreads, readHistory = readRolloutHistory, canRecoverHistory = readHistory === readRolloutHistory ? isRecoverableHistoryThread : async (id, options) => (await readHistory(id, options))?.id === id, recordedHistoryPager, retryMs = 2000, heartbeatTimeoutMs = 55000, allowInsecureForTests = false }) {
   const target = new URL(url);
   if ((target.protocol !== 'wss:' && !(allowInsecureForTests && target.protocol === 'ws:' && target.hostname === '127.0.0.1')) || target.pathname !== '/connector' || target.search || target.hash || target.username || target.password) throw new Error('WSS connector URL required');
   if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) throw new Error('Connector secret must be at least 32 bytes');
   if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 1) throw new Error('Invalid heartbeat timeout');
-  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests || navigateDesktopUnreadForTests || searchAuthorizeForTests || readSearchUnreadForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
+  if ((createUploadContext || imageValidator || filePreviewHelper || sidebarStatusForTests || threadListChangesForTests || schedulerLimitForTests || onSidebarRetryForTests || yieldAfterClaimsForTests || recordedHistoryPager || createNotificationMonitorForTests || navigateDesktopUnreadForTests || searchAuthorizeForTests || readSearchUnreadForTests || traceForTests) && !allowInsecureForTests) throw new Error('Test overrides are unavailable');
+  if (traceForTests !== undefined && typeof traceForTests !== 'function') throw new TypeError('invalid trace override');
+  const trace = traceForTests || productionTrace;
   const streams = new Map(), writes = new Set(), sentRevisions = new Map(), modeRevisions = new Map(), answeredRequests = new Set(), imageTimers = new Map(), uploadChecks = new Set(); let ws, scheduler, timer, stopped = false, shuttingDown = false, activeMutations = 0;
   const mutationTypes = new Set(['desktop-read', 'notification-read', 'recover-chat', 'cancel-unseen-recovery', 'prepare-chat', 'submit-chat', 'create-chat', 'model-cancel', 'model', 'mode', 'thread-action', 'stop', 'user-input', 'approve', 'write', 'upload', 'cancel-upload']);
   let desktopNavigationPending = null, desktopNavigationWaiting = null;
@@ -814,13 +818,15 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         const answer = beginWrite(msg);
         if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || !['string', 'number'].includes(typeof msg.requestId)) return answer('unavailable');
         const session = [...streams.values()].find(s => s.status === 'ready' && s.value?.id === id && s.uploadDeviceId === msg.deviceId);
-        if (!session || writes.has(id)) return answer('unavailable');
+        const questionKind = msg.asyncQuestion === true ? 'async' : 'native';
+        const reportInput = (outcome, reason) => trace('user-input', 'outcome', { thread: id, kind: questionKind, outcome, reason });
+        if (!session || writes.has(id)) { reportInput('unavailable', session ? 'write-pending' : 'session-unavailable'); return answer('unavailable'); }
         const requestKey = JSON.stringify([id, session.conversation?.ownerId, msg.requestId]);
-        if (answeredRequests.has(requestKey) || answeredRequests.size >= 4096) return answer('unavailable');
+        if (answeredRequests.has(requestKey) || answeredRequests.size >= 4096) { reportInput('unavailable', answeredRequests.has(requestKey) ? 'already-attempted' : 'guard-capacity'); return answer('unavailable'); }
         answeredRequests.add(requestKey);
         writes.add(id);
-        try { if (msg.asyncQuestion === true) await session.replyAsyncQuestions(msg.requestId, msg.answers); else await session.replyUserInput(msg.requestId, msg.answers); answer('accepted'); }
-        catch (error) { if (['unavailable', 'unsupported-state'].includes(error?.code)) { answeredRequests.delete(requestKey); answer('unavailable'); } else answer('unknown'); }
+        try { if (msg.asyncQuestion === true) await session.replyAsyncQuestions(msg.requestId, msg.answers); else await session.replyUserInput(msg.requestId, msg.answers); reportInput('accepted', 'completed'); answer('accepted'); }
+        catch (error) { if (['unavailable', 'unsupported-state'].includes(error?.code)) { answeredRequests.delete(requestKey); reportInput('unavailable', 'session-rejected'); answer('unavailable'); } else { reportInput('unknown', 'dispatch-unknown'); answer('unknown'); } }
         finally { writes.delete(id); }
         return;
       }
@@ -850,9 +856,13 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         if (models?.isLocked(id)) return rejectWrite('model-locked');
         if (recoveryLocked(id)) return rejectWrite('recovery-locked');
         const previous = sentRevisions.get(id);
-        if (previous && previous.ownerId === ownerId && previous.revision >= revision) return rejectWrite('revision-guard');
+        if (previous && previous.ownerId === ownerId && previous.revision >= revision && !(previous.outcome === 'accepted' && confirmedUserOperation(session.value, id, previous.operationId))) {
+          trace('write', 'revision-guard-detail', { thread: id, previousRevision: previous.revision, currentRevision: revision, priorOutcome: previous.outcome });
+          return rejectWrite('revision-guard');
+        }
         if (!previous && sentRevisions.size >= 1024) return rejectWrite('guard-capacity');
-        writes.add(id); sentRevisions.set(id, { ownerId, revision });
+        const operationId = randomUUID();
+        writes.add(id); sentRevisions.set(id, { ownerId, revision, operationId, outcome: 'dispatching' });
         const claimed = []; let submitted = false, finishClaims;
         try {
           if (attachmentIds.length) {
@@ -874,11 +884,13 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
               for (const item of claimed) await item.store.discardRejected(item.scope).catch(() => {});
               sentRevisions.delete(id); return;
             }
-            submitted = true; finishClaims(); finishClaims = undefined; await session.sendAttachments(msg.text, files);
-          } else { submitted = true; await session.sendText(msg.text); }
+            submitted = true; finishClaims(); finishClaims = undefined; await session.sendAttachments(msg.text, files, { clientUserMessageId: operationId });
+          } else { submitted = true; await session.sendText(msg.text, { clientUserMessageId: operationId }); }
+          sentRevisions.get(id).outcome = 'accepted';
+          trace('write', 'outcome', { thread: id, revision, outcome: 'accepted' });
           answer('accepted');
         }
-        catch (error) { if (!submitted || ['unavailable', 'unsupported-state'].includes(error?.code)) { for (const item of claimed) await item.store.discardRejected(item.scope).catch(() => {}); sentRevisions.delete(id); if (submitted) trace('write', 'session-rejected-detail', { thread: id, code: ['unavailable', 'unsupported-state'].includes(error?.code) ? error.code : 'other', reason: ['session-not-ready', 'owner-missing', 'cwd-invalid', 'runtime-turn-mismatch', 'owner-changed', 'state-changed-before-write'].includes(error?.reason) ? error.reason : 'other', ...(error?.reason === 'runtime-turn-mismatch' ? { runtime: error.runtime, activeTurnCount: error.activeTurnCount } : {}) }); rejectWrite(submitted ? 'session-rejected' : 'pre-dispatch'); } else answer('unknown'); }
+        catch (error) { if (!submitted || ['unavailable', 'unsupported-state'].includes(error?.code)) { for (const item of claimed) await item.store.discardRejected(item.scope).catch(() => {}); sentRevisions.delete(id); if (submitted) trace('write', 'session-rejected-detail', { thread: id, code: ['unavailable', 'unsupported-state'].includes(error?.code) ? error.code : 'other', reason: ['session-not-ready', 'owner-missing', 'cwd-invalid', 'runtime-turn-mismatch', 'owner-changed', 'state-changed-before-write'].includes(error?.reason) ? error.reason : 'other', ...(error?.reason === 'runtime-turn-mismatch' ? { runtime: error.runtime, activeTurnCount: error.activeTurnCount } : {}) }); rejectWrite(submitted ? 'session-rejected' : 'pre-dispatch'); } else { sentRevisions.get(id).outcome = 'unknown'; trace('write', 'outcome', { thread: id, revision, outcome: 'unknown' }); answer('unknown'); } }
         finally { finishClaims?.(); writes.delete(id); }
         return;
       }

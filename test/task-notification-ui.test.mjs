@@ -46,7 +46,7 @@ async function fixture(options = {}) {
     localStorage: options.localStorage ?? { getItem() { return null; }, removeItem() {}, setItem() {} }, sessionStorage: { removeItem() {} }, store: { read: async () => null },
     fetch: options.fetch ?? (async () => { throw new Error('This interaction fixture must not make a network request'); }),
   });
-  const source = (await readFile(new URL(options.snapshot ? '../public/h5/v1.0.2-activity1/desktop.js' : '../public/desktop.js', import.meta.url), 'utf8')).replace(/import\('(?:\/h5\/v1\.0\.2-activity1)?\/recovery-attempt-store\.js'\)\.then\(module => module\.createRecoveryAttemptStore\(\)\)/, 'Promise.resolve(store)');
+  const source = (await readFile(new URL(options.snapshot ? '../public/h5/v1.0.2-unread1/desktop.js' : '../public/desktop.js', import.meta.url), 'utf8')).replace(/import\('(?:\/h5\/v1\.0\.2-unread1)?\/recovery-attempt-store\.js'\)\.then\(module => module\.createRecoveryAttemptStore\(\)\)/, 'Promise.resolve(store)');
   const run = code => vm.runInContext(code, context);
   run(source);
   const settingsPanel = nodes.get('#settings-panel'), settingsOverlay = nodes.get('#settings-overlay');
@@ -59,12 +59,50 @@ async function fixture(options = {}) {
   render(data);
   const row = id => nodes.get('#project-list').querySelectorAll('.task').find(node => node.dataset.id === id);
   const group = () => run("projectStatusGroups.get('project:fixture-project')");
-  return { run, window, document, nodes, row, group, data, render, settingsCalls, presence,
+  return { run, window, document, nodes, row, group, data, render, settingsCalls, presence, timers,
     notify: value => window.acceptTaskNotification(value),
     key(key, extra = {}) { const event = { key, preventDefault() { this.prevented = true; }, ...extra }; for (const listener of documentListeners.get('keydown') || []) listener(event); return event; },
     visibility(hidden) { document.hidden = hidden; for (const listener of documentListeners.get('visibilitychange') || []) listener(); },
   };
 }
+
+for (const snapshot of [false, true]) test(`initial unread waits for task status and preserves unknown reminders (${snapshot ? 'versioned' : 'source'})`, async () => {
+  const f = await fixture({ snapshot });
+  f.run('historyScopeGeneration++; initialReminderStatusGeneration = -1');
+  f.data.projects[0].threads[1].status = 'unknown';
+  f.render(f.data);
+  const dot = f.nodes.get('#open-sidebar').querySelector('.sidebar-notification');
+  f.notify(notification(b, 'completed'));
+  assert.equal(dot.hidden, true, 'unknown startup status does not flash an unread dot');
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+  assert.ok(f.run(`visibleStatusIds().includes('${b}')`), 'unread tasks are prioritized even while the sidebar is closed');
+  f.run(`acceptSidebarStatuses({'${b}':'active'})`);
+  assert.equal(dot.hidden, true, 'confirmed running clears the old completion');
+  assert.equal(f.run(`taskNotifications.has('${b}')`), false);
+  f.notify(notification(b, 'question', { eventId: 'new-question' }));
+  assert.equal(dot.hidden, false, 'questions do not wait for a status check');
+  assert.equal(dot.textContent, ''); assert.equal(dot.dataset.kind, 'completed');
+
+  const unknown = await fixture({ snapshot });
+  unknown.run('historyScopeGeneration++; initialReminderStatusGeneration = -1');
+  unknown.data.projects[0].threads[1].status = 'unknown'; unknown.render(unknown.data);
+  unknown.notify(notification(b, 'completed'));
+  const unknownDot = unknown.nodes.get('#open-sidebar').querySelector('.sidebar-notification');
+  assert.equal(unknownDot.hidden, true);
+  const timeout = [...unknown.timers.values()].find(timer => timer.ms === 4000);
+  assert.ok(timeout); timeout.fn();
+  assert.equal(unknownDot.hidden, false, 'unavailable status cannot permanently hide unread');
+  assert.equal(unknownDot.textContent, '');
+
+  const changed = await fixture({ snapshot });
+  changed.run('historyScopeGeneration++; initialReminderStatusGeneration = -1');
+  changed.data.projects[0].threads[1].status = 'unknown'; changed.render(changed.data);
+  const oldTimeout = [...changed.timers.values()].find(timer => timer.ms === 4000);
+  changed.run('historyScopeGeneration++'); changed.render(changed.data);
+  changed.notify(notification(b, 'completed'));
+  oldTimeout.fn();
+  assert.equal(changed.nodes.get('#open-sidebar').querySelector('.sidebar-notification').hidden, true, 'old pairing cannot release a new pairing status check');
+});
 
 test('only exact-pair known tasks accept valid foreground reminder events; the visible current task stays quiet', async () => {
   const f = await fixture();
@@ -75,7 +113,7 @@ test('only exact-pair known tasks accept valid foreground reminder events; the v
   assert.equal(f.notify(notification(b, 'question')), true);
   const marker = f.row(b).querySelector('.task-notification');
   assert.equal(marker.hidden, false); assert.equal(marker.textContent, '待回答'); assert.equal(marker.getAttribute('aria-label'), '待回答');
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '');
 });
 
 test('a visible task records the exact receipt before a late push can restore it, without clearing a newer event', async () => {
@@ -150,10 +188,10 @@ test('folded directories aggregate reminders, expanded directories show task ind
 
 test('reminders survive authoritative list redraws but are removed when the task leaves the list or the pairing changes', async () => {
   const f = await fixture(); f.notify(notification(b)); f.notify(notification(c, 'question'));
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '2');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '');
   f.render(f.data); assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
   f.render({ ...f.data, recent: [] });
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '');
   f.run('invalidateDeviceState()');
   assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').hidden, true);
   assert.equal(f.notify(notification(b)), false, 'events from the former device cannot survive invalidation');
@@ -185,7 +223,7 @@ test('restoring persisted task reminders uses the authoritative current list and
   await f.window.restoreTaskReminders();
   assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
   assert.equal(f.row(a).querySelector('.task-notification').textContent, '待回答');
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '2');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '');
   let release;
   f.window.taskReminderStore.list = () => new Promise(resolve => { release = resolve; });
   const pending = f.window.restoreTaskReminders(); f.run('invalidateDeviceState()');
@@ -597,7 +635,7 @@ test('native unread displays once, clears instantly on click and only returns af
   assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
   assert.equal(f.row(b).querySelector('.task-notification').getAttribute('aria-label'), '有未读消息');
   const completion = notification(b); f.notify(completion);
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1', 'native and completion reminders count one task');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '', 'native and completion reminders count one task');
   // A generic unread alone uses the native-read route.
   await f.window.clearTaskNotificationEvent(completion);
   f.row(b).click();
@@ -799,11 +837,11 @@ for (const snapshot of [false, true]) test(`returning to a selected task clears 
   const other = notification(b, 'completed', { createdAt: 101 });
   f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent(pair, event) { removals.push(event); }, async list() { return [current, other]; } };
   f.visibility(true); f.notify(current); f.notify(other);
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '2');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '');
   f.visibility(false); await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.row(a).querySelector('.task-notification').hidden, true);
   assert.equal(f.row(b).querySelector('.task-notification').hidden, false);
-  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '1');
+  assert.equal(f.nodes.get('#open-sidebar').querySelector('.sidebar-notification').textContent, '');
   assert.equal(removals.filter(event => event.eventId === current.eventId).length, 1);
   assert.equal(requests.filter(item => item.url === '/api/notifications/read').length, 1);
   await f.window.restoreTaskReminders();
