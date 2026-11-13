@@ -21,7 +21,7 @@ test('versioned H5 serves only manifest-pinned fixed assets with the existing CS
     for (const path of ['/h5-bootstrap.mjs', '/h5-version-entry.mjs', '/h5-bootstrap.css']) {
       const asset = await get(path); assert.equal(asset.status, 200, path); assert.equal(asset.headers['content-security-policy'], root.headers['content-security-policy']);
     }
-    for (const version of ['v1.0.1', 'v1.0.2', 'v1.0.2-activity1', 'v1.0.2-unread1']) {
+    for (const version of ['v1.0.1', 'v1.0.2', 'v1.0.2-activity1', 'v1.0.2-unread1', 'v1.0.2-readsync1']) {
       const manifest = JSON.parse(await readFile(new URL(`../public/h5/${version}/manifest.json`, import.meta.url), 'utf8'));
       for (const name of Object.keys(manifest.assets)) {
         const res = await get(`/h5/${version}/${name}`);

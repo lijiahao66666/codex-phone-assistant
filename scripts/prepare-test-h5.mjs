@@ -42,7 +42,7 @@ await Promise.all([
   writeFile(resolve(outputRoot, 'h5-bootstrap.html'), decorate(bootstrap)),
   writeFile(resolve(outputRoot, 'desktop.css'), css + cssOverlay),
   writeFile(resolve(outputRoot, 'manifest.webmanifest'), JSON.stringify(manifest) + '\n'),
-  ...['v1.0.1', 'v1.0.2', 'v1.0.2-activity1', 'v1.0.2-unread1'].map(async version => {
+  ...['v1.0.1', 'v1.0.2', 'v1.0.2-activity1', 'v1.0.2-unread1', 'v1.0.2-readsync1'].map(async version => {
     const [versionHtml, versionCss, rawVersionManifest] = await Promise.all([readPublic(`h5/${version}/desktop.html`), readPublic(`h5/${version}/desktop.css`), readPublic(`h5/${version}/manifest.json`)]);
     const destination = resolve(outputRoot, 'h5', version); await mkdir(destination, { recursive: true });
     const versionManifest = JSON.parse(rawVersionManifest);

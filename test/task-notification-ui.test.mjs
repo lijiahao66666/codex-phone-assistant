@@ -46,7 +46,7 @@ async function fixture(options = {}) {
     localStorage: options.localStorage ?? { getItem() { return null; }, removeItem() {}, setItem() {} }, sessionStorage: { removeItem() {} }, store: { read: async () => null },
     fetch: options.fetch ?? (async () => { throw new Error('This interaction fixture must not make a network request'); }),
   });
-  const source = (await readFile(new URL(options.snapshot ? '../public/h5/v1.0.2-unread1/desktop.js' : '../public/desktop.js', import.meta.url), 'utf8')).replace(/import\('(?:\/h5\/v1\.0\.2-unread1)?\/recovery-attempt-store\.js'\)\.then\(module => module\.createRecoveryAttemptStore\(\)\)/, 'Promise.resolve(store)');
+  const source = (await readFile(new URL(options.snapshot ? '../public/h5/v1.0.2-readsync1/desktop.js' : '../public/desktop.js', import.meta.url), 'utf8')).replace(/import\('(?:\/h5\/v1\.0\.2-readsync1)?\/recovery-attempt-store\.js'\)\.then\(module => module\.createRecoveryAttemptStore\(\)\)/, 'Promise.resolve(store)');
   const run = code => vm.runInContext(code, context);
   run(source);
   const settingsPanel = nodes.get('#settings-panel'), settingsOverlay = nodes.get('#settings-overlay');
@@ -592,16 +592,36 @@ test('quick task and pair switches cancel pending desktop reads, and an old clea
 });
 
 
-test('unknown or offline Desktop capability does not delay local reads', async () => {
+test('capability becoming ready synchronizes only the still-open user selection', async () => {
   const requests = [];
   const f = await fixture({ unknownDesktopRead: true, fetch: async (url, request) => { requests.push(request); return { ok: true }; } });
   const event = notification(b, 'completed', { createdAt: 100 });
   f.window.taskReminderStore = { async put() {}, async remove() {}, async removeEvent() {}, async list() { return [event]; } };
   await f.window.restoreTaskReminders(); f.row(b).click();
   assert.equal(requests.length, 0); assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
-  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true); f.row(b).click();
-  assert.equal(requests.length, 1, 'a later user click can retry after Desktop becomes available');
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  assert.equal(requests.length, 1, 'capability discovery resumes the user selection without another click');
   f.row(a).click(); await f.window.restoreTaskReminders();
+  assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
+});
+
+test('late capability and native unread updates do not navigate after switching tasks', async () => {
+  const requests = [];
+  const f = await fixture({ unknownDesktopRead: true, fetch: async url => { requests.push(url); return { ok: true }; } });
+  f.notify(notification(b)); f.row(b).click(); f.row(c).click();
+  f.window.setDesktopNotificationReadReady({ hostId, deviceId }, true);
+  const list = { ...f.data, nativeUnread: { status: 'available', scopeKey: 'a'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b ? { ...task, unread: true } : task) }] };
+  f.render(list);
+  assert.equal(requests.length, 0, 'a stale selection cannot navigate Desktop');
+});
+
+test('user selection navigates Desktop once when native unread state arrives late', async () => {
+  const requests = [];
+  const f = await fixture({ fetch: async url => { requests.push(url); return { ok: true }; } });
+  f.notify(notification(b)); f.row(b).click();
+  const list = { ...f.data, nativeUnread: { status: 'available', scopeKey: 'a'.repeat(64) }, projects: [{ ...f.data.projects[0], threads: f.data.projects[0].threads.map(task => task.id === b ? { ...task, unread: true } : task) }] };
+  f.render(list); f.render(list);
+  assert.equal(requests.filter(url => url === `/api/threads/${b}/desktop-read`).length, 1);
   assert.equal(f.row(b).querySelector('.task-notification').hidden, true);
 });
 

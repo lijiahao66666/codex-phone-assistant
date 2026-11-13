@@ -2777,9 +2777,15 @@ function updateNativeUnread(data, listGeneration) {
     for (const id of nativeUnread.keys()) if (!listed.has(id)) nativeUnread.delete(id);
   }
   let changed = false;
+  let selectedNativeRead = null;
   for (const task of tasks) {
     if (!uuid.test(task?.id || '')) continue;
     nativeUnread.set(task.id, task.unread === true);
+    const selection = foregroundTaskRead;
+    if (selection?.source === 'selection' && selection.pendingNativeRead === true && selection.threadId === task.id && selection.generation === historyScopeGeneration && selectedId === task.id && document.hidden !== true && !pageSuspended && !newDraft) {
+      selection.pendingNativeRead = false;
+      if (task.unread === true) selectedNativeRead = task.id;
+    }
     if (task.unread === true && !nativeUnreadSuppressed.has(task.id) && selectedId === task.id && (connected || foregroundTaskRead?.source === 'return' && foregroundTaskRead.threadId === task.id && foregroundTaskRead.generation === historyScopeGeneration && (!foregroundTaskRead.nativeScope || foregroundTaskRead.nativeScope === nativeUnreadScope)) && !newDraft && document.hidden !== true && !pageSuspended) {
       nativeUnreadSuppressed.delete(task.id); nativeUnreadSuppressed.add(task.id);
       nativeUnreadSuppressedAfter.set(task.id, listGeneration);
@@ -2789,6 +2795,7 @@ function updateNativeUnread(data, listGeneration) {
     if (task.unread !== true && listGeneration > (nativeUnreadSuppressedAfter.get(task.id) ?? -1) && nativeUnreadSuppressed.delete(task.id)) { nativeUnreadSuppressedAfter.delete(task.id); changed = true; }
   }
   if (changed) saveNativeUnreadSuppressed();
+  if (selectedNativeRead) requestNativeUnreadRead(selectedNativeRead);
 }
 function nativeUnreadVisible(id) { return nativeUnreadAvailable && nativeUnread.get(id) === true && !nativeUnreadSuppressed.has(id); }
 function taskReminder(id) { return taskNotifications.get(id) || (nativeUnreadVisible(id) ? { kind: 'completed', native: true } : null); }
@@ -2827,6 +2834,10 @@ window.setDesktopNotificationReadReady = (pair, ready, supported) => {
   const required = ready === true || supported === true || same && desktopNotificationReadScope.confirmed === true
     ? true : supported === false ? false : same ? desktopNotificationReadScope.required : true;
   desktopNotificationReadScope = { ...pair, ready: ready === true, required, confirmed: ready === true || supported === true || same && desktopNotificationReadScope.confirmed === true };
+  // A user may have opened the task before capability discovery completed.
+  // Resume only that still-visible selection, never a later task or pairing.
+  const pending = pendingDesktopNotificationReads.get(selectedId), current = taskNotifications.get(selectedId);
+  if (ready === true && pending && (!current || current.eventId === pending.eventId) && foregroundTaskRead?.source === 'selection' && foregroundTaskRead.generation === historyScopeGeneration && foregroundTaskRead.threadId === selectedId && document.hidden !== true && !pageSuspended && !newDraft) requestDesktopNotificationRead(selectedId);
 };
 function needsDesktopNotificationRead(id) { return desktopNotificationReadRequired() && taskNotifications.get(id)?.kind === 'completed'; }
 function retainsDesktopNotification(notification) { return needsDesktopNotificationRead(notification.threadId) && taskNotifications.get(notification.threadId)?.eventId === notification.eventId; }
@@ -3096,7 +3107,7 @@ function renderTask(task, { navigateDesktop = true } = {}) {
   renderTaskNotification(notificationIndicator, taskReminder(task.id), reminderStatus(task.id, observedStatus), task.id);
   button.append(notificationIndicator);
   setTaskIndicator(indicator, liveTaskStatus.get(task.id) === 'active' ? 'active' : statusHandovers.has(task.id) ? 'checking' : observedStatus);
-  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (historyScope && document.hidden !== true && !pageSuspended) foregroundTaskRead = { threadId: task.id, generation: historyScopeGeneration, source: 'selection' }; cancelDesktopNotificationReads(task.id); cancelNativeUnreadReads(task.id); const completionRead = needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id); const nativeRead = nativeUnreadAvailable && nativeUnread.get(task.id) === true; if (nativeRead) requestNativeUnreadRead(task.id, { navigate: navigateDesktop }); if (completionRead) requestDesktopNotificationRead(task.id, { navigate: navigateDesktop && !nativeRead }); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
+  button.addEventListener('click', () => { const selectionStarted = connectionDiagnosticClock(); if (newDraft?.pending || newDraft?.uncertain || newDraft?.prepared) { sendStatus.textContent = '请先处理当前发送'; return; } if (historyScope && document.hidden !== true && !pageSuspended) foregroundTaskRead = { threadId: task.id, generation: historyScopeGeneration, source: 'selection', pendingNativeRead: navigateDesktop && (!nativeUnreadAvailable || !nativeUnread.has(task.id)) }; cancelDesktopNotificationReads(task.id); cancelNativeUnreadReads(task.id); const completionRead = needsDesktopNotificationRead(task.id) || !taskNotifications.has(task.id) && pendingDesktopNotificationReads.has(task.id); const nativeRead = nativeUnreadAvailable && nativeUnread.get(task.id) === true; if (nativeRead) requestNativeUnreadRead(task.id, { navigate: navigateDesktop }); if (completionRead) requestDesktopNotificationRead(task.id, { navigate: navigateDesktop && !nativeRead }); else clearTaskNotification(task.id, true); if (newDraft) savedNewDraft = { deviceId: currentDeviceId, projectId: newDraft.projectId, text: messageInput.value, attachments: newDraft.attachments, model: newDraft.model, effort: newDraft.effort }; newDraft = null; newProjectBar.hidden = true; if (selectedId === task.id && active && !active.signal.aborted) { showSidebar(false); window.refreshNotificationPresence?.(); return; } const previous = selectedId; if (previous) { drafts.set(previous, messageInput.value); if (previous !== task.id) { beginStatusHandover(previous); activeRecoveryAborts.get(recoveryKey(currentDeviceId, previous))?.abort(); } } selectedId = task.id; selectedTitle = task.title || '未命名任务'; messageInput.value = drafts.get(selectedId) || ''; renderImageDraft(); updateComposer(); currentProject.hidden = !threadProjectNames.has(selectedId); currentProject.disabled = true; if (threadProjectNames.has(selectedId)) currentProject.value = threadProjectNames.get(selectedId); for (const item of projectList.querySelectorAll('.task')) { const selected = item.dataset.id === selectedId; item.setAttribute('aria-current', String(selected)); } showSidebar(false); clearConversation(); status('连接中', 'connecting'); scheduleThreadConnect(task.id, beginConnectionDiagnostic('selection', selectionStarted)); if (statusHandovers.has(previous)) { clearTimeout(visibleStatusTimer); visibleStatusTimer = undefined; void loadThreads(); } });
   return button;
 }
 function renderGroup(key, name, tasks, recent = false, initialExpanded = recent) {
