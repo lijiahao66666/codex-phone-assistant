@@ -62,6 +62,14 @@ test('initial snapshot is baseline; live task completion emits once and releases
   } finally { await f.monitor.close(); }
 });
 
+test('an active goal keeps a completed stage active until the goal ends', () => {
+  const runningGoal = { threadId, objective: 'finish the project', status: 'active' };
+  const stage = taskNotificationSummary({ ...state(threadId, turn('stage', 'completed'), [], false), threadGoal: runningGoal });
+  assert.equal(stage.status, 'completed'); assert.equal(stage.goalStatus, 'active'); assert.equal(stage.active, true);
+  const finished = taskNotificationSummary({ ...state(threadId, turn('stage', 'completed'), [], false), completedThreadGoal: { ...runningGoal, status: 'complete' } });
+  assert.equal(finished.goalStatus, 'complete'); assert.equal(finished.active, false);
+});
+
 test('activity-only probes discover older owners on demand and release even active followers', async () => {
   const older = randomUUID(), f = fixture({ activityProbes: true, initialProbeLimit: 1 });
   f.rows.push({ id: older, recency: 0 }); f.monitor.start(); await flush();

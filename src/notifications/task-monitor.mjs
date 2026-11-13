@@ -121,8 +121,10 @@ export function taskNotificationSummary(state) {
   for (const control of questions.controls) controls.set(control.eventId, control);
   const turnId = validId(turn?.turnId) ? turn.turnId : null;
   const status = typeof turn?.status === 'string' ? turn.status : 'unknown';
-  const active = state.threadRuntimeStatus?.type === 'active' || status === 'inProgress' || controls.size > 0;
-  return { turnId, status, startedAt: Number.isSafeInteger(turn?.turnStartedAtMs) ? turn.turnStartedAtMs : null, active, controls: [...controls.values()].sort((a, b) => a.eventId.localeCompare(b.eventId)), resolvedAsyncControls: questions.resolved };
+  const goal = state.threadGoal?.threadId === state.id ? state.threadGoal : state.completedThreadGoal?.threadId === state.id ? state.completedThreadGoal : null;
+  const goalStatus = ['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'].includes(goal?.status) ? goal.status : null;
+  const active = state.threadRuntimeStatus?.type === 'active' || status === 'inProgress' || goalStatus === 'active' || controls.size > 0;
+  return { turnId, status, goalStatus, startedAt: Number.isSafeInteger(turn?.turnStartedAtMs) ? turn.turnStartedAtMs : null, active, controls: [...controls.values()].sort((a, b) => a.eventId.localeCompare(b.eventId)), resolvedAsyncControls: questions.resolved };
 }
 
 function isAsyncControl(eventId) {
@@ -473,7 +475,8 @@ export class TaskNotificationMonitor {
       for (const control of summary.controls) if (!priorControls.has(control.eventId) && !record.emittedControls?.has(control.eventId)) this.#event(id, control);
       const observedCompletion = summary.turnId === previous.turnId && previous.status === 'inProgress';
       const newCompletedTurn = summary.turnId !== previous.turnId && summary.startedAt !== null && summary.startedAt >= previouslyObservedAt;
-      if (summary.turnId && !summary.controls.length && !record.emittedControls?.size && record.questionTurnId !== summary.turnId && summary.status === 'completed' && (observedCompletion || newCompletedTurn)) this.#event(id, { kind: 'completed', eventId: eventKey('completed', id, summary.turnId) });
+      const goalFinished = summary.goalStatus !== 'active' && previous.goalStatus !== 'active';
+      if (summary.turnId && goalFinished && !summary.controls.length && !record.emittedControls?.size && record.questionTurnId !== summary.turnId && summary.status === 'completed' && (observedCompletion || newCompletedTurn)) this.#event(id, { kind: 'completed', eventId: eventKey('completed', id, summary.turnId) });
     }
     record.forceBaseline = false; record.liveAfter = null;
     if (!summary.active || this.activityProbes) { this.#release(id); this.#pump(); }
