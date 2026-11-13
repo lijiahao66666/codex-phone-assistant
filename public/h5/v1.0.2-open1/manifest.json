@@ -1,6 +1,6 @@
 {
   "version": "v1.0.2-open1",
-  "sourceRef": "v1.0.2 + activity, unread and desktop read sync patches",
+  "sourceRef": "v1.0.2 + activity, unread and local-only reminder state",
   "assets": {
     "app-icon.png": {
       "sha256": "0bbf12f14f23295737d55ad60e3a23ca9389dacb4755ec6e18745ee1aad61bab",
@@ -15,12 +15,12 @@
       "bytes": 69544
     },
     "desktop.html": {
-      "sha256": "9f6d5e607d05d31ee3da4c60ce3dd396e71a5bb6f74055e5bbeecabb3de9dd9b",
-      "bytes": 13934
+      "sha256": "029932a6bd887437448389ee4b4dfb494a92cc72c03970613956ea7507fbe4b8",
+      "bytes": 13972
     },
     "desktop.js": {
-      "sha256": "07176a980ffd3adb9a8ad42aa4e1a884764efe3288525ab6826d7d1a0e079711",
-      "bytes": 354350
+      "sha256": "2a2e3912219ce0c2ae97a196cd426574ca5cbd682396c34af021c0704bf4e41e",
+      "bytes": 354743
     },
     "html-sanitizer.js": {
       "sha256": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31",

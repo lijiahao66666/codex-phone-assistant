@@ -1203,6 +1203,8 @@ const drafts = new Map();
 const imageDrafts = new Map();
 let imageUploadAvailable = false;
 let desktopOpenAvailable = false;
+// H5 and Desktop keep independent unread state in this version.
+const crossDeviceUnreadSyncEnabled = false;
 let uploadCompression = null;
 let uploadConcurrency = 1;
 let imageChunkBytes = 128 * 1024;
@@ -1223,7 +1225,7 @@ async function loadCapabilities() {
     const response = await scopedFetch('/api/capabilities', { credentials: 'same-origin', cache: 'no-store' });
     const data = response.ok ? await response.json() : null;
     if (generation !== historyScopeGeneration) return;
-    desktopOpenAvailable = data?.desktopOpen === true;
+    desktopOpenAvailable = crossDeviceUnreadSyncEnabled && data?.desktopOpen === true;
     imageUploadAvailable = data?.imageUpload === true && [128 * 1024, 512 * 1024].includes(data?.imageChunkBytes) && data?.maxImageBytes === 20 * 1024 * 1024;
     imageChunkBytes = imageUploadAvailable ? data.imageChunkBytes : 128 * 1024;
     uploadCompression = data?.uploadCompression === 'gzip' ? 'gzip' : null;
@@ -2784,6 +2786,7 @@ function clearNativeUnreadState() {
   nativeUnreadReads.clear(); nativeUnread.clear(); nativeUnreadSuppressedAfter.clear(); nativeUnreadScope = null; nativeUnreadAvailable = false; nativeUnreadSuppressed = new Set();
 }
 function updateNativeUnread(data, listGeneration) {
+  if (!crossDeviceUnreadSyncEnabled) { clearNativeUnreadState(); return; }
   const scope = data?.nativeUnread?.scopeKey;
   if (!historyScope || data?.nativeUnread?.status !== 'available' || !/^[a-f0-9]{64}$/.test(scope || '')) { nativeUnreadAvailable = false; cancelNativeUnreadReads(); return; }
   if (nativeUnreadScope !== scope) {
@@ -2820,7 +2823,7 @@ function updateNativeUnread(data, listGeneration) {
 function nativeUnreadVisible(id) { return nativeUnreadAvailable && nativeUnread.get(id) === true && !nativeUnreadSuppressed.has(id); }
 function taskReminder(id) { return taskNotifications.get(id) || (nativeUnreadVisible(id) ? { kind: 'completed', native: true } : null); }
 function requestNativeUnreadRead(id, { navigate = true } = {}) {
-  if (!historyScope || !nativeUnreadAvailable || !nativeUnreadScope || nativeUnread.get(id) !== true) return;
+  if (!crossDeviceUnreadSyncEnabled || !historyScope || !nativeUnreadAvailable || !nativeUnreadScope || nativeUnread.get(id) !== true) return;
   nativeUnreadSuppressed.delete(id); nativeUnreadSuppressed.add(id);
   nativeUnreadSuppressedAfter.set(id, listRequestGeneration);
   if (nativeUnreadSuppressed.size > 512) nativeUnreadSuppressed.delete(nativeUnreadSuppressed.values().next().value);
@@ -2841,6 +2844,7 @@ function requestNativeUnreadRead(id, { navigate = true } = {}) {
 }
 let desktopNotificationReadScope = null;
 function desktopNotificationReadRequired() {
+  if (!crossDeviceUnreadSyncEnabled) return false;
   if (!historyScope) return false;
   return !desktopNotificationReadScope || desktopNotificationReadScope.hostId !== historyScope.hostId || desktopNotificationReadScope.deviceId !== historyScope.deviceId || desktopNotificationReadScope.required !== false;
 }
@@ -2868,6 +2872,7 @@ function requestDesktopNotificationRead(id, { navigate = true } = {}) {
   const pair = { ...historyScope }, generation = historyScopeGeneration;
   // Reading on the phone is immediate; Desktop synchronization runs independently.
   trackTaskNotificationReceipt({ ...notification, ...pair, threadId: id }, window.clearTaskNotificationEvent({ ...notification, ...pair, threadId: id }, { exactOnly: true }));
+  if (!crossDeviceUnreadSyncEnabled) { pendingDesktopNotificationReads.delete(id); return; }
   if (!navigate) { pendingDesktopNotificationReads.delete(id); return; }
   pendingDesktopNotificationReads.set(id, notification);
   if (pendingDesktopNotificationReads.size > 512) pendingDesktopNotificationReads.delete(pendingDesktopNotificationReads.keys().next().value);
