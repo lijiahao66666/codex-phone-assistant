@@ -15,12 +15,12 @@
       "bytes": 69544
     },
     "desktop.html": {
-      "sha256": "cb28a480204c8e8fa5ff1861343277d65378c44f123ea2d20f1ec52278fb6386",
-      "bytes": 13940
+      "sha256": "8acc08fb3ec00940cd99c36e48365f6991874aaca0295e5371e89456537f2128",
+      "bytes": 13946
     },
     "desktop.js": {
-      "sha256": "5a6fb61d191292b4cb3ce3898cb4b4b17653a775c81616eacfefbfcee3ba2f01",
-      "bytes": 350914
+      "sha256": "c50ffb95ff09e0247148ce04786521572f7f21bd024097a8aac8c936b6d7e5f9",
+      "bytes": 350994
     },
     "html-sanitizer.js": {
       "sha256": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31",
@@ -83,8 +83,8 @@
       "bytes": 1396
     },
     "device-version-switch.mjs": {
-      "sha256": "62b4ba402e956bdd9e15fbb79439da12962b210e670289e5369ab89a0419a59c",
-      "bytes": 4533
+      "sha256": "f84706f3b8cccdc554d3bec335156b7fbdd040b3758b6a4390be74a04fa7dc64",
+      "bytes": 4535
     }
   },
   "sourceCommit": "fd0e549f6096ed31e936946ba69fc8222ece2fad",

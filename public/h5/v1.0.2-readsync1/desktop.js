@@ -533,7 +533,7 @@ cancelRecovery.hidden = true;
 recoveryControl.append(cancelRecovery);
 const recoveries = new Map();
 const recoveryChecks = new Map();
-const recoveryStorePromise = import('/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore());
+const recoveryStorePromise = import('/h5/v1.0.2-readsync1/recovery-attempt-store.js').then(module => module.createRecoveryAttemptStore());
 void recoveryStorePromise.catch(() => {});
 const recoveryChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('codex-phone-recovery-attempts') : null;
 let recoveryGuardedControls = [];
@@ -1451,7 +1451,7 @@ function addFileThumbnail(draft, holder, fallback) {
   const threadId = selectedId, newChatDraft = newDraft;
   if (!draft.previewPromise) {
     draft.previewController = new AbortController();
-    draft.previewPromise = (attachmentPreviewModule ||= import('/attachment-preview.mjs').catch(error => { attachmentPreviewModule = null; throw error; }))
+    draft.previewPromise = (attachmentPreviewModule ||= import('/h5/v1.0.2-readsync1/attachment-preview.mjs').catch(error => { attachmentPreviewModule = null; throw error; }))
       .then(module => module.createAttachmentPreview(draft.file, { signal: draft.previewController.signal }))
       .then(element => { if (!draft.disposed) draft.previewElement = element; })
       .catch(() => {});
@@ -3743,7 +3743,7 @@ async function readHistoryPage(response, signal, limits = {}) {
   if (!response.ok) throw new Error('history unavailable');
   if (!response.headers?.get?.('content-type')?.includes('application/x-ndjson')) return response.json();
   if (!response.body) throw new Error('history unavailable');
-  const { StateChunkAssembler } = await import('/state-chunks.mjs');
+  const { StateChunkAssembler } = await import('/h5/v1.0.2-readsync1/state-chunks.mjs');
   const assembler = new StateChunkAssembler(limits), reader = response.body.getReader(), decoder = new TextDecoder();
   let pending = '', result = null, complete = false;
   try {
@@ -4788,7 +4788,7 @@ async function connect(id, attempt = 0, preserveView = false, diagnostic = begin
           const line = /^data:\s*(.+)$/m.exec(block); if (!line) throw new Error('状态分片无效');
           const frame = JSON.parse(line[1]);
           if (frame.type === 'begin') diagnostic.mark('chunk-begin');
-          if (!assembler) { const { StateChunkAssembler } = await import('/state-chunks.mjs'); assembler = new StateChunkAssembler(); }
+          if (!assembler) { const { StateChunkAssembler } = await import('/h5/v1.0.2-readsync1/state-chunks.mjs'); assembler = new StateChunkAssembler(); }
           if (current.signal.aborted || active !== current) return;
           const assembled = await assembler.accept(frame);
           if (current.signal.aborted || active !== current) return;
