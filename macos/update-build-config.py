@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 
 def configuration(env):
-    version = env.get("CODEX_PHONE_APP_VERSION", "0.2.0")
+    version = env.get("CODEX_PHONE_APP_VERSION", "1.0.2")
     build = env.get("CODEX_PHONE_BUILD_VERSION", "3")
     previous = env.get("CODEX_PHONE_PREVIOUS_BUILD_VERSION", "2")
     if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
