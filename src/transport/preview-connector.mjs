@@ -394,7 +394,9 @@ export function createPreviewConnector({ url, secret, hostId, ownerRouter, model
         if (msg.enabled === true && !notificationMonitor && connection === ws && !shuttingDown) {
           notificationMonitor = (createNotificationMonitorForTests || (options => new TaskNotificationMonitor(options)))({ createSession, listThreads: listAuthorizedThreads,
             onEvent: event => { if (connection === ws && !shuttingDown) send({ type: 'task-notification', event }, connection); },
-            onClear: event => { if (connection === ws && !shuttingDown) send({ type: 'task-notification-clear', event }, connection); },
+            // Desktop reads do not acknowledge the phone's independent unread
+            // state. Resolved questions and approvals still clear their cards.
+            onClear: event => { if (event.reason !== 'desktop-read' && connection === ws && !shuttingDown) send({ type: 'task-notification-clear', event }, connection); },
             onHealth: health => { if (connection === ws) send({ type: 'notification-health', health }, connection); },
           }).start();
           threadListChanges?.on('change', refreshNativeReadReceipts); updateThreadListWatcher();

@@ -65,7 +65,7 @@ Intel Mac 当前未提供安装包。
 
 ## 手机端限制
 
-手机端是电脑版 Codex 的伴生界面。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入，目标信息目前只能查看。H5 暂时隐藏未读蓝点，跨端已读同步仍待改进。完整边界见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
+手机端是电脑版 Codex 的伴生界面。新建项目、目标操作、插件、Apps、MCP、Git 分支、worktree 和执行环境尚未接入，目标信息目前只能查看。手机和电脑各自维护未读状态，不相互同步。完整边界见 [手机端与 Codex 能力对照](../docs/CODEX-CAPABILITIES.md)。
 
 ## 检查更新
 

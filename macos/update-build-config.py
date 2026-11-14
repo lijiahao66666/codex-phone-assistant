@@ -10,8 +10,8 @@ from urllib.parse import urlsplit
 
 def configuration(env):
     version = env.get("CODEX_PHONE_APP_VERSION", "1.0.2")
-    build = env.get("CODEX_PHONE_BUILD_VERSION", "3")
-    previous = env.get("CODEX_PHONE_PREVIOUS_BUILD_VERSION", "2")
+    build = env.get("CODEX_PHONE_BUILD_VERSION", "58")
+    previous = env.get("CODEX_PHONE_PREVIOUS_BUILD_VERSION", "57")
     if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
         raise ValueError("CODEX_PHONE_APP_VERSION must contain two or three numeric components")
     if not re.fullmatch(r"[1-9][0-9]{0,3}", build) or not re.fullmatch(r"[1-9][0-9]{0,3}", previous):

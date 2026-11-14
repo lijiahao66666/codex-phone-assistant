@@ -52,6 +52,21 @@ test('connector advertises desktop-read and authorizes the listed thread before 
   } finally { await f.close(); }
 });
 
+test('desktop reads leave phone reminders intact while resolved controls still clear over the relay', async () => {
+  const f = await fixture();
+  try {
+    await f.enable();
+    const event = { threadId, eventId: 'completed-event', createdAt: Date.now() };
+    f.monitors[0].options.onClear({ ...event, reason: 'desktop-read' });
+    await f.barrier();
+    assert.equal(f.messages.some(message => message.type === 'task-notification-clear'), false);
+    const resolved = { ...event, eventId: 'question-event', reason: 'resolved' };
+    f.monitors[0].options.onClear(resolved);
+    await until(() => f.messages.some(message => message.type === 'task-notification-clear'));
+    assert.deepEqual(f.messages.filter(message => message.type === 'task-notification-clear').map(message => message.event), [resolved]);
+  } finally { await f.close(); }
+});
+
 test('notification monitoring keeps the shared watcher alive without a phone sidebar and detaches it on disable or disconnect', async () => {
   const watcher = Object.assign(new EventEmitter(), { running: false, starts: 0, stops: 0,
     start() { if (!this.running) { this.running = true; this.starts++; } },
